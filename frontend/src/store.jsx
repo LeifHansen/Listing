@@ -419,10 +419,24 @@ export function AppProvider({ children }) {
     // one synchronous write is the signed-out branch above, which clears the
     // bell exactly once per logout and cannot cascade (it depends only on
     // `user`, which it does not change).
+    //
+    // It skips while the tab is hidden and catches up on return, which the
+    // messages poll below already did and this one did not -- its own comment
+    // describes itself as "the same subscription shape as the notifications
+    // poll, with one addition". The reason is weaker here (this reads our own
+    // database, not a marketplace quota) but not absent: every backgrounded
+    // tab, and the native shell sitting in the app switcher, woke once a
+    // minute for a badge nobody was looking at. Coming back is now the thing
+    // that refreshes it, so the bell is no less current than before.
     loadNotifications();
     if (!user) return undefined;
-    const t = setInterval(loadNotifications, 60000);
-    return () => clearInterval(t);
+    const tick = () => { if (!document.hidden) loadNotifications(); };
+    const t = setInterval(tick, 60000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [user, loadNotifications]);
   const markNotificationsRead = useCallback(async (ids) => {
     // Optimistic: the badge clears instantly, the server catches up.

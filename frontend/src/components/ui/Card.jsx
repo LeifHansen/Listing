@@ -1,32 +1,29 @@
 import { forwardRef } from "react";
-import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { InfoTip } from "@/components/ui/fields";
 
 // AppCard — the floating white surface everything sits on.
+//
+// It used to take a `hover` prop that swapped the div for a motion.div and
+// lifted the card on hover. No call site ever passed it, so the branch was
+// dead and framer-motion was imported here for nothing. The cards that DO
+// lift (StatCard, ShopMode, Dashboard, ListingCard) each animate themselves
+// with the same whileHover, which is why this was never missed.
 export const Card = forwardRef(function Card(
-  { className, hover = false, children, ...props },
+  { className, children, ...props },
   ref,
 ) {
-  const Comp = hover ? motion.div : "div";
-  const motionProps = hover
-    ? {
-        whileHover: { y: -2, boxShadow: "var(--shadow-card-hover)" },
-        transition: { duration: 0.18, ease: "easeOut" },
-      }
-    : {};
   return (
-    <Comp
+    <div
       ref={ref}
       className={cn(
         "bg-card rounded-card border border-line shadow-card p-6",
         className,
       )}
-      {...motionProps}
       {...props}
     >
       {children}
-    </Comp>
+    </div>
   );
 });
 

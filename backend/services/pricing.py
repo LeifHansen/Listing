@@ -287,6 +287,18 @@ def suggest(query: str, category_id: Optional[str] = None,
                          gtin=gtin)
             if result:
                 sources.append(result)
+        except InsightsNotApproved as exc:
+            # A source that is not turned on, which is the NORMAL state for
+            # most installs (see _INSIGHTS_DENIED above) — not a failure an
+            # operator can act on. It still counts as failed, because
+            # `checked` below must keep telling the truth about whether
+            # anything got to look; it just does not belong at warning level,
+            # which is where error capture starts. Left there it filed itself
+            # in the production error feed once per process restart, as a bug
+            # report against the one condition the latch exists to expect.
+            failed.append(src.__name__)
+            log.info("pricing: %s is not approved for this application (%s)",
+                     src.__name__, exc)
         except Exception as exc:  # noqa: BLE001 - a source is best-effort
             failed.append(src.__name__)
             log.warning("pricing: %s failed for %r: %s", src.__name__, query, exc)

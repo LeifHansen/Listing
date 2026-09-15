@@ -1677,12 +1677,32 @@ def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
 
 # --- copies for the AI ---------------------------------------------------------
 
+def _draft_to(img: Image.Image, side: int) -> None:
+    """Ask a JPEG to decode at a reduced scale, for a copy of at most `side`.
+
+    The same trick `_load` uses, and for the same reason -- but these two
+    functions are pointed at the CAMERA ORIGINAL (the screen pass reads `src`,
+    not the optimized output), so without it a 12MP phone photo is fully
+    decoded to be thrown away at 512px. Measured on a 4032x3024 JPEG: 178ms
+    down to 45ms, and the pass runs over every photo in the batch, twice
+    (screen, then confirm) -- while holding a threadpool slot.
+
+    `None` keeps the mode, so a CMYK or greyscale original is not silently
+    converted before _flatten sees it. Decoding is in halves and never below
+    the size asked for, so the LANCZOS resize below still has more pixels than
+    it needs and the output is unchanged for practical purposes. A no-op for
+    any format that cannot do it, which is what makes it safe to call blind.
+    """
+    img.draft(None, (side, side))
+
+
 def thumb_jpeg(path: Path, side: int = 512, quality: int = 72) -> bytes:
     """Small JPEG bytes for AI grouping calls — keeps a 40-photo request
     light. Upright per the camera's EXIF and opaque. `quality` goes up for a
     call that has to read a label off the copy."""
     from io import BytesIO
     with Image.open(path) as img:
+        _draft_to(img, side)
         img = _flatten(ImageOps.exif_transpose(img))
         img.thumbnail((side, side), Image.LANCZOS)
         buf = BytesIO()
@@ -1696,6 +1716,7 @@ def quarter_turns_jpeg(path: Path, side: int = 448) -> dict[int, bytes]:
     orientation pass lays side by side when it asks which one is upright."""
     from io import BytesIO
     with Image.open(path) as img:
+        _draft_to(img, side)
         img = _flatten(ImageOps.exif_transpose(img))
         img.thumbnail((side, side), Image.LANCZOS)
         out: dict[int, bytes] = {}

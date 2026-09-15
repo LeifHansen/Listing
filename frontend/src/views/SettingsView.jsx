@@ -1171,7 +1171,7 @@ function ExpertKnowledge() {
 
       {rows.length === 0 ? (
         <EmptyState title="No references yet"
-                    body="Add one above and the AI will start reading it." />
+                    message="Add one above and the AI will start reading it." />
       ) : (
         <ul className="flex flex-col gap-3">
           {rows.map((row) => (
@@ -1187,7 +1187,7 @@ function ExpertKnowledge() {
                     {!row.enabled ? <TagPill>Off</TagPill> : null}
                   </div>
                   <p className="text-[13px] mt-1 break-words">{row.note}</p>
-                  <SiteLink href={row.url} className="text-[12px] break-all">
+                  <SiteLink path={row.url} className="text-[12px] break-all">
                     {row.url}
                   </SiteLink>
                 </div>
