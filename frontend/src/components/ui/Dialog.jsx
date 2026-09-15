@@ -33,6 +33,25 @@ export function Dialog({ open, onClose, title, children, className, wide = false
   const id = useId();
   const headingId = `${id}-title`;
 
+  // Escape needs the CURRENT onClose; the effect below must not depend on it.
+  //
+  // Nearly every call site passes an arrow declared in its component body
+  // (`onClose={close}`, `onClose={() => setOpen(false)}`), so `onClose` is a
+  // new function on every render -- and every keystroke in a dialog that holds
+  // a text field re-renders the component that owns it. With `onClose` in the
+  // dependency array the whole effect tore down and re-ran per character: the
+  // cleanup put focus back on whatever had opened the dialog, and the setup
+  // scheduled a frame that moved it to the panel. A seller typed one character
+  // into Sign in and the rest went nowhere; the same for the delete-account
+  // password box and the merge picker's tick boxes. The scroll lock and the
+  // open-dialog stack were pushed and popped per keystroke besides.
+  //
+  // A ref rather than asking twelve call sites to useCallback: the requirement
+  // is that a dialog survives its owner re-rendering, and that has to hold
+  // here, once, rather than at every call site for ever.
+  const closeRef = useRef(onClose);
+  useEffect(() => { closeRef.current = onClose; });
+
   useEffect(() => {
     if (!open) return;
     const me = { id };
@@ -50,7 +69,7 @@ export function Dialog({ open, onClose, title, children, className, wide = false
       if (openStack[openStack.length - 1] !== me) return;
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        closeRef.current();
         return;
       }
       if (e.key !== "Tab" || !panel.current) return;
@@ -77,7 +96,7 @@ export function Dialog({ open, onClose, title, children, className, wide = false
         opener.focus();
       }
     };
-  }, [open, onClose, id]);
+  }, [open, id]);
 
   return createPortal(
     <AnimatePresence>
