@@ -28,6 +28,8 @@ short-circuits.
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 pytest.importorskip("httpx")
@@ -182,3 +184,46 @@ def test_sold_comps_is_still_preferred_over_asking_prices():
     """It is first in _SOURCES, and suggest takes the first source that
     answers. A sold price beats an asking price whenever both exist."""
     assert pricing._SOURCES[0] is pricing.sold_comps
+
+
+def test_the_denial_is_not_filed_as_a_production_error(monkeypatch, caplog):
+    """The normal state for most installs does not belong in the error feed.
+
+    Error capture starts at WARNING (see README, "Reading production errors"),
+    because this codebase fails soft and the real failures are logged there.
+    `suggest`'s catch-all logged EVERY source failure at that level, so the
+    one condition this whole module exists to expect -- eBay not having
+    approved the application -- filed itself as a bug report once per process
+    restart. It was in the production feed on 2026-09-15, graded worth a fix,
+    against code doing exactly the right thing.
+
+    The failure is still RECORDED (`checked` below still tells the truth about
+    whether anything got to look); it is just not reported as actionable.
+    """
+    def _denied(*a, **k):
+        raise pricing.InsightsNotApproved("nope")
+
+    monkeypatch.setattr(pricing, "_SOURCES", (_denied,))
+    with caplog.at_level(logging.INFO, logger=pricing.log.name):
+        out = pricing.suggest("chagall lithograph")
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.INFO for r in caplog.records)
+    # And the seller's card is unchanged by the quieter level: nothing looked,
+    # so nothing is claimed about the market.
+    assert out["checked"] is False
+    assert out["suggestion"] is None
+
+
+def test_a_real_source_failure_is_still_a_warning(monkeypatch, caplog):
+    """The other half. Quieting the expected case must not quiet a lookup that
+    genuinely broke -- a dead app token or a 429 is exactly what the feed is
+    for, and is the reason the catch-all logs at WARNING in the first place."""
+    def _broken(*a, **k):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(pricing, "_SOURCES", (_broken,))
+    with caplog.at_level(logging.INFO, logger=pricing.log.name):
+        pricing.suggest("anything")
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
