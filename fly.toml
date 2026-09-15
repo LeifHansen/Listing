@@ -52,11 +52,21 @@ primary_region = 'sjc'
   # secret, since it is people's email addresses). Set ETSY_ACCESS_TIER =
   # 'commercial' the day Etsy grants it and the gate retires itself.
   ETSY_ACCESS_TIER = 'personal'
-  # Background removal runs on the FREE on-server model, one pass per photo,
-  # the item composited on white. isnet-general-use is the better-edged of
-  # the two bundled models -- it needs the 4GB VM below -- and is baked into
-  # the image (see Dockerfile), so no runtime download and no volume
-  # dependency. u2netp (4MB) is the fallback for a smaller machine.
+  # WHICH ENGINE CUTS A BACKGROUND OUT. Unset here, which means "auto": every
+  # remote engine that has a key, then the free on-server model. No key is set
+  # on this app today, so the chain is ["local"] and the per-photo cost is
+  # zero -- exactly as it has always been. Setting REMOVEBG_API_KEY (and
+  # LEONARDO_API_KEY, which is where remove.bg's API moves on 2026-12-01) in
+  # `fly secrets` is the whole switch, and /api/ready reports the chain so a
+  # key that stops working does not just show up as worse cutouts. Per-image
+  # cost on those engines is ~$0.10, against one image_ai token per photo.
+  #   BG_ENGINE = 'auto'
+  #
+  # The on-server model, one pass per photo, the item composited on white.
+  # isnet-general-use is the better-edged of the two bundled models -- it needs
+  # the 4GB VM below -- and is baked into the image (see Dockerfile), so no
+  # runtime download and no volume dependency. u2netp (4MB) is the fallback for
+  # a smaller machine.
   REMBG_MODEL = 'isnet-general-use'
   # The copy handed to the model. isnet normalizes its input to 1024x1024
   # whatever it is given, so feeding it less means it upscales our downscale
@@ -113,5 +123,11 @@ primary_region = 'sjc'
   # isnet-general-use model ([env] above) needs 4GB — on 2GB it OOM-kills the
   # box and only the light u2netp runs reliably. 4GB is a flat ~$10/mo over
   # 2GB, versus the per-image price of a paid cutout API.
+  #
+  # That trade is no longer either/or: a paid engine can go in FRONT of this
+  # model (BG_ENGINE above) while the model stays as the floor, so an outage,
+  # an expired key or a spent account degrades to a free cutout instead of no
+  # cutout. The 4GB is what keeps that floor real. Dropping to 2GB means
+  # REMBG_MODEL = 'u2netp' and accepting rougher edges on the fallback path.
   size = 'shared-cpu-2x'
   memory = '4gb'

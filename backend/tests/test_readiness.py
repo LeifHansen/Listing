@@ -162,9 +162,18 @@ def test_busy_is_retryable_not_a_crash():
 
 def test_the_engine_state_a_probe_reads_is_cheap_and_complete():
     state = images.engine_state()
-    assert set(state) == {"model", "loaded", "busy", "last_inference_seconds",
-                          "model_load_seconds"}
+    assert set(state) == {"model", "loaded", "busy", "chain",
+                          "last_inference_seconds", "model_load_seconds"}
     assert state["busy"] is False
+    # `chain` is the engines that cut a background out, in the order they are
+    # tried. It reads config only -- a few string comparisons, no network and
+    # no model -- so it stays as cheap as the rest of this payload. It is here
+    # because a remote engine whose key is missing, mistyped or expired shows
+    # up nowhere else: the app keeps serving local cutouts and the only symptom
+    # is that they got worse. Always ends at "local", the one engine that needs
+    # no credentials.
+    assert isinstance(state["chain"], list)
+    assert state["chain"][-1] == "local"
 
 
 def test_a_slow_model_load_is_not_reported_as_a_slow_inference(monkeypatch,

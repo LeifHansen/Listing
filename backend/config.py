@@ -389,6 +389,66 @@ def serpapi_ready() -> bool:
     return bool(SERPAPI_KEY)
 
 
+# --- Background removal: which engine strips photo backgrounds -------------
+# BG_ENGINE picks the engine, and the value is the FIRST entry of a chain that
+# always ends at "local":
+#   "removebg"  — remove.bg's API (REMOVEBG_API_KEY). Owned by Canva. NOTE its
+#                 standalone API shuts down 2026-12-01 and migrates to
+#                 Leonardo.Ai, which is why leonardo backs it up below.
+#   "leonardo"  — Leonardo.Ai (LEONARDO_API_KEY), remove.bg's own named
+#                 successor. ~$0.10/image.
+#   "local"     — the in-house rembg model on this server (free per photo;
+#                 tunables REMBG_MODEL / REMBG_MAX_SIDE are read in
+#                 services/images). Always available, so it is the floor.
+#   "auto"      — the default: whichever remote engines have credentials, in
+#                 the order above, then local.
+#
+# The local model needs no credentials, so a deploy that sets nothing keeps
+# working exactly as it did and spends nothing. A remote engine only runs when
+# its key is present.
+#
+# Whatever the chain, a failed engine never loses a photo: the original is
+# kept and the exact reason (bad key / out of credits / rate limit) is
+# surfaced — never a silent mangled cutout.
+BG_ENGINE = os.getenv("BG_ENGINE", "auto").strip().lower() or "auto"
+
+REMOVEBG_API_KEY = _env("REMOVEBG_API_KEY", "REMOVE_BG_API_KEY")
+LEONARDO_API_KEY = _env("LEONARDO_API_KEY", "LEONARDO_AI_API_KEY")
+
+
+def removebg_ready() -> bool:
+    return bool(REMOVEBG_API_KEY)
+
+
+def leonardo_ready() -> bool:
+    return bool(LEONARDO_API_KEY)
+
+
+def bg_engine_chain() -> list[str]:
+    """Background-removal engines to try, in order. Always non-empty: the
+    local model needs no credentials, so it's the floor. An explicit BG_ENGINE
+    whose credentials are missing falls back to the auto chain (with a warning
+    at import time, below)."""
+    if BG_ENGINE == "local":
+        return ["local"]
+    if BG_ENGINE == "removebg" and removebg_ready():
+        return (["removebg", "leonardo", "local"] if leonardo_ready()
+                else ["removebg", "local"])
+    if BG_ENGINE == "leonardo" and leonardo_ready():
+        return ["leonardo", "local"]
+    chain = []
+    if removebg_ready():
+        chain.append("removebg")
+    if leonardo_ready():
+        chain.append("leonardo")
+    return chain + ["local"]
+
+
+if BG_ENGINE not in ("auto", "local") and BG_ENGINE not in bg_engine_chain():
+    log.warning("BG_ENGINE=%r isn't fully configured (missing credentials?) — "
+                "using %s instead.", BG_ENGINE, "/".join(bg_engine_chain()))
+
+
 # --- eBay ------------------------------------------------------------------
 EBAY_ENV = os.getenv("EBAY_ENV", "sandbox").strip().lower()
 EBAY_OAUTH_TOKEN = _env("EBAY_OAUTH_TOKEN")
@@ -793,6 +853,8 @@ def _watched_names() -> list[tuple[str, str]]:
         ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
         ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
         ("SERPAPI_KEY", SERPAPI_KEY),
+        ("REMOVEBG_API_KEY", REMOVEBG_API_KEY),
+        ("LEONARDO_API_KEY", LEONARDO_API_KEY),
         ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
         ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),
         ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),

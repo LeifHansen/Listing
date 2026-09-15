@@ -271,10 +271,21 @@ curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   in flight — not a trade worth making to satisfy a spelling.
 - **`image_engine`** on `/api/ready` is the on-server background-removal
   model (`isnet-general-use`, baked into the image), whether it has loaded,
-  and how long the last inference took. There is no paid remote engine any
-  more — the Pixian / Photoroom / Adobe integrations were removed in #246 —
-  so a `PHOTOROOM_API_KEY` or `LIGHTROOM_API_KEY` still set on the app is a
-  dead credential and can be unset.
+  how long the last inference took, and **`chain`** — the engines that cut a
+  background out, in the order they are tried. There is always a remote engine
+  ahead of `local` when its key is set, and `local` is always the last entry,
+  because it is the only engine that needs no credentials: an app with no keys
+  reads `["local"]` and behaves exactly as it did before any of this.
+  `BG_ENGINE` picks the front of that chain (`auto`, `removebg`, `leonardo`,
+  `local`); see `.env.example` for the whole story, including that remove.bg's
+  standalone API shuts down on 2026-12-01 and `leonardo` is its successor.
+  Reading `chain` is how an **expired or mistyped key gets noticed**: without
+  it, the only symptom is sellers' cutouts quietly going back to the slow
+  built-in model, and the studio only says so per-cutout (the `degraded` flag
+  on `/api/image/remove-bg`). The older Pixian / Photoroom / Adobe engines are
+  still gone — they were removed in #246 — so a `PHOTOROOM_API_KEY` or
+  `LIGHTROOM_API_KEY` still set on the app remains a dead credential and can
+  be unset.
 - **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
   cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
   on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
