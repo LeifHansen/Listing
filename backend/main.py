@@ -6033,7 +6033,11 @@ async def image_remove_bg(
         out, engine = images.remove_background_white(img)
         # engine = which remover actually ran — the editor names it so a
         # misconfigured key can't hide behind a silently-degraded result.
-        return {"ok": True, "image": _data_url(out), "engine": engine}
+        # degraded says that happened: a paid engine was configured and the
+        # local model answered anyway, which is the only case worth a word to
+        # the seller (see images.engine_degraded).
+        return {"ok": True, "image": _data_url(out), "engine": engine,
+                "degraded": images.engine_degraded(engine)}
 
     spent = await run_in_threadpool(_charge_ai, request, "image_ai")
     try:

@@ -288,8 +288,16 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       // photo's file. Staying quiet is right: the seller moved on.
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
+      // `degraded` is the server saying a paid engine was configured and did
+      // not answer, so this cutout came from the slower built-in model. Said
+      // out loud only in that case -- a deploy with no paid engine is not
+      // degraded, it is just how it works, and saying so every time is noise.
+      // Without this, an expired or mistyped key shows up as nothing but
+      // cutouts quietly getting worse.
       toast(
-        `Background removed — review and Save to keep it.`,
+        res.degraded
+          ? `Background removed with the built-in model — the usual engine didn't answer. Review and Save to keep it.`
+          : `Background removed — review and Save to keep it.`,
         { kind: "success" },
       );
     } catch (e) {

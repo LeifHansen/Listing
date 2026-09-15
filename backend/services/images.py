@@ -43,6 +43,7 @@ from typing import Optional
 from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
                  ImageStat)
 
+from .. import config
 from ..config import log
 from ..storage import natural_key
 from . import artwork
@@ -296,11 +297,32 @@ class Stopped(Exception):
 
 
 def engine_state() -> dict:
-    """What the readiness probe needs to know about the local model."""
+    """What the readiness probe needs to know about background removal.
+
+    `chain` is the whole point of reporting this: a key that is missing,
+    mistyped or expired leaves the app quietly serving local cutouts, and the
+    only difference a seller sees is that they got worse. One field on
+    /api/ready turns that into something you can look up.
+    """
     return {"model": _REMBG_MODEL, "loaded": _model_ready,
             "busy": _INFER_LOCK.locked(),
+            "chain": config.bg_engine_chain(),
             "last_inference_seconds": round(_last_infer_seconds, 2),
             "model_load_seconds": round(_model_load_seconds, 2)}
+
+
+def engine_degraded(engine: str) -> bool:
+    """Did this cutout come from the local model while a paid one was meant to
+    do it?
+
+    That is the one case worth telling somebody about. A deploy with no key
+    configured is not degraded -- local IS its engine -- so this is false
+    there, and the studio stays quiet. A key that is expired, mistyped or out
+    of credits makes it true, which is the difference between "this is how it
+    works" and "somebody needs to look at the account".
+    """
+    chain = config.bg_engine_chain()
+    return engine == "local" and any(name != "local" for name in chain)
 
 
 def _infer_threads() -> int:
@@ -940,12 +962,130 @@ def _interior_solidity(alpha: Image.Image) -> float:
     return ImageStat.Stat(solid, inner).mean[0] / 255
 
 
+def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
+    """The item on white under a soft contact shadow.
+
+    The last step of every engine, local or remote: whatever produced the
+    matte, what ships is the same composite, so a cutout does not look like a
+    different product depending on which API answered.
+    """
+    canvas = Image.new("RGB", rgb.size, WHITE)
+    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
+                 _contact_shadow(alpha))
+    canvas.paste(rgb, (0, 0), alpha)
+    return canvas
+
+
+def _coverage(alpha: Image.Image, size: tuple[int, int]) -> float:
+    """How much of the frame the matte actually keeps, 0-1."""
+    kept = alpha.point(lambda a: 255 if a >= 128 else 0)
+    return sum(kept.histogram()[128:]) / float(size[0] * size[1])
+
+
+def remote_cutout(rgb: Image.Image) -> tuple[Optional[Image.Image], str]:
+    """The first remote engine in the chain that answers, and its name.
+
+    Returns (None, "") when the chain has no remote engine configured -- the
+    default, and the reason a deploy that sets no keys behaves exactly as it
+    did. A configured engine that FAILS raises cutout_api.CutoutApiError with
+    the reason; the caller decides whether to try the next engine or tell the
+    seller.
+
+    A remote engine does NOT take _INFER_LOCK. The lock exists because two
+    concurrent rembg inferences double this machine's peak memory and kill it;
+    a remote call holds no model here and needs no slot. That is most of the
+    speed win -- ~104s serialized becomes a second or three in parallel.
+
+    The matte also skips _reclaim_enclosed / _fill_interior / _harden. All
+    three repair the local model's specific defects, and _harden in particular
+    re-ramps mid values toward zero, so running it over an already-clean alpha
+    eats the very edges that were paid for.
+    """
+    from . import cutout_api
+    chain = config.bg_engine_chain()
+    last: Optional[Exception] = None
+    for name in chain:
+        if name == "local":
+            break
+        engine = cutout_api.ENGINES.get(name)
+        if engine is None:
+            continue
+        try:
+            cut = engine(rgb)
+        except cutout_api.CutoutApiError as exc:
+            # Keep the reason and try the next engine. When this was the last
+            # remote engine the caller re-raises it, so the seller reads "out
+            # of credits" rather than watching the cutout quietly get worse.
+            log.warning("bg-removal: %s failed (%s)", name, exc)
+            last = exc
+            continue
+        if cut is None:  # no credentials for this engine
+            continue
+        # A service answers at the size it was SENT, and jpeg_payload caps that
+        # at BG_API_MAX_SIDE. Today every caller is already inside the cap so
+        # nothing is resized -- but if that ever stops being true, an alpha of
+        # one size against a photo of another understates coverage (refusing a
+        # good cutout) and composites at the wrong size. Cheap to make
+        # impossible rather than to remember.
+        if cut.size != rgb.size:
+            log.info("bg-removal: %s answered at %dx%d for a %dx%d photo — "
+                     "scaling the matte back", name, cut.width, cut.height,
+                     rgb.width, rgb.height)
+            cut = cut.resize(rgb.size, Image.LANCZOS)
+        alpha = cut.split()[3]
+        coverage = _coverage(alpha, rgb.size)
+        # The ONE gate a remote matte still answers. "Found nothing at all" is
+        # engine-independent and cheap to be sure about. The other two --
+        # _interior_solidity and _kept_is_the_product -- are deliberately NOT
+        # applied: every threshold in them was fitted to the local model's
+        # output, and they are what refused necklaces, belts, bangles and
+        # guitars on flawless mattes. Better edges is not a different answer
+        # about whether there is a subject.
+        if coverage < _MIN_FG_COVERAGE:
+            log.info("bg-removal: %s found no item (coverage %.4f)",
+                     name, coverage)
+            last = cutout_api.CutoutApiError(
+                f"{name} found no item in this photo — it was kept as shot.")
+            continue
+        log.info("bg-removal: %s kept %.3f of the frame", name, coverage)
+        return _compose_on_white(cut.convert("RGB"), alpha), name
+    if last is not None and "local" not in chain:
+        raise last
+    if last is not None:
+        log.info("bg-removal: falling back to the local model")
+    return None, ""
+
+
+def cutout_with_engine(rgb: Image.Image, wait: Optional[float] = None,
+                       ) -> tuple[Optional[Image.Image], str]:
+    """The item on white, plus which engine produced it ("" when none did).
+
+    Walks config.bg_engine_chain(): every configured remote engine first, then
+    the local model as the floor. A remote failure falls through to the next
+    entry, so an expired key or an outage degrades to the free local model
+    rather than losing the photo.
+
+    The local leg goes through cutout() rather than inlining it, so patching
+    cutout() still intercepts the whole local path -- which is how this file's
+    tests stand in for a model that CI does not install.
+    """
+    out, engine = remote_cutout(rgb)
+    if out is not None:
+        return out, engine
+    return cutout(rgb, wait=wait), "local"
+
+
 def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
-    """The item on white under a soft contact shadow, or None when the model
-    found no item to keep.
+    """The LOCAL model's item on white under a soft contact shadow, or None
+    when it found no item to keep.
 
     Raises CutoutBusy when the inference slot is taken for longer than
-    `wait`; any other failure raises as itself so a caller can say why."""
+    `wait`; any other failure raises as itself so a caller can say why.
+
+    This is the in-house engine on its own. Callers that want whatever engine
+    is configured -- and to be told which one answered -- ask
+    cutout_with_engine, which falls back to here.
+    """
     # Repaired BEFORE it is hardened, and hardened exactly once. _harden maps
     # the band between LOW and HIGH onto a ramp, so running it over its own
     # output re-ramps every mid value toward zero and quietly eats the matte.
@@ -986,11 +1126,7 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
                  len(regions), (regions[0][0] / total) if total else 0.0,
                  regions[0][1] if regions else 0.0, box_fill, coverage)
         return None
-    canvas = Image.new("RGB", rgb.size, WHITE)
-    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
-                 _contact_shadow(alpha))
-    canvas.paste(rgb, (0, 0), alpha)
-    return canvas
+    return _compose_on_white(rgb, alpha)
 
 
 # What a photo of ART gets instead of a cutout when its border cannot be
@@ -1023,18 +1159,54 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     ever examined, let alone removed. None means the border could not be found
     and the photo must be kept exactly as shot; it never means "try the model
     instead", which is the failure this exists to prevent.
+
+    A REMOTE engine gets a second look at the border, and only at the border.
+    `border()` is asked first and is still the trusted answer, because it is
+    geometry and cannot be wrong about what is inside the box it returns. When
+    it gives up -- a print shot at an angle, a frame the same colour as the
+    table -- the remote matte's outer box is offered instead, and
+    artwork.box_from_alpha refuses it unless it is shaped like a picture
+    rather than like a subject lifted out of one. Either way the matte that
+    ships is artwork.mask(): a filled rectangle. There is still no code path
+    here that can remove a pixel from inside the border.
     """
     box = artwork.border(rgb)
+    how = "scanned"
+    if box is None:
+        remote = _remote_alpha(rgb)
+        if remote is not None:
+            box = artwork.box_from_alpha(rgb.size, remote)
+            how = "located by the remote engine"
     if box is None:
         return None
     alpha = artwork.mask(rgb.size, box)
-    canvas = Image.new("RGB", rgb.size, WHITE)
-    canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
-                 _contact_shadow(alpha))
-    canvas.paste(rgb, (0, 0), alpha)
-    log.info("art cutout: kept the picture whole inside %s of a %dx%d photo",
-             box, rgb.width, rgb.height)
-    return canvas
+    log.info("art cutout: kept the picture whole inside %s (%s) of a %dx%d "
+             "photo", box, how, rgb.width, rgb.height)
+    return _compose_on_white(rgb, alpha)
+
+
+def _remote_alpha(rgb: Image.Image) -> Optional[Image.Image]:
+    """A remote engine's matte for `rgb`, or None when there isn't one.
+
+    Only the ALPHA, and only for art: the caller wants a box, not a cutout. A
+    failure here is not worth surfacing -- the photo is about to be kept as
+    shot anyway, which is exactly what would have happened without this call.
+    """
+    from . import cutout_api
+    for name in config.bg_engine_chain():
+        if name == "local":
+            return None
+        engine = cutout_api.ENGINES.get(name)
+        if engine is None:
+            continue
+        try:
+            cut = engine(rgb)
+        except cutout_api.CutoutApiError as exc:
+            log.info("art border: %s couldn't help (%s)", name, exc)
+            continue
+        if cut is not None:
+            return cut.split()[3]
+    return None
 
 
 def _flatten(img: Image.Image) -> Image.Image:
@@ -1211,6 +1383,7 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     if turn:
         img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
+    bg_engine = ""
     faithful = None
     if remove_bg and detail:
         bg_error = DETAIL_KEPT_AS_SHOT
@@ -1219,8 +1392,13 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             # A picture never reaches the model. Its border decides the
             # matte, or nothing happens at all — art_cutout returning None
             # means "keep as shot", never "try the model", because the model
-            # is what cuts the baby out of the painting.
-            out = art_cutout(img) if art else cutout(img)
+            # is what cuts the baby out of the painting. A remote engine may
+            # help FIND that border (see art_cutout); it never supplies the
+            # matte for a picture.
+            if art:
+                out, bg_engine = art_cutout(img), "art"
+            else:
+                out, bg_engine = cutout_with_engine(img)
             if out is None and art:
                 bg_error = ART_NO_BORDER_KEPT_AS_SHOT
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
@@ -1260,7 +1438,9 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     if turn:
         out["rotated"] = turn
     if bg_removed:
-        out["bg_engine"] = "local"
+        # Which engine actually ran, not which one was configured: a
+        # silently-degraded cutout is the thing this field exists to expose.
+        out["bg_engine"] = bg_engine or "local"
     if bg_error:
         out["bg_error"] = bg_error
     return out
@@ -1447,7 +1627,7 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     keep, so the editor can tell the seller instead of silently doing
     nothing, and CutoutBusy when the slot is taken (the editor's wait is the
     short one: a person is watching)."""
-    out = cutout(_flatten(img), wait=INFER_WAIT_SECONDS)
+    out, engine = cutout_with_engine(_flatten(img), wait=INFER_WAIT_SECONDS)
     if out is None:
         raise ValueError(
             "Couldn't separate this photo from its background — it's likely "
@@ -1455,7 +1635,7 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
             "picture rather than of an object. Try cropping in tighter, "
             "shooting against a contrasting surface, or painting the "
             "background out with the white brush.")
-    return out, "local"
+    return out, engine
 
 
 def _subject(img: Image.Image) -> tuple[Image.Image, Image.Image]:

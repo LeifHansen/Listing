@@ -112,6 +112,19 @@ SAFE_TO_REPEAT = {
         "(listing_sync.push_videos, at publish time) creates a fresh id "
         "rather than re-sending into an uncertain one, which leaves the "
         "first to expire unattached.",
+    "backend.services.cutout_api.removebg_cutout":
+        "a POST that TRANSFORMS: it sends one photo and gets that photo's "
+        "cutout back. Nothing of the seller's is created, edited or "
+        "published, and no listing can name the result — a lost answer means "
+        "no cutout, which the photo pass already handles by keeping the "
+        "photo as shot. The one real cost of a repeat is a second API credit "
+        "on OUR remove.bg account, which is money but not correctness: it "
+        "cannot produce a duplicate listing, charge the seller twice, or "
+        "leave the item in two states. That is why _post_with_retries retries "
+        "429 and 5xx and deliberately does NOT retry 402 or 403.",
+    "backend.services.cutout_api.leonardo_cutout":
+        "same as removebg_cutout — one photo in, its cutout out, on the "
+        "engine remove.bg migrates to.",
 }
 
 _VERBS = {"post", "put", "patch", "delete", "request"}

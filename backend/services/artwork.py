@@ -346,6 +346,63 @@ def border(rgb: Image.Image) -> Optional[Box]:
             min(w, int(right + mx + 0.999)), min(h, int(bottom + my + 0.999)))
 
 
+# How much of its own bounding box a remote engine's matte must fill before
+# that box is allowed to be a picture's border. This one number is what makes
+# box_from_alpha safe, so it sits ABOVE _MIN_RECT_FILL rather than at it: a
+# framed print's matte fills its box almost completely (0.95+, since a picture
+# IS its bounding box), while a subject the model lifted OUT of a painting --
+# the baby out of the basket -- fills perhaps 0.5-0.7 of the box around it.
+# That gap is the whole discriminator, and the cost of being strict is only a
+# cutout not attempted.
+_MIN_ALPHA_RECT_FILL = float(os.getenv("ART_ALPHA_RECT_FILL", "0.9") or 0.9)
+
+
+def box_from_alpha(size: tuple[int, int], alpha: Image.Image) -> Optional[Box]:
+    """The picture's outer border as a remote engine's matte found it, or None.
+
+    The second opinion for the case this module otherwise answers with "do
+    nothing": a framed print whose border `border()` could not scan -- shot at
+    an angle, on a surface its own colour, or with the moulding too low in
+    contrast to find. A segmentation model locates a framed picture on a wall
+    easily; what it cannot be trusted with is what is INSIDE the border, and
+    nothing here asks it that. Only the outer box is taken, and the caller
+    turns that box into a filled rectangle through mask(), exactly as it does
+    with border()'s answer.
+
+    None on every doubt, with the same meaning as everywhere else in this
+    module: keep the photo as shot. Never "use the matte itself".
+    """
+    w, h = size
+    if w < 8 or h < 8:
+        return None
+    box = alpha.getbbox()
+    if not box:
+        return None
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if not bw or not bh:
+        return None
+    # Is this matte SHAPED like a picture? Counted on the alpha itself rather
+    # than a downscale: the question is what fraction of the box is opaque, and
+    # a BOX-filtered thumbnail would smear a ragged edge into a fuller one.
+    kept = alpha.crop(box).point(lambda a: 255 if a >= 128 else 0)
+    fill = sum(kept.histogram()[128:]) / float(bw * bh)
+    if fill < _MIN_ALPHA_RECT_FILL:
+        log.info("art border: the matte fills %.2f of its box — that is a "
+                 "subject inside a picture, not the picture; keeping the "
+                 "photo as shot", fill)
+        return None
+    area = (bw * bh) / float(w * h)
+    if area < _MIN_AREA:
+        log.info("art border: matte box covers %.2f of the frame, too small "
+                 "to be the picture — keeping the photo as shot", area)
+        return None
+    # Outward by the same margin border() uses, so a moulding the matte
+    # clipped is not shaved off the print.
+    mx, my = bw * _MARGIN, bh * _MARGIN
+    return (max(0, int(box[0] - mx)), max(0, int(box[1] - my)),
+            min(w, int(box[2] + mx + 0.999)), min(h, int(box[3] + my + 0.999)))
+
+
 def mask(size: tuple[int, int], box: Box) -> Image.Image:
     """A matte that is fully opaque inside `box` and fully clear outside it.
 
