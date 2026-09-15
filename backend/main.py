@@ -62,7 +62,8 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
 from .services.experts.art import presentation as art_presentation
 from .services import reference_fetch
 from .services.experts import registry as experts
-from .services.experts.base import Reference
+from .services.experts.art import match as art_match
+from .services.experts.base import NO_MATCH, Reference
 from .services.experts.art import comps as art_comps
 from .services.experts.art import roster as art_roster
 from .services import etsy as etsy_service
@@ -4112,46 +4113,39 @@ _RESEARCH_CATEGORIES = (
 # of a thrift store trips it) and costs a minute per item, which is why it is
 # off. This one is narrow, and it is the lookup the seller asked for.
 ART_LOOKUP = os.getenv("ART_LOOKUP", "auto").strip().lower() or "auto"
-_ART_CATEGORY_WORDS = ("art prints", "paintings", "posters & prints",
-                       "art posters", "prints & posters", "mixed media art",
-                       "drawings", "art photographs")
-_ART_WORDS = (
-    "art print", "giclee", "giclée", "lithograph", "serigraph", "screenprint",
-    "screen print", "silkscreen", "etching", "engraving", "woodblock",
-    "woodcut", "linocut", "poster", "painting", "watercolor", "watercolour",
-    "gouache", "canvas print", "framed print", "artwork", "fine art",
-    "exhibition print", "museum print",
-    # The words the first pass writes when it has read a margin and not a
-    # name: the piece is art, and it is the lookup's to name.
-    "drawing", "oil on canvas", "oil on board", "oil on panel",
-    "acrylic on canvas", "acrylic on board", "mixed media", "signed print",
-    "numbered print", "hand signed", "hand-signed", "artist proof",
-    "artist's proof", "original art", "wall art", "sculpture",
-    # The words a draft uses when it read the BACK of a painting and took it
-    # for a blank canvas or an empty frame. That draft names no artist and
-    # no medium, so nothing else here catches it -- and it is precisely the
-    # one that needs the lookup, because the piece is art and the pass that
-    # wrote the title did not know it.
-    "stretched canvas", "stretcher bar", "stretcher frame", "blank canvas",
-    "artist canvas", "empty frame", "verso",
-)
-
-
+# The art word lists, the category test and the "is this art" gate all live in
+# services/experts/art/match.py. They were HERE, and match.py's own docstring
+# records them as having moved -- but the copies were never deleted, so the
+# app has been running two detectors that disagree.
+#
+# They disagree in one specific way, and it is the way that matters: match's
+# `matches()` also reads MARKS ("edition of", "plate mark", "84/250" penciled
+# in a margin) and the `art` flag services/orient.screen() already produced
+# from the PHOTO. The copy below reads neither. So an item carrying nothing
+# but an edition mark was drafted under the art rules by the registry -- which
+# has always called match() -- and then refused the art lookup by this gate,
+# which is the one pass that would have named the artist. A print with its
+# edition number showing and no other art word in the title is not a rare
+# item; it is the normal case for the margin of a signed print.
+#
+# Thin wrappers rather than call-site edits: `_artwork_category` and
+# `_is_artwork` are what four call sites below and two test files name, and
+# keeping the local name is this file's established idiom for a body that has
+# moved (see the note above _in_background).
 def _artwork_category(listing: Listing) -> bool:
-    category = (listing.category_suggestion or "").lower()
-    return (category.split(">")[0].strip() == "art"
-            or any(w in category for w in _ART_CATEGORY_WORDS))
+    return art_match.category_is_art(listing)
 
 
 def _is_artwork(listing: Listing, observations: str = "") -> bool:
-    """Whether a draft is a picture with an artist behind it."""
-    if _artwork_category(listing):
-        return True
-    haystack = " ".join([
-        listing.title or "", observations or "",
-        " ".join(f"{s.name} {s.value}" for s in (listing.item_specifics or [])),
-    ]).lower()
-    return any(w in haystack for w in _ART_WORDS)
+    """Whether a draft is a picture with an artist behind it.
+
+    Any score at all, rather than a threshold: this gates a $0.02 enrichment
+    call, and the cost of missing a real piece (an unnamed artist on a listing
+    that is live for a week) is far above the cost of looking at a film
+    poster. WEAK -- the lone "poster"/"drawing" hit -- is deliberately enough,
+    which is exactly what the bool this replaces did.
+    """
+    return art_match.matches(listing, observations) > NO_MATCH
 
 
 def _artist_on(listing: Listing) -> str:
@@ -5571,7 +5565,27 @@ async def upload_more(
     await run_in_threadpool(_assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
-    existing = storage.list_optimized(session_id)
+    # What this listing already HAS, which is not the same as what is on the
+    # volume. The reclaim pass frees local copies once it has verified them in
+    # R2 (_offload_to_r2) and /media serves them from the bucket afterwards --
+    # so an offloaded listing listed ZERO photos on disk. The next index then
+    # restarted at 000, the new photos were optimized over the old names, and
+    # the job's objstore.upload_optimized wrote them to the SAME keys: the
+    # seller's first photos replaced in the bucket, permanently, while the
+    # client appended names it already had and the publish handed eBay one
+    # photo twice. The cap a line below was wrong for the same reason -- an
+    # offloaded photo counted as none, so a listing could be pushed past
+    # eBay's limit.
+    #
+    # The union of the record and the disk, which is what merge_listings
+    # already derives its own next index from. The per-photo edit routes solve
+    # the same problem the other way, by rehydrating the bytes first
+    # (_ensure_local); adding photos needs only the NAMES, and the draft that
+    # holds them is never offloaded.
+    rec = await run_in_threadpool(db.get_listing_best_effort, session_id)
+    recorded = await run_in_threadpool(_listing_image_order, session_id, rec)
+    existing = sorted(set(recorded or []) | set(storage.list_optimized(session_id)),
+                      key=storage.natural_key)
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
@@ -9687,6 +9701,17 @@ _SALE_ONLY_FIELDS = {
     "ebay_listing_id": "", "sku": "", "source": "", "ebay_start_time": "",
     "view_url": "", "watch_count": 0, "sold_quantity": 0,
     "sold_price": None, "sold_at": "",
+    # `sold_at`'s sibling, and the one that was missed. The draft this makes
+    # has never been listed, so it has never ended -- and carrying the old
+    # date is not merely untidy, it DELETES the new listing: stamp_ended never
+    # overwrites an `ended_at` it already finds (so the new listing keeps the
+    # old date when it ends), and grace_expired measures ENDED_GRACE_DAYS from
+    # it. An original that ended more than 30 days ago therefore takes its
+    # relist with it -- record dropped and photos purged, local and R2, within
+    # minutes of the new listing ending, instead of the grace period the
+    # seller is owed. Relisting from the Inactive tab is exactly the path that
+    # hits this.
+    "ended_at": "",
     # A markdown made on the listing that has already sold. Carried over, it
     # would buy the NEW listing three weeks of silence from a price nudge it
     # has done nothing to earn — the new draft is priced from scratch.
