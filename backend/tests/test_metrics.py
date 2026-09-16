@@ -9,6 +9,7 @@ tests pin the response shapes eBay actually returns.
 from __future__ import annotations
 
 import datetime as _dt
+import time
 
 import httpx
 import pytest
@@ -285,3 +286,45 @@ def test_the_report_never_asks_for_a_date_ebay_calls_the_future(monkeypatch):
     today = _dt.datetime.now(_dt.timezone.utc).date()
     assert end == f"{today - _dt.timedelta(days=1):%Y%m%d}"
     assert start < end
+
+
+# ---------------------------------------------------------- cache eviction
+
+def test_a_full_cache_evicts_rather_than_flushing():
+    """The 201st seller must not cost the other 200 a fresh eBay round trip.
+
+    Both caches here enforced their cap with `.clear()` -- the bug
+    marketplaces/ebay_provider._make_room was written to fix, and documents:
+    the instance busy enough to fill a cache is exactly the one that cannot
+    afford every entry in it re-fetching at once. Here that lands on the
+    app-wide daily Sell Analytics allowance, which this module otherwise goes
+    to real lengths to spend carefully.
+    """
+    now = time.time()
+    # 200 live entries, minted at distinguishable times.
+    cache = {f"k{i}": (now - i, {"seller": i}, set()) for i in range(200)}
+
+    metrics._make_room(cache, ttl=3600)
+
+    # Nearly all of them survive -- the opposite of what .clear() did.
+    assert len(cache) == 199
+    # And the one dropped is the oldest, which was closest to expiring anyway.
+    assert "k199" not in cache
+    assert "k0" in cache
+
+
+def test_stale_entries_go_before_any_live_one_does():
+    """Expired rows were dead regardless, so they are the cheapest room to
+    make -- and past the TTL that is usually all the room needed."""
+    now = time.time()
+    cache = {
+        "fresh-a": (now, {}, set()),
+        "fresh-b": (now - 5, {}, set()),
+        "stale": (now - 7200, {}, set()),
+    }
+
+    metrics._make_room(cache, ttl=3600, cap=3)
+
+    assert "stale" not in cache
+    # Dropping the stale one made the room, so neither live entry was touched.
+    assert set(cache) == {"fresh-a", "fresh-b"}

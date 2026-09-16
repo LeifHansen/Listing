@@ -53,6 +53,37 @@ _TTL = 120  # seconds — enough to dedupe the insights + grid fetches
 _TRAFFIC_CACHE: dict[str, tuple[float, dict, set]] = {}
 _TRAFFIC_TTL = 60 * 60
 
+# How many sellers either cache holds before it evicts.
+_CACHE_MAX = 200
+
+
+def _make_room(cache: dict, ttl: float, cap: int = _CACHE_MAX) -> None:
+    """Keep a cache bounded without flushing it.
+
+    Both caches here enforced their cap with `.clear()`, which is the bug
+    marketplaces/ebay_provider._make_room was written to fix and documents at
+    length: on a busy instance it threw away every seller's entry the moment
+    the 201st arrived, so all 200 of them re-hit eBay together -- and the
+    instance busy enough to fill the cache is exactly the one that could least
+    afford it. Here that means the whole app's daily Sell Analytics allowance,
+    which is the one thing this module already goes to lengths to spend
+    carefully (see the latch below).
+
+    Stale entries go first; they were dead anyway, and past the TTL that is
+    almost always all of them. Only if the cache is still full does anything
+    live get dropped, oldest first -- whoever was closest to a refetch
+    regardless.
+
+    Both caches key on `(fetched_at, ...)`, which is what lets one helper
+    serve them.
+    """
+    now = time.time()
+    for key in [k for k, entry in cache.items() if now - entry[0] >= ttl]:
+        cache.pop(key, None)
+    while len(cache) >= cap:
+        cache.pop(min(cache, key=lambda k: cache[k][0]), None)
+
+
 # When eBay answers the report with 429 the app's daily allowance for the
 # Analytics API is spent — an APPLICATION limit, shared by every seller, that
 # resets at midnight Pacific. Asking again before then is a guaranteed refusal
@@ -301,8 +332,8 @@ def _traffic_report(token: str, ids: list[str], covered: set) -> dict[str, dict]
             covered.update(hit[2])
             return hit[1]
         raise
-    if len(_TRAFFIC_CACHE) > 200:
-        _TRAFFIC_CACHE.clear()
+    if len(_TRAFFIC_CACHE) >= _CACHE_MAX:
+        _make_room(_TRAFFIC_CACHE, _TRAFFIC_TTL)
     _TRAFFIC_CACHE[key] = (now, report, set(asked))
     covered.update(asked)
     return report
@@ -544,8 +575,8 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         # offers". See _offers.
         if lid in offers_known:
             result.setdefault(lid, {}).setdefault("offers", 0)
-    if len(_CACHE) > 200:
-        _CACHE.clear()
+    if len(_CACHE) >= _CACHE_MAX:
+        _make_room(_CACHE, _TTL)
     _CACHE[cache_key] = (time.time(), result, st)
     if status is not None:
         status.update(st)

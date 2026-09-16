@@ -140,6 +140,37 @@ def test_the_copy_drops_everything_that_describes_the_SALE(client):
     assert copy["marketplaces"] == {}
 
 
+def test_the_copy_drops_the_END_DATE_TOO(client, monkeypatch):
+    """`ended_at` is `sold_at`'s sibling and was the one sale field left on.
+
+    A relist of an ENDED listing (the Inactive tab's whole purpose) carried
+    the old end date onto the new draft. `listing_sync.stamp_ended`
+    deliberately never overwrites an `ended_at` it already finds -- so when
+    the new listing eventually ended, it kept the ORIGINAL date, and
+    `grace_expired` measured the 30-day clock from a moment that was already
+    months past. The next cheap sync deleted the record and purged the
+    photos, within minutes of the listing ending, instead of giving the
+    seller 30 days to relist it.
+
+    The listing this endpoint produces has never been listed, so it has never
+    ended.
+    """
+    from backend.services import listing_sync
+
+    client.rows["s1"]["status"] = "ended"
+    client.rows["s1"]["listing"] = dict(
+        SOLD, sold_at="", sold_price=None, sold_quantity=0,
+        ended_at="2026-01-05T00:00:00+00:00")
+
+    copy = client.post("/api/listings/s1/relist").json()["listing"]
+    assert copy["ended_at"] == ""
+
+    # And the consequence, end to end: stamped when it really does end, the
+    # grace period runs from THAT moment rather than from January.
+    restamped = listing_sync.stamp_ended(copy)
+    assert not listing_sync.grace_expired({"listing": restamped})
+
+
 def test_photos_are_copied_not_moved(client):
     """The sold record is an archive: a relist must not strip it of the
     photos it still has."""

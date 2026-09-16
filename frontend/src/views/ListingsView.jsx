@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle,
@@ -177,7 +177,14 @@ export function ListingsView({ search = "" }) {
     }
   };
 
-  const askDelete = async (item) => {
+  // useCallback, because ListingCard is memo'd and its comment says why: the
+  // app context re-renders this whole view on every background poll, so a
+  // handler with a fresh identity per render fails the memo comparison for
+  // every card on screen and reconciles the entire grid for a bell badge.
+  // Every other callback the card takes (openListing, deleteListing,
+  // rotateListingPhoto, confirm, toast) is already stable -- these two were
+  // the pair defeating it.
+  const askDelete = useCallback(async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (await confirm({
       title: "Delete this listing?",
@@ -185,7 +192,7 @@ export function ListingsView({ search = "" }) {
       confirmLabel: "Delete",
       danger: true,
     })) deleteListing(item.id);
-  };
+  }, [confirm, deleteListing]);
 
   // End a live listing straight from its card. What happens to the card
   // afterwards depends on whose work is in it — kept under Inactive for the
@@ -194,7 +201,7 @@ export function ListingsView({ search = "" }) {
   // survive the night. (A sale is the exception to both, and ending can
   // discover one.)
   const [endingId, setEndingId] = useState(null);
-  const askEnd = async (item) => {
+  const askEnd = useCallback(async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     const kept = keptWhenEnded(item);
     const days = endedGraceDays(health);
@@ -228,7 +235,7 @@ export function ListingsView({ search = "" }) {
     } finally {
       setEndingId(null);
     }
-  };
+  }, [confirm, health, loadListings, toast]);
 
   const q = search.trim().toLowerCase();
   // Newest first, except that a listing a buyer has bid or made an offer on

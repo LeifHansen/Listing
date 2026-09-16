@@ -27,8 +27,6 @@ not the work, and never becomes the brand.
 """
 from __future__ import annotations
 
-import pytest
-
 from backend.services.listing_prompt import (
     ART_RULE,
     ART_TAG_SCAN_RULE,
@@ -207,16 +205,19 @@ def test_a_canvas_draft_reaches_the_art_lookup():
     """The gate that decides a draft is art had no word for this one: the bad
     title names no medium and no artist, so nothing matched and the lookup --
     the pass that would have caught it -- never ran."""
-    # Inline and guarded: importing the app pulls in the vision client, and
-    # the lint+unit job deliberately doesn't install it. The smoke job runs
-    # the whole suite with the real requirements, and this runs there.
-    pytest.importorskip("anthropic")
-    pytest.importorskip("PIL")
-    from backend.main import _ART_WORDS
+    # Read from the expert, which is where the list lives. It used to be
+    # imported from backend.main -- a second copy of these words that the app
+    # has since stopped carrying, and that this assertion would have gone on
+    # passing against long after the real gate had changed.
+    #
+    # No importorskip left either, because experts/art/match imports nothing:
+    # that is the property gates.yml's lint+unit job exists to hold, and this
+    # test now runs in it rather than only in the four-minute smoke job.
+    from backend.services.experts.art.match import WORDS
 
     bad_title = ("Gronda Blank Stretched Artist Canvas on Wood Frame "
                  "Fabric Wrapped Edges").lower()
-    assert any(w in bad_title for w in _ART_WORDS)
+    assert any(w in bad_title for w in WORDS)
     for word in ("stretched canvas", "stretcher bar", "blank canvas",
                  "empty frame", "verso"):
-        assert word in _ART_WORDS, word
+        assert word in WORDS, word

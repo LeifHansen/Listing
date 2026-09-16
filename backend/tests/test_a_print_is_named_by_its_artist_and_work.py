@@ -91,6 +91,26 @@ def test_art_is_known_by_its_category_or_by_what_it_is_called():
                                         category_suggestion="Clothing > Men"))
 
 
+def test_an_edition_mark_alone_reaches_the_lookup():
+    """The gap between the two art detectors this app used to carry.
+
+    `main` had its own copy of the word lists and tested only those; the
+    expert's `matches()` also reads MARKS -- the things only art carries. A
+    margin photographed with "edition of 250" or a plate mark in it, and no
+    medium word anywhere in the title, scored CERTAIN for the registry (so the
+    item was drafted under the art rules) and False for this gate (so the one
+    pass that would have named the artist never ran).
+
+    Exactly the shape of the blank-canvas bug in
+    test_a_blank_canvas_is_the_back_of_a_painting: a draft whose title knows
+    least is the one that needs the lookup most.
+    """
+    assert main._is_artwork(Listing(title="Framed picture, edition of 250"))
+    assert main._is_artwork(Listing(title="Old frame"), "a plate mark below")
+    # And the guard the marks exist behind: a mug is still not art.
+    assert not main._is_artwork(Listing(title="Ceramic coffee mug, 12oz"))
+
+
 def test_a_draft_that_already_leads_with_its_artist_is_left_alone(lookup, tmp_path):
     calls = lookup(HOKUSAI)
     listing = _draft(title="Katsushika Hokusai Great Wave Woodblock Print",

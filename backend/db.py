@@ -290,8 +290,14 @@ class Notification(Base):
     # the list runs on every boot so a fresh database does get the index, but
     # anything reading the models -- a person, or alembic's autogenerate --
     # could not see that it exists, which is how the two schema sources drift.
+    # And the one the bell's LIST needs, as opposed to its badge: the same
+    # poll reads the newest 50, and neither index above carries created_at, so
+    # the sort ran over every notification the seller had ever received.
+    # Nothing prunes this table -- a row per sale -- so that cost grows with
+    # how well they are doing and never comes back down.
     __table_args__ = (
         Index("ix_notifications_user_unread", "user_id", "read_at"),
+        Index("ix_notifications_user_created", "user_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -560,6 +566,11 @@ _MIGRATIONS = (
     # has to swallow on every start.
     "CREATE INDEX IF NOT EXISTS ix_notifications_user_unread "
     "ON notifications (user_id, read_at)",
+    # The same poll's LIST half. `list_notifications` orders by created_at and
+    # takes 50; neither index above carries that column, so the sort ran over
+    # every row the seller owns, every 60 seconds, in every open tab.
+    "CREATE INDEX IF NOT EXISTS ix_notifications_user_created "
+    "ON notifications (user_id, created_at)",
     # eBay's immutable account id. Deletion notices identify the
     # account by this and nothing else, and it is what every
     # ownership check should key on instead of the mutable

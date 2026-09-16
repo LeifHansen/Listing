@@ -24,7 +24,6 @@
   --bg: #f8f3e7;
   --bg-sunken: #efe8d6;
   --card: #fffdf8;
-  --card-hover: #fffdf8;
   --border: #e8ddc8;
   --border-strong: #d8ccb0;
 
@@ -83,7 +82,6 @@
   --bg: #101a2e;
   --bg-sunken: #0b1322;
   --card: #16223a;
-  --card-hover: #1b2a46;
   --border: #273450;
   --border-strong: #384868;
 
@@ -141,7 +139,6 @@
   --color-bg: var(--bg);
   --color-bg-sunken: var(--bg-sunken);
   --color-card: var(--card);
-  --color-card-hover: var(--card-hover);
   --color-line: var(--border);
   --color-line-strong: var(--border-strong);
 
