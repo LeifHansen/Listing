@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, TrendingDown,
+  Tags, Coins, Lightbulb, TrendingDown, BadgePercent,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
   ChevronDown, DollarSign, AlertTriangle, Sparkles,
 } from "lucide-react";
@@ -80,11 +80,16 @@ const DETAILS = "specifics";
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
-  lower_price: TrendingDown,
+  lower_price: TrendingDown, send_offers: BadgePercent,
   finish: PlusCircle, photos: Camera, specifics: ListChecks,
 };
 const REC_TONE = {
   lower_price: "bg-yellow-soft text-warning",
+  // The one group here that is an opportunity rather than a chore: somebody
+  // is already watching these listings. Green, and the only green on the
+  // list, so it reads as the thing to do first — which is also where the
+  // engine ranks it (see recommender's send_offers rule).
+  send_offers: "bg-green-soft text-success",
   finish: "bg-blue-soft text-blue",
   photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
@@ -93,6 +98,7 @@ const REC_TONE = {
 // imperative for one listing ("Lower the price"); groups need the noun form.
 const REC_GROUP_LABEL = {
   lower_price: "Lower prices",
+  send_offers: "Send offers",
   finish: "Finish & list",
   photos: "Add more photos",
   // The noun form of "Fill in details", and the group Enrich all clears.
@@ -109,7 +115,7 @@ const REC_GROUP_LABEL = {
 // done. Hiding a row would only put back the thing that made the counter
 // meaningless — a number that says how much is left while quietly not
 // counting the parts the seller waved away.
-function RecRow({ rec, openListing }) {
+function RecRow({ rec, openListing, onAct, ActIcon }) {
   const Icon = REC_ICON[rec.type] || Lightbulb;
   return (
     <div className="flex items-center gap-3.5 p-4">
@@ -123,9 +129,15 @@ function RecRow({ rec, openListing }) {
         <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
         <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
       </div>
+      {/* Most rows are a way IN to the listing: the work — another photo, a
+          measurement, a new price — is done in the editor, and the arrow says
+          so. `onAct` is for the row whose work is not in the editor at all:
+          an offer to this listing's watchers is a call to eBay and there is
+          nothing in the editor to press, so that row does the thing instead
+          of walking the seller to a screen that cannot. See BULK_ACTIONS. */}
       <Button variant="soft" size="sm" className="shrink-0 -mr-1"
-        onClick={() => openListing(rec.listing_id)}>
-        {rec.label} <ArrowRight aria-hidden />
+        onClick={() => (onAct ? onAct(rec) : openListing(rec.listing_id))}>
+        {rec.label} {onAct && ActIcon ? <ActIcon aria-hidden /> : <ArrowRight aria-hidden />}
       </Button>
     </div>
   );
@@ -169,6 +181,36 @@ const BULK_ACTIONS = {
       note: "New prices go straight to eBay. Anything that has sold or ended is skipped.",
     },
     run: (ctx, value) => ctx.lowerAll(ctx.group, value),
+  },
+  // The discount that never shows up on the listing. eBay carries it
+  // privately to the buyers watching each item; the asking price everyone
+  // else sees does not move, which is what makes this worth offering before
+  // the price drop above.
+  //
+  // The minimum is eBay's, not a taste: an offer below 5% off is refused
+  // outright (see services/ebay_offers.MIN_DISCOUNT). The maximum is ours,
+  // and lower than the price drop's 75% because a buyer accepts one of these
+  // with a single tap — a slipped decimal here is a sale at that number, not
+  // a price a seller can still think better of.
+  send_offers: {
+    verb: "Send offers…",
+    icon: BadgePercent,
+    // ...and the same verb on a single row. The other groups' rows are a way
+    // into the editor, because that is where another photo or a new price
+    // gets made; there is nothing in the editor that sends an offer, so a row
+    // that walked the seller there would be a button that leads nowhere. This
+    // one opens the same amount panel for that one listing instead.
+    perRow: true,
+    amount: {
+      unit: "% off", initial: 10, min: 5, max: 50, step: 1,
+      label: "Offer everyone watching these listings",
+      submit: (n, value, total) =>
+        `Offer ${runCount(n, total, "listing")} at ${value}% off`,
+      note: "Only the buyers watching each listing see the discount — your "
+        + "asking price stays as it is. eBay's offer stands for a few days, "
+        + "and anything it has no interested buyers for is skipped.",
+    },
+    run: (ctx, value) => ctx.sendOffers(ctx.group, value),
   },
 };
 
@@ -272,10 +314,16 @@ function GroupHead({ group, Icon }) {
 // One suggestion category: a collapsed header (icon, label, count) that
 // expands to the full row list. Collapsed by default — eight "Lower the
 // price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
-                    busy, progress }) {
+function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
+                    finishEverything, busy, progress }) {
   const [open, setOpen] = useState(false);
-  const [amountOpen, setAmountOpen] = useState(false);
+  // WHAT the amount panel is about to run on, or null when it is closed:
+  // the whole group, or the one listing whose row asked for it. It was a
+  // bare open/closed flag while the group button was the only thing that
+  // could open it; a row that runs the action itself (see RecRow's `onAct`)
+  // needs the panel to know it is about one listing, or it would quote the
+  // seller the whole group's count and then send one offer.
+  const [amountFor, setAmountFor] = useState(null);
   const Icon = REC_ICON[group.type] || Lightbulb;
   const action = BULK_ACTIONS[group.type];
   const ActionIcon = action?.icon;
@@ -283,6 +331,11 @@ function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
   // whole group; this is the part of it a single run touches.
   const total = groupSize(group);
   const perRun = runSize(total, cap);
+  // The panel is about one listing when a row opened it, and about the group
+  // when the header button did.
+  const one = amountFor && amountFor !== group;
+  const panelCount = one ? 1 : perRun;
+  const panelTotal = one ? 1 : total;
   return (
     <div>
       <div className="flex items-center gap-2 pr-4">
@@ -311,10 +364,10 @@ function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
         {action && (
           <Button variant="soft" size="sm" className="shrink-0"
             loading={busy} disabled={busy}
-            aria-expanded={action.amount ? amountOpen : undefined}
+            aria-expanded={action.amount ? amountFor === group : undefined}
             onClick={() => (action.amount
-              ? setAmountOpen((o) => !o)
-              : action.run({ group, cap, lowerAll, finishEverything }))}>
+              ? setAmountFor((f) => (f === group ? null : group))
+              : action.run({ group, cap, lowerAll, sendOffers, finishEverything }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
@@ -339,14 +392,22 @@ function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
         </p>
       )}
       <AnimatePresence initial={false}>
-        {action?.amount && amountOpen && (
+        {action?.amount && amountFor && (
           <BulkAmountPanel
-            amount={action.amount} count={perRun} total={total}
+            amount={action.amount} count={panelCount} total={panelTotal}
             busy={busy}
-            onCancel={() => setAmountOpen(false)}
+            onCancel={() => setAmountFor(null)}
             onSubmit={(value) => {
-              setAmountOpen(false);
-              action.run({ group, cap, lowerAll, finishEverything }, value);
+              // One listing's run is the same run over a group of one, so
+              // there is one code path to the server and one way the result
+              // is reported — rather than a second, nearly-identical handler
+              // that would be the one to drift.
+              const target = one
+                ? { type: group.type, recs: [amountFor], total: 1 }
+                : group;
+              setAmountFor(null);
+              action.run({ group: target, cap, lowerAll, sendOffers,
+                           finishEverything }, value);
             }} />
         )}
       </AnimatePresence>
@@ -366,7 +427,9 @@ function RecGroup({ group, cap, openListing, lowerAll, finishEverything,
             <div className="divide-y divide-line border-t border-line">
               {group.recs.map((rec) => (
                 <RecRow key={`${rec.listing_id}-${rec.type}`} rec={rec}
-                  openListing={openListing} />
+                  openListing={openListing} ActIcon={ActionIcon}
+                  onAct={action?.perRow && action.amount
+                    ? (r) => setAmountFor(r) : undefined} />
               ))}
             </div>
           </motion.div>
@@ -633,6 +696,35 @@ export function Dashboard() {
       loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
+    } finally { setBulkBusy(null); }
+  };
+
+  // The same shape for "Send offers", and it reports the same way, because
+  // the same thing is true of it: the group was computed minutes ago and eBay
+  // decides per listing whether there is anybody to offer it to. "Sent 9
+  // offers · 3 skipped" is the honest answer, and the skips are ordinary —
+  // a listing whose watchers have already been offered this week, or one
+  // eBay no longer counts as having interested buyers.
+  const sendOffers = async (group, percent) => {
+    const ids = group.recs.map((r) => r.listing_id);
+    const unsent = Math.max(groupSize(group) - ids.length, 0);
+    setBulkBusy(group.type);
+    try {
+      const res = await postJson("/api/ebay/send-offers",
+        { percent, listing_ids: ids });
+      const parts = [];
+      if (res.changed) parts.push(`Sent ${res.changed} offer${res.changed === 1 ? "" : "s"} at ${percent}% off`);
+      if (res.skipped) parts.push(`${res.skipped} skipped`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      const left = unsent + (res.deferred || 0);
+      if (left) parts.push(`${left} left — run it again to finish`);
+      toast(parts.join(" · ") || "No offers to send.", {
+        kind: res.changed ? "success" : res.failed ? "error" : "info",
+      });
+      refreshInsights();
+      loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't send offers: ${e.message}`, { kind: "error" });
     } finally { setBulkBusy(null); }
   };
 
@@ -1054,7 +1146,7 @@ export function Dashboard() {
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
                   openListing={openListing} lowerAll={lowerAll}
-                  finishEverything={finishEverything}
+                  sendOffers={sendOffers} finishEverything={finishEverything}
                   busy={bulkBusy === g.type}
                   progress={bulkProgress?.type === g.type ? bulkProgress : null} />
               ));

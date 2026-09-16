@@ -51,7 +51,8 @@ from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, easypost, ebay,
-                       ebay_account, ebay_deletion, ebay_notify, ebay_orders,
+                       ebay_account, ebay_deletion, ebay_notify, ebay_offers,
+                       ebay_orders,
                        ebay_trading, ebay_video, image_import, images,
                        imagesearch, jobstore,
                        listing_merge, listing_prompt, listing_sync,
@@ -9002,6 +9003,133 @@ def lower_prices(payload: dict, request: Request) -> dict:
     return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
 
 
+# How many listings one "Send offers" run touches. Each is a separate eBay
+# call — the Negotiation API takes exactly one listing per request (see
+# services/ebay_offers) — so this is the same gateway-patience budget the
+# price cap above is, and the remainder comes back as `deferred`.
+BULK_OFFER_CAP = int(os.getenv("BULK_OFFER_CAP", "40") or "40")
+
+
+@app.post("/api/ebay/send-offers")
+def send_offers(payload: dict, request: Request) -> dict:
+    """Offer several live listings to their watchers at one discount — eBay's
+    "Send offers to interested buyers", applied to the Dashboard's "Send
+    offers" suggestion group in one go.
+
+    What this does NOT do is move any price. The discount goes privately to
+    the buyers eBay says are interested in each listing; everyone else goes on
+    seeing the listing at what it has always cost. That is the whole reason
+    this ranks above the price drop on a listing that has watchers.
+
+    The caller names the listings (the group's own membership), so this can
+    never widen to the seller's whole store, and eBay's own eligibility sweep
+    narrows it further: a listing eBay does not currently consider to have
+    interested buyers is skipped without spending a call to be told so. Per
+    listing, eBay's refusal comes back in the seller's language, and neither a
+    skip nor a failure stops the rest of the run.
+    """
+    user = auth.current_user(request)
+    creds = _ebay_creds_for(request)
+    if not user or not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        percent = ebay_offers.validate_discount(payload.get("percent"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # eBay refuses HTML and caps the note at 2,000 characters; cleaned here so
+    # a seller finds out at the boundary rather than one listing at a time.
+    message = ebay_offers.clean_message(payload.get("message"))
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to offer.")
+    # Same bound, for the same reason, as the bulk price drop: the lookup
+    # below is BY id, and an unbounded body is an unbounded `IN (...)`.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    wanted = set(ids)
+    mine = db.get_listings(ids, user["id"])
+    records, deferred = mine[:BULK_OFFER_CAP], mine[BULK_OFFER_CAP:]
+    # WHICH listings eBay will carry an offer for, asked once for the whole
+    # account rather than discovered one rejected call at a time. eBay counts
+    # more than watchers here and is the only party that knows the rest, so
+    # this is its answer and not our guess.
+    #
+    # A sweep that cannot be READ is not an empty sweep. Falling through to
+    # None means "we could not ask", and the run then sends to every listing
+    # the seller named and lets eBay refuse the ones it will not carry — which
+    # costs calls but does what was asked. Reading an unreadable sweep as "no
+    # listings are eligible" would instead report every listing as skipped and
+    # look exactly like a store nobody is watching.
+    #
+    # One connection carries the whole run — the sweep and then every offer.
+    # A capped run is up to BULK_OFFER_CAP serial calls to one host, and a
+    # fresh client per listing is that many TLS handshakes added to a request
+    # the gateway is already timing.
+    #
+    # Not asked at all when there is nothing to send to: every listing the
+    # caller named has since been deleted, or belongs to somebody else. eBay's
+    # allowances are shared by the whole app, and this would spend one to
+    # narrow an empty run.
+    eligible: Optional[set] = None
+    http = httpx.Client(timeout=30)
+    try:
+        if records:
+            eligible = ebay_offers.eligible_items(creds, client=http)
+    except ebay_offers.ScopeError:
+        http.close()
+        raise HTTPException(
+            400, "Reconnect your eBay account to send offers to buyers, then "
+                 "try again.") from None
+    except Exception as exc:  # noqa: BLE001 - the send can still be attempted
+        log.info("eligible-items sweep unavailable for user=%s: %s",
+                 user["id"], exc)
+
+    def _apply(rec: dict) -> dict:
+        if rec.get("status") not in ("published", "live"):
+            return {"skip": "No longer live on eBay."}
+        data = rec.get("listing") or {}
+        item_id = str(data.get("ebay_listing_id") or "").strip()
+        if not item_id:
+            return {"skip": "This listing isn't on eBay."}
+        if eligible is not None and item_id not in eligible:
+            return {"skip": "eBay has no interested buyers for it right now."}
+        try:
+            sent = ebay_offers.send_offer(creds, item_id, percent,
+                                          message=message, client=http)
+        except ebay_offers.OfferRefused as exc:
+            if ebay_offers.skippable(exc):
+                return {"skip": str(exc)}
+            return {"message": str(exc)}
+        # Recorded on the listing, and this is the half of the button that
+        # makes the group shrink. The nudge is computed from the watch count,
+        # which an offer does not move — without the stamp the group comes
+        # straight back with the same listings and the same count, which is
+        # what a button that does nothing looks like. See
+        # recommender.OFFER_QUIET_DAYS, and price_lowered_at for the same
+        # lesson learned the hard way on the group above this one.
+        stamp = recommender.offer_sent_stamp()
+        db.mutate_listing_data(
+            rec["id"], lambda d: {**d, "offer_sent_at": stamp},
+            user_id=user["id"])
+        return {"ok": True, "percent": percent, "offer_id": sent.get("offer_id")}
+
+    try:
+        result = bulk_actions.run(records, _apply)
+    finally:
+        http.close()
+    missing = wanted - {r["id"] for r in mine}
+    for rid in sorted(missing):
+        result.skipped.append({"listing_id": rid, "title": "this listing",
+                               "message": "Listing not found."})
+    log.info("bulk send-offers: user=%s percent=%s sent=%d skipped=%d "
+             "failed=%d deferred=%d", user["id"], percent, len(result.changed),
+             len(result.skipped), len(result.failed), len(deferred))
+    return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
+
+
 # How many listings one enrich run touches. Far below the price cap above
 # because the work per listing is a different order of magnitude: a Claude
 # vision pass over that listing's photos (plus, for an imported one, a
@@ -9022,7 +9150,8 @@ def _bulk_caps() -> dict:
     with the recommendations so the group can say what this pass will actually
     do before the seller agrees to spend anything on it.
     """
-    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP}
+    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP,
+            "send_offers": BULK_OFFER_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it

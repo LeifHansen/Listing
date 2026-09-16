@@ -37,6 +37,25 @@ FEW_PHOTOS = 3    # fewer than this → suggest adding photos
 # birthday.
 PRICE_QUIET_DAYS = STALE_DAYS
 
+# How long "Send offers" leaves a listing alone after an offer has gone out to
+# its buyers, for the same reason and out of the same history as the price
+# quiet period above.
+#
+# The signal this nudge reads is the WATCH COUNT, and sending an offer does
+# not move it: the watchers are exactly the people who were just offered a
+# discount, and they are still watching a second later. So the group would
+# come back the moment the run finished, same listings, same count — the shape
+# of a button that does nothing, reported twice already on the other two
+# groups.
+#
+# eBay's own clock sets the floor. A seller-initiated offer stands for 4 days
+# on EBAY_US and EBAY_GB (2 on most other sites) and eBay refuses a second one
+# while the first is live (error 150019), so anything under that is advice
+# that cannot be taken. A week leaves the longest of those windows to expire
+# and the buyer a day or two past it to think again — and if the offer did not
+# work, the nudge is right again and comes back on its own.
+OFFER_QUIET_DAYS = 7
+
 # There is no "Check details" group, and deliberately none. The notes the
 # fill could not answer — "exact measurements", "confirm the signature" — used
 # to be their own suggestion type, and it was wallpaper: 203 rows on a real
@@ -101,6 +120,18 @@ def price_drop_stamp(stored: dict, new_price) -> str:
     if was is not None and now_ is not None and now_ < was:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
     return str((stored or {}).get("price_lowered_at") or "").strip()
+
+
+def offer_sent_stamp() -> str:
+    """The `offer_sent_at` to persist for a listing an offer just went out on.
+
+    Now, on the server's clock. It takes nothing and reads nothing on purpose:
+    unlike the price stamp above there is no condition to check — the caller
+    only reaches this once eBay has confirmed the offer — and the one thing
+    that must not decide it is anything the client sent. It lives here beside
+    the rule that reads it (OFFER_QUIET_DAYS) so the two cannot drift.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # "Fill in details" fills ONE thing: eBay's item specifics for the listing's
@@ -194,6 +225,37 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     # PRICE_QUIET_DAYS above, and `price_lowered_at` on the model.
     since_cut = _age_days(str(listing.get("price_lowered_at") or "").strip() or None)
     quiet = since_cut is not None and since_cut < PRICE_QUIET_DAYS
+
+    # The strongest signal a live listing can carry: somebody is watching it
+    # and has not bought. eBay will privately offer all of them a discount at
+    # once (the Negotiation API — see services/ebay_offers), which beats the
+    # price nudge below on the listings that qualify for both, because the
+    # public price never moves: only the people already interested see the
+    # number, and everyone else still sees the listing at full price.
+    #
+    # Ranked above the traffic-driven price drop for that reason. The two
+    # barely overlap by construction — that rule wants views with NO watchers
+    # — but a stale listing with watchers can earn both, and on that listing
+    # this is the one to offer first.
+    #
+    # Three gates, each of them something eBay would refuse:
+    #   * an AUCTION takes bids, not offers (it is not a Buy It Now price to
+    #     discount), so the nudge would be advice eBay cannot carry out;
+    #   * a listing with a buyer's Best Offer already waiting is one eBay
+    #     refuses a seller offer on (150018) — and the seller has an answer to
+    #     give there anyway, which the grid already shows them;
+    #   * `offers` is absent, not zero, when nobody could ask (see
+    #     metrics._offers), and absence is not "no offers" — but it is not a
+    #     reason to withhold the nudge either, so an unknown one falls through
+    #     to the send, which asks eBay and reports what it says.
+    fmt = str(listing.get("listing_format") or "FIXED_PRICE").upper()
+    offered = _age_days(str(listing.get("offer_sent_at") or "").strip() or None)
+    offer_quiet = offered is not None and offered < OFFER_QUIET_DAYS
+    if (watchers and fmt == "FIXED_PRICE" and not m.get("offers")
+            and not offer_quiet):
+        add("send_offers", "Send an offer",
+            f"{watchers} watcher{'' if watchers == 1 else 's'} — offer them a "
+            "discount before they move on.", 95)
 
     # Data-driven (real eBay traffic) beats the age heuristics below.
     # (No "Add a sale" nudge — removed on request: it read as noise.)

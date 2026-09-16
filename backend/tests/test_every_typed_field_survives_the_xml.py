@@ -156,6 +156,13 @@ def test_the_scan_covers_every_free_text_field_on_the_model():
         # stop asking for a markdown the seller has already made; eBay is told
         # the new PRICE, never the date we noticed it.
         "price_lowered_at",
+        # When an offer last went out to this listing's watchers, on the
+        # server's own clock and written only once eBay has confirmed the
+        # offer. The dashboard reads it to stop offering a discount the
+        # buyers have already been sent; the offer itself goes to eBay
+        # through the Negotiation API, which is not a listing payload at
+        # all, so this date never reaches the XML.
+        "offer_sent_at",
         # The identify pass's grade on its own draft — one of three levels,
         # anything else coerced to "" by the model's validator. Read by the
         # draft cards, never sent to eBay.
