@@ -1162,10 +1162,12 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
 
     A REMOTE engine gets a second look at the border, and only at the border.
     `border()` is asked first and is still the trusted answer, because it is
-    geometry and cannot be wrong about what is inside the box it returns. When
-    it gives up -- and the commonest reason is a print photographed hand-held
-    over a floor rather than square-on -- the remote matte's outer SHAPE is
-    offered instead, and artwork.quad_from_alpha refuses it unless it is a
+    geometry and cannot be wrong about what is inside the box it returns. It
+    handles a hand-held photo itself -- it fits the content it found at an
+    angle rather than demanding an upright rectangle -- so what reaches the
+    remote engine is a picture whose edge could not be found at all: one lying
+    on a surface close to its own colour. Then the remote matte's outer SHAPE
+    is offered instead, and artwork.quad_from_alpha refuses it unless it is a
     rectangle at some angle rather than a subject lifted out of one. Either
     way the matte that ships is solid, from artwork.mask() or artwork.quad().
     There is still no code path here that can remove a pixel from inside the
@@ -1180,9 +1182,9 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     if remote is None:
         return None
     # Four corners rather than a box, because the photo that gets here is the
-    # one border() could not scan -- and the commonest reason for that is that
-    # the print was photographed hand-held over a floor rather than square-on.
-    # See artwork.quad_from_alpha.
+    # one border() could not scan at all, and a print that faint against its
+    # background is usually also lying at an angle on it. See
+    # artwork.quad_from_alpha.
     corners = artwork.quad_from_alpha(rgb.size, remote)
     if corners is None:
         return None
