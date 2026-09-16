@@ -317,8 +317,9 @@ describe("the group's button takes the whole list", () => {
         accepted: 307, deferred: 0, stopped: "",
         results: {
           changed: [], failed: [],
-          skipped: [{ listing_id: "z", title: "Kyrie 5 CNY",
-                      message: "This listing's photos aren't on the server anymore." }],
+          skipped: [{ listing_id: "z", title: "Kyrie 5 CNY", needs_you: true,
+                      message: "No photos left on this listing for the AI to "
+                        + "read — add one and it'll fill in the rest." }],
         },
       },
     });
@@ -330,7 +331,39 @@ describe("the group's button takes the whole list", () => {
     // run on stays on the list, and saying so is the difference between
     // falling short and quietly claiming to have finished.
     expect(text()).toContain("1 still need you");
-    expect(text()).toContain("Kyrie 5 CNY: This listing's photos aren't on the server");
+    expect(text()).toContain("Kyrie 5 CNY: No photos left on this listing");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("does not bill a skip to the seller when it is not theirs to do", async () => {
+    // A sold listing cannot be revised by anyone, so counting it under "still
+    // need you" invents an errand. This is the shape the seller complained
+    // about: a run that finished, reporting a list of chores that weren't.
+    const { root, text } = await mount([], {
+      ...PLAN,
+      jobResult: {
+        changed: 2, skipped: 2, failed: 0, total: 4, filled: 5,
+        accepted: 0, deferred: 0, stopped: "",
+        results: {
+          changed: [], failed: [],
+          skipped: [
+            { listing_id: "a", title: "Sold Jacket", needs_you: false,
+              message: "Sold and ended listings can't be revised." },
+            { listing_id: "b", title: "Mardi Gras Mask", needs_you: true,
+              message: "No eBay category yet — open it and pick one." },
+          ],
+        },
+      },
+    });
+    await click(byText("Enrich all"));
+    await click(byText("Finish them"));
+    expect(text()).toContain("1 still need you");
+    expect(text()).not.toContain("2 still need you");
+    // Named rather than hidden: the run did not touch it either.
+    expect(text()).toContain("1 couldn't be filled in");
+    // And only the seller's own is spelled out — the sold one is not a chore.
+    expect(text()).toContain("Mardi Gras Mask");
+    expect(text()).not.toContain("Sold Jacket");
     await act(async () => { root.unmount(); });
   });
 

@@ -45,3 +45,25 @@ def test_explicit_bucket_and_public_url_win(fresh_config):
     assert cfg.R2_BUCKET == "custom"
     assert cfg.r2_public_urls()
     assert cfg.R2_PUBLIC_BASE_URL == "https://img.example.com"  # slash stripped
+
+
+def test_a_configured_run_does_not_outlive_its_test(fresh_config):
+    """`fresh_config` has to hand the process back unconfigured.
+
+    Its teardown runs BEFORE the monkeypatch it used undoes its own setenv, so
+    the reload that "leaves the process the way we found it" used to re-read
+    the variables this very file sets and bake them in for the whole session:
+    every later test ran with R2_ACCOUNT_ID="abc123" against an endpoint that
+    does not resolve. Nothing noticed while no hot path touched the bucket. A
+    photo lookup that does — the fill's rehydrate — then spent seconds in a
+    connection timeout, in tests that had never configured storage at all.
+
+    Ordering makes this test meaningful: it runs after the ones above, so the
+    environment it inherits is the one their teardown left.
+    """
+    from backend import config, objstore
+
+    assert not config.r2_configured(), (
+        f"R2 config leaked: account={config.R2_ACCOUNT_ID!r}, "
+        f"bucket={config.R2_BUCKET!r}")
+    assert not objstore.enabled()

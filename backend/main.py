@@ -2374,6 +2374,89 @@ def _ensure_local(session_id: str, name: str, path: Path) -> bool:
     return False
 
 
+# What a fill says when a listing genuinely has no photo left to read — every
+# copy the app can reach is gone (see _photos_for_fill, which looks in all
+# three places before anyone is allowed to say this). It replaces "This
+# listing's photos aren't on the server anymore", which was a sentence about
+# our infrastructure: it told the seller where the file wasn't, said nothing
+# about what to do, and was usually not even true.
+_NO_PHOTOS = ("No photos left on this listing for the AI to read — "
+              "add one and it'll fill in the rest.")
+
+
+def _photos_for_fill(session_id: str, listing: Listing,
+                     rec: Optional[dict] = None) -> list[Path]:
+    """The photo files an AI fill reads — brought BACK to the volume when all
+    that happened to them is that the volume let them go.
+
+    Every fill path used to build this list with a bare `is_file()` filter and
+    stop there. That is the wrong question once R2 is configured: the reclaim
+    pass verifies a photo is in the bucket and then unlinks the local copy (see
+    _offload_to_r2), so any listing older than the offload TTL has an empty
+    optimized/ dir and photos that are perfectly safe. Every one of them
+    answered "This listing's photos aren't on the server anymore" — nineteen at
+    a time under one press of "Finish all", each naming a repair (re-upload
+    them) that would not have helped, and that on an imported listing was not
+    even the seller's to make. The bytes were never gone. Viewing those same
+    photos worked the whole time, because /media has always fallen back to the
+    bucket; only the readers that open the file on disk — the edits, and these
+    fills — mistook an offload for a loss.
+
+    Three sources, cheapest first:
+      * the volume, when it still holds the file;
+      * R2, for a copy the reclaim pass freed (_ensure_local);
+      * eBay, for an imported listing whose local copies went and whose push to
+        the bucket is best-effort and may never have landed — the same download
+        `_adopt_imported_images` does, asked again because the names it trusts
+        are on the record while the files behind them are not.
+
+    Genuinely empty only when all three are, which is what makes the sentence
+    the callers fall back to true when they do have to say it.
+    """
+    opt_dir = storage.optimized_dir(session_id)
+    names = list(listing.images) or storage.list_optimized(session_id)
+    # The volume alone first, for EVERY name, before anything reaches for the
+    # network. A listing the reclaim pass has not touched answers here, which
+    # is almost all of them and is what the old filter did; and a listing
+    # holding even one photo locally has something the AI can read, so paying
+    # a round trip for its siblings would buy nothing. Only a listing with
+    # nothing at all on disk is worth asking the bucket about.
+    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    if paths:
+        return paths
+    paths = [opt_dir / n for n in names
+             if _ensure_local(session_id, n, opt_dir / n)]
+    if paths:
+        return paths
+    # Only now, on the give-up path, is the stored record worth a lookup. A
+    # caller holding one passes it; the routes do not, and reading it eagerly
+    # would put a database round trip in front of every fill to answer a
+    # question almost none of them reach.
+    if rec is None:
+        rec = db.get_listing_best_effort(session_id)
+    src = (rec or {}).get("listing") or {}
+    source = (listing.source or "").strip() or src.get("source") or ""
+    urls = list(listing.image_urls) or src.get("image_urls") or []
+    if source != "ebay" or not urls:
+        return paths
+    # Re-download, and say so: a listing arriving here has lost both copies the
+    # app controls, and that is worth seeing in the log of an app whose whole
+    # job is holding photos.
+    log.info("rehydrate: re-importing %s's photos from eBay (%d url(s))",
+             session_id, len(urls))
+    redone = image_import.import_listing_images(session_id, list(urls))
+    if not redone:
+        return paths
+    # Straight back to the bucket, or the next offload pass frees a local copy
+    # it never uploaded and the download repeats on every fill.
+    _in_background(objstore.upload_optimized, session_id, opt_dir, redone,
+                   what="re-imported photo R2 push")
+    # Onto the listing being filled, for the same reason adoption writes them:
+    # the save at the end of the fill would otherwise put the stale names back.
+    listing.images = redone
+    return [opt_dir / n for n in redone if (opt_dir / n).is_file()]
+
+
 def _purge_session_images(session_id: str) -> None:
     """Delete a session's photos (local disk + R2). RAISES if it could not.
 
@@ -6183,11 +6266,12 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
         # httpx's words name the API base, the path and the category id.
         raise _lookup_failed("load eBay's item specifics for that category",
                              exc) from exc
-    opt_dir = storage.optimized_dir(session_id)
-    names = listing.images or storage.list_optimized(session_id)
-    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    # _photos_for_fill, not a bare is_file() filter: an offloaded photo is
+    # still the seller's photo, and this route refused every listing the
+    # reclaim pass had touched.
+    paths = _photos_for_fill(session_id, listing)
     if not paths:
-        raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+        raise HTTPException(400, _NO_PHOTOS)
     spent = _charge_ai(request, "specifics")
     try:
         filled = claude_ai.fill_aspects(paths, listing, aspects,
@@ -6281,11 +6365,9 @@ def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> di
         raise HTTPException(
             400, "Pick an eBay category first — the details eBay asks for "
                  "depend on it.")
-    opt_dir = storage.optimized_dir(session_id)
-    names = listing.images or storage.list_optimized(session_id)
-    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    paths = _photos_for_fill(session_id, listing)
     if not paths:
-        raise HTTPException(400, "This listing's photos aren't on the server anymore.")
+        raise HTTPException(400, _NO_PHOTOS)
     spent = _charge_ai(request, "specifics")
     uid = _uid(request)
     job_id = storage.new_session_id()
@@ -9089,7 +9171,10 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
         # A settled listing is an archive record: its photos are purged on
         # sale, and eBay will not revise a finished item. Relist is the verb
         # for those, and it is a different suggestion.
-        return {"skip": "Sold and ended listings can't be revised."}
+        # Not the seller's to do: nobody can revise a finished eBay item.
+        # Counted under "still need you" it was an errand that does not exist.
+        return {"skip": "Sold and ended listings can't be revised.",
+                "needs_you": False}
     if status in ("published", "live") and not creds:
         # Checked BEFORE the charge: filling in a live listing that we then
         # cannot revise leaves the buyer-facing page exactly as blank as it
@@ -9110,11 +9195,9 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
     _resolve_category(listing)
     if not listing.category_id:
         return {"skip": "No eBay category yet — open it and pick one."}
-    names = listing.images or storage.list_optimized(rid)
-    opt_dir = storage.optimized_dir(rid)
-    paths = [opt_dir / n for n in names if (opt_dir / n).is_file()]
+    paths = _photos_for_fill(rid, listing, rec)
     if not paths:
-        return {"skip": "This listing's photos aren't on the server anymore."}
+        return {"skip": _NO_PHOTOS}
 
     before_brand = (listing.brand or "").strip()
     before = [(s.name, s.value) for s in listing.item_specifics]
@@ -9133,7 +9216,10 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
             # "didn't run" is the return value rather than an exception — and
             # nothing was earned, so the charge goes back.
             tokens.refund(spent)
-            return {"skip": "The AI couldn't read eBay's details for that category."}
+            # Ours or eBay's, either way not theirs — there is no version of
+            # this a seller fixes by opening the listing.
+            return {"skip": "The AI couldn't read eBay's details for that "
+                            "category.", "needs_you": False}
         settled = _drop_answered_missing_info(listing)
         filled = _specifics_filled(before, before_brand, listing)
         if not added and not settled:
@@ -9218,8 +9304,13 @@ def _run_enrich_job(job_id: str, records: list[dict], uid: str,
                 finished = i + 1
                 continue
             if outcome.get("skip"):
-                result.skipped.append({"listing_id": rec.get("id") or "",
-                                       "title": title, "message": outcome["skip"]})
+                result.skipped.append({
+                    "listing_id": rec.get("id") or "", "title": title,
+                    "message": outcome["skip"],
+                    # Same field bulk_actions.run records, and for the same
+                    # reason: a skip nobody can act on must not be counted as
+                    # one the seller has to.
+                    "needs_you": outcome.get("needs_you", True)})
             elif outcome.get("ok"):
                 result.changed.append({"listing_id": rec.get("id") or "",
                                        "title": title,
@@ -9423,8 +9514,10 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
                                           "message": str(exc)[:200]})
                     outcome = {}
                 if outcome.get("skip"):
-                    result.skipped.append({"listing_id": rid, "title": title,
-                                           "message": outcome["skip"]})
+                    result.skipped.append({
+                        "listing_id": rid, "title": title,
+                        "message": outcome["skip"],
+                        "needs_you": outcome.get("needs_you", True)})
                 elif outcome.get("ok"):
                     filled_total += int(outcome.get("added") or 0)
                     result.changed.append({"listing_id": rid, "title": title,
@@ -9646,6 +9739,28 @@ def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
                         else "Saved — this listing now matches eBay.")}
 
 
+def _reachable(listing_id: str, names: list[str]) -> bool:
+    """Is at least one of these photos still somewhere we can get it from?
+
+    The names on a record and the files behind them are two different facts,
+    and adoption used to conflate them: a record carrying `images` was taken
+    as a record whose photos are here, so it returned those names and fetched
+    nothing. That holds right up until the reclaim pass frees the local copies
+    (_offload_to_r2) — after which the names are still on the record, the
+    files are not, and "ready" is a claim about a listing with no photos on it.
+
+    One HEAD against the bucket answers it without pulling anything back; the
+    caller re-downloads from eBay when this says no. Cheap enough to ask on
+    every adoption, and a listing whose first photo is present has not been
+    offloaded, so the common path costs a single stat."""
+    for n in names:
+        if (storage.optimized_dir(listing_id) / n).is_file():
+            return True
+    if not objstore.enabled():
+        return False
+    return any(objstore.exists(objstore.key_for(listing_id, n)) for n in names)
+
+
 def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
     """Copy an imported eBay listing's EPS-hosted photos into app storage so
     they're editable exactly like uploaded ones (the app owns every editable
@@ -9657,7 +9772,7 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
     listing = rec.get("listing") or {}
     if (listing.get("source") or "") != "ebay" or not listing.get("image_urls"):
         return []
-    if listing.get("images"):
+    if listing.get("images") and _reachable(listing_id, listing["images"]):
         return list(listing["images"])
     if (rec.get("status") or "") == "sold":
         # Archived — its session dir is purged on sale; adopting here would

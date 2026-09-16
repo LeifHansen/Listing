@@ -714,15 +714,24 @@ export function Dashboard() {
           + (res.filled ? ` · ${res.filled} detail${res.filled === 1 ? "" : "s"} added` : ""));
       }
       if (res.accepted) parts.push(`${res.accepted} marked as checked`);
-      // The honest remainder. A listing whose photos are no longer on the
-      // server has not been read and the fill is still ahead of it, so it
-      // stays on the list — and saying so is the difference between a button
-      // that fell short and one that quietly lied about finishing.
-      if (res.skipped) parts.push(`${res.skipped} still need you`);
+      // The honest remainder — and only the part of it that is honestly
+      // theirs. A skip is not automatically an errand: a sold listing cannot
+      // be revised by anyone, and one whose photos the AI could not read for
+      // reasons at our end is not waiting on the seller either. Both used to
+      // be counted under "still need you", which turned a finished run into a
+      // list of chores that did not exist. The server marks the difference
+      // (needs_you on each skip); this only ever shows the ones that do.
+      const results = res.results || {};
+      const skipped = results.skipped || [];
+      const theirs = skipped.filter((r) => r.needs_you !== false);
+      const ours = skipped.length - theirs.length;
+      if (theirs.length) parts.push(`${theirs.length} still need you`);
+      // Named, not hidden: the run did not touch them and the count above no
+      // longer says so, so something has to.
+      if (ours) parts.push(`${ours} couldn't be filled in`);
       if (res.failed) parts.push(`${res.failed} failed`);
       if (res.stopped) parts.push(res.stopped);
-      const results = res.results || {};
-      const undone = [...(results.skipped || []), ...(results.failed || [])];
+      const undone = [...theirs, ...(results.failed || [])];
       const lines = undone.slice(0, 3).map(
         (r) => `• ${r.title || "A listing"}: ${r.message}`);
       const more = undone.length - lines.length;

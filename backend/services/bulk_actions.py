@@ -94,6 +94,12 @@ def run(records: list[dict], apply_one: Callable[[dict], dict]) -> BulkResult:
     `apply_one` returns {"ok": True, ...} to count as changed, {"skip":
     "reason"} to skip, or raises to fail — and a raise is contained here so the
     rest of the run continues.
+
+    A skip may add "needs_you": False to say that nothing about it is the
+    seller's to do — a sold listing cannot be revised by anyone, and counting
+    it under "still need you" asks them for work that does not exist. The
+    default is True, so a reason that has not thought about it is still put in
+    front of them; the lie worth avoiding is the other one.
     """
     result = BulkResult()
     for rec in records:
@@ -109,7 +115,8 @@ def run(records: list[dict], apply_one: Callable[[dict], dict]) -> BulkResult:
             continue
         if outcome.get("skip"):
             result.skipped.append({"listing_id": rid, "title": title,
-                                   "message": outcome["skip"]})
+                                   "message": outcome["skip"],
+                                   "needs_you": outcome.get("needs_you", True)})
         elif outcome.get("ok"):
             result.changed.append({"listing_id": rid, "title": title,
                                    **{k: v for k, v in outcome.items()

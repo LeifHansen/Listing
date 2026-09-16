@@ -255,12 +255,13 @@ def test_a_listing_the_fill_could_not_run_on_says_so_and_stays(seller,
                                                                monkeypatch):
     """The one thing this button does NOT clear, and should not.
 
-    A listing whose photos are no longer on the server has not been read by
-    the AI, and the fill is still genuinely ahead of it — re-adopt the photos
-    (opening it in the editor does that) and it can run. Stamping it done
-    would hide a listing that can still be improved, so it stays on the list
-    and the run says why in the seller's own words rather than silently
-    leaving it there.
+    A listing with no photo left ANYWHERE — not on the volume, not in the
+    bucket, and no eBay page still serving them (see _photos_for_fill, which
+    looks in all three before this skip is allowed) — has not been read by the
+    AI, and the fill is genuinely still ahead of it. Stamping it done would
+    hide a listing that can still be improved, so it stays on the list and the
+    run says why, in a sentence that names what the seller can do about it
+    rather than which disk a file is missing from.
 
     Its NOTES are still retired: that costs nothing and asks nothing of eBay,
     so there is no reason to make the seller press again for it.
@@ -276,7 +277,11 @@ def test_a_listing_the_fill_could_not_run_on_says_so_and_stays(seller,
                      client.post("/api/listings/finish-all").json()["job_id"])
 
     assert result["skipped"] == 1
-    assert "photos aren't on the server" in result["results"]["skipped"][0]["message"]
+    skip = result["results"]["skipped"][0]
+    assert skip["message"] == main._NO_PHOTOS
+    # And it IS the seller's to act on — this one belongs under "still need
+    # you", unlike a sold listing nobody can revise.
+    assert skip["needs_you"] is True
     assert result["accepted"] == 1
     assert dbmod.get_listing("nophoto")["listing"]["notes_accepted_at"]
     # Still asking for the fill, because the fill has still never run on it.
