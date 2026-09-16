@@ -1188,6 +1188,47 @@ def save_prefs(user_id: str, prefs: dict) -> dict:
             "Try again in a moment.") from exc
 
 
+# Where the duplicate card's "Dismiss all" is remembered, inside the same
+# per-user JSON the defaults live in. A reserved key rather than a column of
+# its own: it is a handful of short digests, it is read on exactly one screen,
+# and a table would need a migration to hold what `prefs` already holds. It is
+# unreachable from POST /api/prefs, which stores only its own whitelist, so
+# the Settings screen can never write or clear it by accident.
+_DISMISSED_DUPLICATES = "duplicates_dismissed"
+
+
+def duplicate_dismissals(user_id: str, strict: bool = False) -> dict:
+    """{group fingerprint: when the seller waved it away}.
+
+    Best-effort by default, and deliberately so: this decides whether an
+    ADVISORY card is hidden, and a read that fell over must fail towards
+    showing the seller their possible duplicates rather than towards silently
+    swallowing them.
+
+    `strict=True` for the read that precedes a write — see
+    save_duplicate_dismissals, where `{}` from a broken read would not hide a
+    card, it would erase what the seller already dismissed.
+    """
+    prefs = get_prefs(user_id) if strict else get_prefs_best_effort(user_id)
+    stored = prefs.get(_DISMISSED_DUPLICATES)
+    if not isinstance(stored, dict):
+        return {}
+    return {str(k): str(v) for k, v in stored.items() if k}
+
+
+def save_duplicate_dismissals(user_id: str, dismissals: dict) -> bool:
+    """Replace the dismissal ledger; True when the write landed.
+
+    RAISES StorageUnavailable on a write failure, like every other save here:
+    a "don't remind me again" that quietly did not persist is the one outcome
+    worse than not offering it, because the seller learns it is broken only
+    when the card they dismissed is back tomorrow.
+    """
+    # save_prefs already answers `{}` for the two ways there is nowhere to
+    # write — no database configured, no such user — and raises for the rest.
+    return bool(save_prefs(user_id, {_DISMISSED_DUPLICATES: dict(dismissals)}))
+
+
 def create_user(user_id: str, email: str, password_hash: str):
     """Create a user. Returns the user dict, EMAIL_TAKEN, or None on DB error."""
     try:

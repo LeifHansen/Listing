@@ -20,6 +20,7 @@ seconds, because it was one click that went out twice.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -88,6 +89,37 @@ def _price(rec: dict):
 def _format(rec: dict) -> str:
     return str((rec.get("listing") or {}).get("listing_format")
                or "FIXED_PRICE").upper()
+
+
+def fingerprint(key: str, records: list[dict]) -> str:
+    """A digest of a group as the SELLER could change it.
+
+    This is what a dismissal is pinned to. "Don't remind me again" has to mean
+    "not about these two, as they stand" rather than "never about this title":
+    a seller who looks at the pair, decides they really are two different
+    things and waves it away should not be asked twice — but if they later go
+    and edit one of them, the question they answered is no longer the question
+    in front of them, so the group comes back.
+
+    So this covers exactly what a seller edits: which eBay items are in the
+    group, what each one costs, and how each one sells. Everything the SYNC
+    moves on its own stays out — watch counts, view urls, updated_at, whether
+    a row is the app's or the mirror the store sweep pulled back. Those churn
+    without anybody deciding anything, and a fingerprint that moved with them
+    would re-raise a settled question every time eBay reported a new watcher.
+
+    Relisting mints a new eBay item id, which lands here as a different group:
+    right, because a relisted pair is a fresh pair to look at.
+    """
+    parts = [key]
+    for rec in sorted(records, key=_item_id):
+        price = _price(rec)
+        parts.append("|".join((
+            _item_id(rec),
+            "" if price is None else f"{price:.2f}",
+            _format(rec),
+        )))
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def _gap_seconds(records: list[dict]) -> Optional[float]:
@@ -161,11 +193,12 @@ _FAR_FUTURE = datetime.max.replace(tzinfo=timezone.utc)
 def find(records: list[dict]) -> list[dict]:
     """Groups of live listings that may be the same item listed more than once.
 
-    Each group: {title, confidence, reasons, caveats, listings:[...]}, strongest
-    evidence first. Only LIVE listings count — an ended or sold twin is already
-    resolved — and a group needs at least two DISTINCT eBay item ids, so the
-    app's own record and the sync's mirror of that SAME item never look like a
-    duplicate of each other.
+    Each group: {title, fingerprint, confidence, reasons, caveats,
+    listings:[...]}, strongest evidence first. The fingerprint is what a
+    dismissal is pinned to; see `fingerprint`. Only LIVE listings count — an
+    ended or sold twin is already resolved — and a group needs at least two
+    DISTINCT eBay item ids, so the app's own record and the sync's mirror of
+    that SAME item never look like a duplicate of each other.
     """
     by_title: dict[str, list[dict]] = {}
     for rec in records:
@@ -180,7 +213,7 @@ def find(records: list[dict]) -> list[dict]:
         by_title.setdefault(key, []).append(rec)
 
     groups: list[dict] = []
-    for members in by_title.values():
+    for key, members in by_title.items():
         # Distinct eBay items only: two rows for ONE item is a sync artifact the
         # store sync already cleans up, not a duplicate listing.
         seen: dict[str, dict] = {}
@@ -200,6 +233,7 @@ def find(records: list[dict]) -> list[dict]:
         groups.append({
             "title": (group[0].get("listing") or {}).get("title")
                      or group[0].get("title") or "Untitled",
+            "fingerprint": fingerprint(key, group),
             "confidence": _confidence(reasons, caveats),
             "reasons": reasons,
             "caveats": caveats,

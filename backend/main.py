@@ -8715,6 +8715,29 @@ def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
             "needs_reconnect": bool(status.get("needs_reconnect"))}
 
 
+# A backstop on the size of the dismissal ledger, which lives inside the user
+# row's JSON. The prune below already bounds it to the groups a seller
+# actually has — this only matters if that ever stops being true.
+_MAX_DISMISSALS = 500
+
+
+def _scan_duplicates(user_id: str) -> list[dict]:
+    """Every suspected-duplicate group on this account, dismissals included.
+
+    Never raises — an advisory scan must not take the Dashboard with it, and
+    must not fail a dismissal either.
+    """
+    try:
+        # duplicates.find skips anything not live on its first line, so ask
+        # for live ones: on a big store the unfiltered page is the wrong rows.
+        return duplicates.find(
+            db.list_listings(limit=LIST_CAP, user_id=user_id,
+                             statuses=duplicates.LIVE_STATUSES))
+    except Exception as exc:  # noqa: BLE001 - advisory feature, never fatal
+        log.warning("duplicate scan failed for user=%s: %s", user_id, exc)
+        return []
+
+
 @app.get("/api/ebay/duplicates")
 def duplicate_listings(request: Request) -> dict:
     """Live listings that look like the same item listed more than once.
@@ -8724,22 +8747,73 @@ def duplicate_listings(request: Request) -> dict:
     decide which to end. This finds the likely pairs and hands over the
     evidence. Nothing is ended here; see /api/ebay/end-listing, one at a time.
 
+    Groups the seller has already waved away are left out, for as long as they
+    stand exactly as they stood when they waved them away — see
+    duplicates.fingerprint. `dismissed` counts them, so the card can say the
+    scan found something and is holding its tongue about it.
+
     Never raises — a failure here must not take the Dashboard with it.
     """
     user = auth.current_user(request)
     if not user:
         return {"groups": [], "total": 0}
-    try:
-        # duplicates.find skips anything not live on its first line, so ask
-        # for live ones: on a big store the unfiltered page is the wrong rows.
-        groups = duplicates.find(
-            db.list_listings(limit=LIST_CAP, user_id=user["id"],
-                             statuses=duplicates.LIVE_STATUSES))
-    except Exception as exc:  # noqa: BLE001 - advisory feature, never fatal
-        log.warning("duplicate scan failed for user=%s: %s", user["id"], exc)
-        return {"groups": [], "total": 0}
-    return {"groups": groups, "total": len(groups),
-            "listings": sum(len(g["listings"]) for g in groups)}
+    groups = _scan_duplicates(user["id"])
+    dismissed = db.duplicate_dismissals(user["id"])
+    live = [g for g in groups if g["fingerprint"] not in dismissed]
+    return {"groups": live, "total": len(live),
+            "dismissed": len(groups) - len(live),
+            "listings": sum(len(g["listings"]) for g in live)}
+
+
+@app.post("/api/ebay/duplicates/dismiss")
+def dismiss_duplicate_listings(request: Request,
+                               payload: Optional[dict] = None) -> dict:
+    """Stop reminding the seller about duplicate groups they've looked at.
+
+    Nothing is ended, listed or written to eBay: this is a note to ourselves
+    that the seller has already read this particular pair and decided it is
+    fine. It holds only while the pair stands as they left it — edit either
+    listing's price or format, relist one, or let a third turn up under the
+    same title, and the fingerprint moves and the group is back on the
+    Dashboard. That is the whole reason this can be a plain "dismiss" rather
+    than a "never show me this title again".
+
+    `fingerprints` is what the card had on screen, so pressing "Dismiss all"
+    dismisses what the seller was looking at rather than whatever the scan
+    happens to find a second later; a fingerprint matching no current group is
+    ignored. Omit it to dismiss every group the scan finds right now.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    groups = _scan_duplicates(user["id"])
+    current = {g["fingerprint"] for g in groups}
+    asked = {str(f) for f in ((payload or {}).get("fingerprints") or []) if f}
+    target = (asked & current) if asked else current
+    if not target:
+        # Nothing to remember. Said plainly rather than as an error: the card
+        # is gone either way, and the seller pressed a button on a list that
+        # had already moved on.
+        return {"ok": True, "dismissed": 0}
+
+    # The read is strict on purpose: `{}` out of a broken read would not hide
+    # a card here, it would erase what the seller dismissed last week.
+    kept = db.duplicate_dismissals(user["id"], strict=True)
+    # Drop the digests of groups that no longer exist — a listing ended, a
+    # price edited — so the ledger tracks the account instead of growing for
+    # the life of it.
+    ledger = {fp: when for fp, when in kept.items() if fp in current}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for fp in target:
+        ledger.setdefault(fp, now)
+    if len(ledger) > _MAX_DISMISSALS:
+        ledger = dict(sorted(ledger.items(), key=lambda kv: kv[1],
+                             reverse=True)[:_MAX_DISMISSALS])
+    if not db.save_duplicate_dismissals(user["id"], ledger):
+        raise HTTPException(
+            503, "No database configured — remembering a dismissal needs "
+                 "DATABASE_URL set.")
+    return {"ok": True, "dismissed": len(target)}
 
 
 # How many DISTINCT categories one /api/insights may look up live. The

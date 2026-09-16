@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CopyCheck, ExternalLink, Info, ChevronDown } from "lucide-react";
+import { CopyCheck, ExternalLink, Info, ChevronDown, BellOff } from "lucide-react";
 import { api, postJson } from "@/lib/api";
 import { useToast } from "@/components/ui/Toaster";
 import { Card, SectionHeader } from "@/components/ui/Card";
@@ -15,7 +15,16 @@ import { formatMoney } from "@/lib/utils";
    be fixed automatically: each one is a real listing on eBay, and choosing
    which to end is the seller's call (the older one usually has the watchers).
    So this card presents evidence and gets out of the way — it ends nothing on
-   its own, and every End is one listing at a time behind a confirm. */
+   its own, and every End is one listing at a time behind a confirm.
+
+   And a seller who has looked and decided all of them are fine can say so
+   once, with Dismiss all. That has to stick, or the card is just nagging: the
+   scan re-runs on every Dashboard load and would otherwise put the same
+   answered question back every time. It sticks per GROUP, pinned to the state
+   the seller judged (see duplicates.fingerprint) — edit either listing and
+   that group is a new question, so it comes back. Hence the confirm: the way
+   back from a mis-tap is an edit, which is too obscure to leave to a stray
+   thumb. */
 
 const CONFIDENCE = {
   high: { label: "Likely duplicate", tone: "red" },
@@ -127,15 +136,18 @@ function DuplicateGroup({ group, ending, onEnd }) {
 
 export function DuplicateListings({ onChanged }) {
   const { confirm, toast } = useToast();
-  const [state, setState] = useState({ loading: true, groups: [] });
+  const [state, setState] = useState({ loading: true, groups: [], hidden: 0 });
   const [ending, setEnding] = useState(null);
+  const [dismissing, setDismissing] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const res = await api("/api/ebay/duplicates");
-      setState({ loading: false, groups: res.groups || [] });
+      setState({ loading: false, groups: res.groups || [],
+                 hidden: res.dismissed || 0 });
     } catch (e) {
-      setState({ loading: false, groups: [] });  // advisory only — stay quiet
+      // advisory only — stay quiet
+      setState({ loading: false, groups: [], hidden: 0 });
     }
   }, []);
   // Fetch the duplicate report once on mount. Nothing is written
@@ -147,6 +159,43 @@ export function DuplicateListings({ onChanged }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: see the note above
     load();
   }, [load]);
+
+  // Dismiss all — "I've looked at these and they're fine."
+  //
+  // Sends the fingerprints the card is actually SHOWING rather than asking
+  // the server to dismiss whatever it finds a second later: a group that
+  // appeared between the load and the press is one the seller never saw, and
+  // waving away an unseen duplicate is the one thing this button must not do.
+  const dismissAll = async () => {
+    const n = state.groups.length;
+    if (!n) return;
+    if (!(await confirm({
+      title: n === 1 ? "Dismiss this one?" : `Dismiss all ${n}?`,
+      message: n === 1
+        ? "Both listings stay live on eBay — this only stops the reminder. "
+          + "It comes back if you edit either one's price or format, or "
+          + "relist one."
+        : "Every listing stays live on eBay — this only stops the reminder. "
+          + "They come back if you edit any of these listings' price or "
+          + "format, or relist one.",
+      confirmLabel: n === 1 ? "Dismiss" : "Dismiss all",
+    }))) return;
+    setDismissing(true);
+    try {
+      await postJson("/api/ebay/duplicates/dismiss", {
+        fingerprints: state.groups.map((g) => g.fingerprint),
+      });
+      setState({ loading: false, groups: [], hidden: state.hidden + n });
+      toast(n === 1
+        ? "Dismissed — we won't mention it again unless it changes."
+        : `Dismissed ${n} — we won't mention them again unless they change.`,
+        { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't dismiss that: ${e.message}`, { kind: "error" });
+    } finally {
+      setDismissing(false);
+    }
+  };
 
   const endOne = async (item) => {
     if (!(await confirm({
@@ -182,16 +231,34 @@ export function DuplicateListings({ onChanged }) {
   const n = state.groups.length;
   return (
     <div>
-      <SectionHeader icon={CopyCheck} title="Possible duplicate listings" />
+      <SectionHeader icon={CopyCheck} title="Possible duplicate listings"
+        action={(
+          <Button variant="ghost" size="sm" className="shrink-0"
+            loading={dismissing} disabled={dismissing} onClick={dismissAll}
+            title="Stop reminding me about these">
+            <BellOff size={15} aria-hidden />
+            {n === 1 ? "Dismiss" : "Dismiss all"}
+          </Button>
+        )} />
       <Card className="p-0 divide-y divide-line overflow-hidden">
         <p className="px-4 pt-4 pb-3 text-[13px] text-ink-secondary">
           {n === 1 ? "One item looks" : `${n} items look`} like they're live on
           eBay more than once. Ending the extra keeps your listings clean —
           but check each one first: two of the same thing can be genuine.
+          {/* What the card is deliberately NOT showing. A scan that quietly
+              drops what you dismissed is indistinguishable from a scan that
+              stopped finding anything — and this is the only place a seller
+              can learn that the rule is "until you edit them". */}
+          {state.hidden > 0 && (
+            <> {state.hidden === 1
+              ? "One more is dismissed; it comes"
+              : `${state.hidden} more are dismissed; they come`} back here if
+              you edit {state.hidden === 1 ? "it" : "them"}.</>
+          )}
         </p>
         {state.groups.map((g) => (
-          <DuplicateGroup key={`${g.title}-${g.listings[0].ebay_listing_id}`}
-            group={g} ending={ending} onEnd={endOne} />
+          <DuplicateGroup key={g.fingerprint} group={g}
+            ending={ending} onEnd={endOne} />
         ))}
       </Card>
     </div>
