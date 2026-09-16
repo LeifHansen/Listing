@@ -886,7 +886,8 @@ is *no verdict*, not "medium".
 | `POST` | `/api/easypost/rates` | Live rates for one order's package from the seller's EasyPost account (creates a Shipment; buys nothing) |
 | `POST` | `/api/easypost/label` | Buy the chosen rate, record it, post the tracking to eBay. Never buys twice for one order; settles a lost answer against EasyPost first |
 | `POST` | `/api/easypost/label/{shipment_id}/refund` | Void an unused label (scoped to the seller's own record of it) |
-| `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once |
+| `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
+| `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/enrich/{session_id}` | Fill ONE listing's blanks from its own photos — category if missing, the category's item specifics, the maker. The last step of the editor before Publish; fills blanks only, never overwrites |
@@ -1439,6 +1440,31 @@ SAME item id are never flagged — that's a sync artifact, and telling a seller 
 end it would cost them their only listing. The Dashboard card hides itself when
 there's nothing to report, and nothing is ever ended automatically: each End is
 one listing, behind a confirm, through the usual `/api/ebay/end-listing`.
+
+**Dismiss all**, because often the honest answer is that nothing needs doing.
+The scan re-runs on every Dashboard load and there is no press that finishes it
+the way *Enrich all* finishes a suggestion, so without this a seller who has
+already thought about a pair is asked about it again on every visit. The danger
+in remembering a dismissal is the opposite one — a silent "never show me this
+again" that hides a real duplicate for the life of the account — so the
+dismissal is pinned to the pair **as the seller judged it**: a short digest of
+which eBay items are in the group, what each one costs, and how each one sells
+(`duplicates.fingerprint`). Edit a price, switch one to an auction, relist one,
+or let a third turn up under the same title, and the digest moves and the group
+is back. Everything the *sync* moves on its own — watch counts, view urls,
+`updated_at`, whether a row is the app's or the store sweep's mirror — is
+deliberately left out, or eBay reporting a new watcher would re-raise every
+settled pair within a day.
+
+The press goes through a confirm that says both of those things, and sends the
+digests the card had **on screen**, so a pair that appeared between the load and
+the press is never waved away unseen. The card also says how many it is holding
+back, because a scan that quietly drops what you dismissed reads exactly like a
+scan that stopped finding anything. The ledger lives in a reserved key on the
+user's `prefs` JSON, unreachable from `POST /api/prefs` (which stores only its
+own whitelist), and digests for pairs that no longer exist are dropped as new
+ones are written, so it tracks the account rather than growing for the life of
+it.
 
 ## Suggested actions (and applying them in bulk)
 
