@@ -83,6 +83,18 @@ def fresh_config(monkeypatch, tmp_path):
 
     yield _reload
     # Leave the process the way we found it for any non-reloading test.
+    #
+    # The scrub has to happen HERE, not be left to monkeypatch. Fixture
+    # teardown runs BEFORE the monkeypatch this one used undoes its own
+    # setenv, so a bare reload re-read the variables the test had set and
+    # baked them into the module for the whole session — `test_config_r2`
+    # left R2_ACCOUNT_ID="abc123"/R2_BUCKET="custom" behind, so from then on
+    # objstore.enabled() was True and pointed at an endpoint that does not
+    # resolve. Nothing noticed while no hot path touched the bucket; the
+    # moment one did, a single photo lookup spent seconds in a connection
+    # timeout and a test that polls a background job for ten timed out.
+    for name in _SCRUBBED:
+        monkeypatch.delenv(name, raising=False)
     importlib.reload(config)
     _reset_objstore()
 
