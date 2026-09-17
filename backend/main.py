@@ -32,7 +32,7 @@ import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               RedirectResponse)
+                               RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -55,7 +55,8 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        ebay_orders,
                        ebay_trading, ebay_video, image_import, images,
                        imagesearch, jobstore,
-                       listing_merge, listing_prompt, listing_sync,
+                       listing_export, listing_merge, listing_prompt,
+                       listing_sync,
                        messages as messages_service, metrics, notifications,
                        owed_refunds, preflight, pricing,
                        recommender, store_category, sync_guard, sync_merge,
@@ -122,8 +123,13 @@ app.add_middleware(
     allow_headers=["*"],
     # Without this the Capacitor shell cannot READ the header, so a crash
     # reported from the native app would carry no reference and could not be
-    # joined to the request that caused it.
-    expose_headers=["X-Request-Id"],
+    # joined to the request that caused it. The three that follow are the CSV
+    # export's: the filename it should be saved under, and whether the store
+    # was bigger than one download may carry — a warning the native app would
+    # otherwise be unable to see, leaving a short file looking like a whole
+    # one.
+    expose_headers=["X-Request-Id", "Content-Disposition",
+                    "X-Export-Total", "X-Export-Truncated"],
     max_age=86400,
 )
 
@@ -8736,6 +8742,120 @@ def listings(request: Request, limit: int = LIST_CAP,
             # a client loops for ever.
             "next_cursor": _cursor_for(items[-1]) if truncated and items
                            else None}
+
+
+# How many records one export reads at a time. Because the response streams,
+# this is the ONLY part of the seller's store that is ever in memory at once:
+# a store of any size costs one page, not one store.
+EXPORT_PAGE_SIZE = 200
+# And how many listings one export may cover in total. Far above LIST_CAP on
+# purpose -- that cap exists because the grid downloads full JSON records to a
+# phone, and this is a file the seller asked for. It is a resource guard, not
+# a product limit, and when it bites the answer says so in its headers rather
+# than handing over a short file that looks complete.
+#
+# Floored at one because the cap is also a query's `limit`, and a zero or a
+# negative out of the environment is a Postgres error rather than a smaller
+# export -- the same trap the clamp on /api/listings?limit exists for.
+EXPORT_CAP = max(1, int(os.getenv("LISTING_EXPORT_CAP", "25000") or "25000"))
+# One seller may kick off this many exports per rate-limit window. An export
+# walks the whole store, so a held-down button is a self-inflicted outage;
+# generous enough that nobody doing this by hand will ever see it.
+EXPORT_MAX_PER_WINDOW = 12
+
+
+def _export_pages(uid: str, first: list[dict]):
+    """The seller's store, page after page, starting from one already read.
+
+    The first page is fetched by the ROUTE, before the response begins, so the
+    ordinary failure -- the database being unreachable -- is a 503 with a
+    sentence in it rather than a file that downloads and turns out to be a
+    header row. Once bytes are on the wire nothing can change the status code,
+    so a later page that fails stops the walk and is logged; the headers
+    already say how many rows were expected, which is what lets a short file
+    be recognised as short.
+    """
+    sent, page = 0, first
+    while page:
+        yield page
+        sent += len(page)
+        if len(page) < EXPORT_PAGE_SIZE or sent >= EXPORT_CAP:
+            return
+        # The same keyset token the grid pages with, so "what comes after this
+        # row" means one thing in the app rather than two. Round-tripped
+        # through the pair that mints and reads it because that pair is what
+        # normalises a stored timestamp; a token this just minted cannot fail
+        # to parse, and if one ever did, stopping beats raising a 400 into the
+        # middle of a file the browser is already writing to disk.
+        token = _cursor_for(page[-1])
+        if not token:
+            return
+        try:
+            cursor = _cursor_from(token)
+        except HTTPException:
+            return
+        try:
+            page = db.list_listings(limit=min(EXPORT_PAGE_SIZE, EXPORT_CAP - sent),
+                                    user_id=uid, before=cursor)
+        except errors.StorageUnavailable as exc:
+            log.warning("listings export: store became unreadable after %d "
+                        "rows for user=%s: %s", sent, uid, exc)
+            return
+
+
+@app.get("/api/listings/export.csv")
+def listings_export_csv(request: Request):
+    """The seller's WHOLE store as a CSV, photo links included.
+
+    Not the tab they are looking at and not the page the grid has loaded --
+    every listing on the account, in every state, which is what makes the file
+    usable as a backup, an inventory count or the thing they hand an
+    accountant. services/listing_export.py holds the columns and says why each
+    one is shaped the way it is.
+
+    Registered ABOVE `/api/listings/{listing_id}`, and it has to stay there:
+    routes match in definition order, so below it this path would be read as a
+    listing whose id is "export.csv".
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in to export your listings.")
+    uid = user["id"]
+    if not ratelimit.check(f"listing-export:{uid}",
+                           max_attempts=EXPORT_MAX_PER_WINDOW):
+        raise HTTPException(
+            429, "That's a lot of exports at once — give it a few minutes and "
+                 "try again.")
+    # Raises StorageUnavailable (503 with a sentence) rather than streaming a
+    # header row that reads as "you have no listings".
+    first = db.list_listings(limit=min(EXPORT_PAGE_SIZE, EXPORT_CAP),
+                             user_id=uid)
+    # What the store HOLDS, so the file can be checked against it -- and so
+    # the rare seller past the cap is told the download was cut instead of
+    # discovering it by counting rows. Tolerant like the count on
+    # /api/listings: a total nobody could measure costs the headers a number,
+    # and the file is still every row this walk could read.
+    headers = {
+        "Content-Disposition":
+            f'attachment; filename="thryft-listings-'
+            f'{datetime.now(timezone.utc).date().isoformat()}.csv"',
+    }
+    try:
+        total = db.count_listings(uid)
+        headers["X-Export-Total"] = str(total)
+        if total > EXPORT_CAP:
+            headers["X-Export-Truncated"] = str(EXPORT_CAP)
+    except errors.StorageUnavailable as exc:
+        log.info("listings export: couldn't count the store for user=%s: %s",
+                 uid, exc)
+    log.info("listings export: user=%s first_page=%d", uid, len(first))
+    return StreamingResponse(
+        listing_export.iter_csv(_export_pages(uid, first), _base_url(request)),
+        # charset spelled out: without it a browser saving the file, and Excel
+        # opening it, both fall back to a local codepage. The BOM the writer
+        # emits covers Excel; this covers everything that reads the header.
+        media_type="text/csv; charset=utf-8",
+        headers=headers)
 
 
 def _live_ebay_id_map(items: list) -> dict:

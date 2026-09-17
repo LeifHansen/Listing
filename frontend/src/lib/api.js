@@ -231,6 +231,13 @@ export async function api(path, opts = {}) {
     err.status = res.status;
     throw err;
   }
+  // `as: "response"` hands back the Response itself, for a caller that wants
+  // the BYTES and the headers rather than a parsed object — the CSV export is
+  // the only one today. Everything above it is the same either way (the
+  // deadline, the bearer token, the 401 and 402 handling, the request id the
+  // next crash is joined by), and a second copy of this wrapper that differed
+  // only in its last line is how those stop being the same.
+  if (opts.as === "response") return res;
   return res.json();
 }
 
