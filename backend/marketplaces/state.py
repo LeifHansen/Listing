@@ -170,6 +170,12 @@ SERVER_OWNED_FIELDS = (
     # before they cleared the list carries a blank one, and honouring it puts
     # all 177 back.
     "notes_accepted_at",
+    # When an offer last went out to this listing's interested buyers. Same
+    # staleness, same cost again: a tab that loaded before "Send offers" ran
+    # carries a blank one, and honouring it puts the listing straight back in
+    # the group the send just cleared -- while eBay itself refuses a second
+    # offer until the first expires. Only the send writes it.
+    "offer_sent_at",
     # How sure the AI was when it drafted the listing (Listing.ai_confidence).
     # Written by the identify pass alone, and read by the draft cards. A
     # refine round-trips the draft through the model and rebuilds the listing

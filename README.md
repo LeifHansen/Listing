@@ -963,7 +963,10 @@ one failing never rolls back the others — and per-marketplace state
   eBay; a dry run renders the Trading request instead of sending it. The REST
   APIs are still used for the things that are not listings — Account
   (business policies, programs, privileges), Taxonomy, Fulfillment (orders),
-  and Marketing (Promoted Listings).
+  Marketing (Promoted Listings) and Negotiation (**Send offers** — a private
+  discount to the buyers watching a listing; the asking price never moves).
+  Negotiation runs on the `sell.inventory` scope the app already asks for, so
+  no seller reconnects for it.
 - **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
   `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
   then activated on a live publish. Etsy requires a category (AI Suggest
@@ -1067,6 +1070,7 @@ backend/
     taxonomy.py      Taxonomy API -> categories, aspects, the Size rules
     metrics.py       views / watchers / offers / bids per listing
     promotions.py    Promoted Listings
+    ebay_offers.py   Negotiation API: offers to the buyers already watching
     ebay_orders.py, easypost.py   sold notifications and shipping labels
     ebay_messages.py, messages.py buyer messages and the unified inbox
     errorlog.py      the production error feed (Admin -> Errors, /api/ops)
@@ -1471,18 +1475,64 @@ it.
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
 signals the app already has — listing status, age, price, photo count, plus eBay
 views/watchers when the scope is granted. Rules turn a store into a short ranked
-list: finish a draft, drop a stale price, add photos, fill in specifics. An
-ended listing earns nothing: relisting is done by hand, and the ended bucket
-picks up sold items. Suggestions are grouped
-by kind and collapsed ("Lower prices · 12"), keeping one strongest action per
-listing so the list spans the portfolio instead of piling onto one item — with
-the two kinds that both mean "this listing's details aren't finished" grouped
-as one row (see **Finish details** below).
+list: offer a discount to the buyers watching an item, finish a draft, drop a
+stale price, add photos, fill in specifics. An ended listing earns nothing:
+relisting is done by hand, and the ended bucket picks up sold items.
+Suggestions are grouped by kind and collapsed ("Lower prices · 12"), keeping
+one strongest action per listing so the list spans the portfolio instead of
+piling onto one item — with the two kinds that both mean "this listing's
+details aren't finished" grouped as one row (see **Finish details** below).
 
 A group whose edit makes sense across every listing in it gets a **bulk action**
 in its header, because repeating one edit twelve times by hand is the whole
 problem:
 
+- **Send offers → "Send offers…"** opens an amount field (*offer everyone
+  watching these listings X % off*) and sends eBay a private offer per listing
+  through the **Negotiation API** (`services/ebay_offers.py`). This is the one
+  group ranked above a price drop, and the reason is that no price moves: the
+  discount reaches only the buyers already watching the item, and the rest of
+  eBay goes on seeing the listing at what it has always cost. A listing earns
+  the suggestion on its watch count, with three gates that each match
+  something eBay refuses — an auction has bids rather than a Buy It Now price
+  to discount, a listing with a buyer's Best Offer already waiting refuses a
+  seller offer (and the seller has an answer to give there instead), and a
+  listing nobody is watching has nobody to offer it to.
+
+  **eBay decides who is eligible, not this app.** One `find_eligible_items`
+  sweep per run says which listings currently have interested buyers, so the
+  send visits only those instead of spending a call per listing to be told
+  there is nobody there. A sweep that cannot be *read*
+  is not a store with no interested buyers: the run goes ahead and lets eBay
+  refuse what it will not carry, because reporting every listing as skipped
+  would look exactly like nobody is watching anything.
+
+  **The group clears once the offer is out** (`Listing.offer_sent_at`, and
+  `recommender.OFFER_QUIET_DAYS`) — the same lesson as the price stamp below,
+  applied before it could be reported a third time: sending an offer does not
+  move the watch count that suggested it, so without the stamp the group would
+  come straight back with the same listings and the same count. eBay agrees
+  from the other side, refusing a second seller offer while the first is live.
+  The quiet period outlasts eBay's own offer window (4 days on `EBAY_US` and
+  `EBAY_GB`, 2 on most other sites), and after it the nudge returns on its own
+  if the discount did not work.
+
+  Three details of eBay's contract are pinned by
+  `test_an_offer_reaches_the_buyers_watching.py`, because each fails the
+  same way from the outside — a refusal on one listing, mid-run, with nothing
+  on screen to say why. eBay takes exactly **one listing per call**, so a bulk
+  send is a loop (`BULK_OFFER_CAP`, remainder `deferred`); the offer
+  **duration is site-specific** and eBay refuses any other value, so none is
+  sent and each marketplace applies its own; and **counter-offers** are not in
+  this release of eBay's API, so `allowCounterOffer` is sent explicitly false
+  rather than left to a default. The floor of 5% off is eBay's and is enforced
+  on the input; the 50% ceiling is this app's, and lower than the price drop's
+  75% because a buyer takes one of these with a single tap.
+
+  A single row sends its own offer rather than opening the listing. Every
+  other group's rows are a way into the editor, because that is where another
+  photo or a new price gets made — there is nothing in the editor that sends
+  an offer, so that row would be a button that leads nowhere.
 - **Lower prices → "Lower all…"** opens an amount field (*lower every price in
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
@@ -1606,9 +1656,11 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
 - **A run that names ids is bounded** (`BULK_PRICE_CAP`, default 40;
-  `BULK_ENRICH_CAP`, default 25) because each listing is its own serial eBay
-  revise; the remainder comes back as `deferred` for another pass instead of
-  the request outliving the gateway. The press that finishes the details list
+  `BULK_OFFER_CAP`, default 40; `BULK_ENRICH_CAP`, default 25) because each
+  listing is its own serial eBay call — a revise, or, for an offer, the one
+  listing eBay's Negotiation API takes per request; the remainder comes back
+  as `deferred` for another pass instead of the request outliving the
+  gateway. The press that finishes the details list
   names none, so it has no remainder to defer — it is a job from the first
   moment, and the client polls it rather than holding a request open.
 

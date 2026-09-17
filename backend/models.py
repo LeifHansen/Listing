@@ -436,6 +436,25 @@ class Listing(BaseModel):
     # makes the STORED value win, and this one has to be able to move forward
     # on the very write that drops the price.
     price_lowered_at: str = ""
+    # When an offer was last sent to this listing's interested buyers (ISO
+    # 8601, the server's own clock). "" means one never has been.
+    #
+    # The same lesson as `price_lowered_at` above, learned once and applied
+    # before it could be reported a third time. "Send offers" is suggested off
+    # the WATCHERS on a listing, and sending an offer does not move that
+    # number — the people watching are precisely the people who were just
+    # offered a discount, and they are still watching a second later. Without
+    # this stamp the group a seller had just cleared would come back in the
+    # same slot with the same listings and the same count, which is what a
+    # button that does nothing looks like. eBay agrees, from the other side:
+    # a listing with a seller offer already out on it refuses the next one
+    # (error 150019), so re-suggesting it would only spend a call to be told
+    # no. See recommender.OFFER_QUIET_DAYS for how long it stays quiet.
+    #
+    # Server-owned (state.SERVER_OWNED_FIELDS): it is written by the send
+    # itself and a client only ever echoes it back, so a stale tab saving an
+    # older copy of the listing cannot wipe it and put the nag back.
+    offer_sent_at: str = ""
     # Why the LAST live publish attempt did not put this listing on the
     # marketplace, in the sentence the seller should read -- "" when the
     # last attempt went live, or when there has never been one.
