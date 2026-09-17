@@ -22,6 +22,7 @@ import {
 } from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
+import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -372,6 +373,14 @@ export function ListingsView({ search = "" }) {
                 is fixed once eBay has accepted it. */}
             {isDraft(item) && (
               <DraftFormatEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
+            )}
+            {/* And what it asks — the field its format actually uses, plus
+                eBay's own comps behind one tap. Drafts only, like the two
+                above: a live listing's price is revisable, but only through a
+                revise, and a number changed here would leave this app and
+                eBay disagreeing with nothing saying so. */}
+            {isDraft(item) && (
+              <DraftPriceEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
             )}
           </motion.div>
         ))}

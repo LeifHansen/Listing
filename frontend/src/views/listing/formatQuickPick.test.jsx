@@ -4,16 +4,20 @@
  * auction, or both, when viewing listing draft cards, and from listing detail
  * page. I don't think we factor that in at all."
  *
- * Three things have to hold for that to be true rather than merely present:
+ * Two things have to hold for that to be true rather than merely present:
  *
- *   - all three formats are offered, under the names the request uses;
+ *   - all three formats are offered, under the names the request uses; and
  *   - choosing one PATCHES that field alone — a card holds a summary of a
  *     listing, and writing the summary back is how an edit made anywhere else
- *     gets overwritten (main.patch_listing exists for this); and
- *   - picking an auction offers the money that format needs. An auction is
- *     priced by its starting bid, so a pick that didn't ask for one would
- *     turn a publishable draft into a blocked one with the field that fixes
- *     it back inside the editor — the trip this control exists to save.
+ *     gets overwritten (main.patch_listing exists for this).
+ *
+ * The MONEY each format needs is the price control next door, which sits on
+ * every card and follows this select (PriceQuickEdit, priceQuickEdit.test).
+ * It used to live in here, and the rule that made it worth showing is the one
+ * that now makes it worth showing always: a draft switched to an auction is
+ * priced by a starting bid it does not have, and a card that does not ask for
+ * one turns a publishable draft into a blocked one with the field that fixes
+ * it two screens away.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -37,24 +41,6 @@ function render(listing, onPick) {
 }
 
 const select = () => host.querySelector("select");
-const moneyFields = () => [...host.querySelectorAll("input[type=number]")];
-const labelled = (name) =>
-  moneyFields().find((el) => (el.getAttribute("aria-label") || "").startsWith(name));
-
-function change(el, value) {
-  act(() => {
-    Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, "value").set.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
-// Leaving the field. React's onBlur is delivered by the native `focusout`
-// (`blur` does not bubble, so React cannot delegate it from the root), which
-// is why dispatching a "blur" event here reaches nothing.
-function leave(el) {
-  act(() => { el.dispatchEvent(new FocusEvent("focusout", { bubbles: true })); });
-}
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -111,72 +97,21 @@ describe("the selling format on a draft card", () => {
     expect(picks[0].auction_start_price).toBeUndefined();
   });
 
-  it("asks for nothing extra on a Buy It Now", () => {
-    render({ listing_format: "FIXED_PRICE", price: 24.99 }, () => {});
-    expect(moneyFields()).toHaveLength(0);
-  });
-
-  it("asks for a starting bid on an auction, and only that", () => {
+  // The money moved out (PriceQuickEdit). Two boxes for the same starting bid
+  // on one card is two answers to the same question, and the one the seller
+  // did not type into wins the next time either re-renders.
+  it("asks for no money of its own — that is the price control's field", () => {
     render({ listing_format: "AUCTION", auction_start_price: 9.99 }, () => {});
-    expect(moneyFields()).toHaveLength(1);
-    expect(labelled("Starting bid")).toBeTruthy();
-    expect(labelled("Starting bid").value).toBe("9.99");
-    // `price` is unused on a plain auction. A box for it here would invite a
-    // number that never reaches eBay.
-    expect(labelled("Buy It Now")).toBeUndefined();
+    expect(host.querySelectorAll("input[type=number]")).toHaveLength(0);
   });
 
-  it("asks for both numbers on an auction with a Buy It Now", () => {
-    render({ listing_format: "AUCTION_BIN", auction_start_price: 9.99, price: 40 },
-      () => {});
-    expect(labelled("Starting bid").value).toBe("9.99");
-    expect(labelled("Buy It Now").value).toBe("40");
-  });
-
-  // One PATCH per number, when the seller leaves the box -- not one per
-  // keystroke on the way to $12.50.
-  it("saves a typed starting bid once, on blur", () => {
+  it("does not re-patch the format it is already on", () => {
     const picks = [];
-    render({ listing_format: "AUCTION", auction_start_price: null },
-      (patch) => picks.push(patch));
-    const field = labelled("Starting bid");
-    change(field, "1");
-    change(field, "12");
-    change(field, "12.5");
+    render({ listing_format: "AUCTION" }, (patch) => picks.push(patch));
+    act(() => {
+      select().value = "AUCTION";
+      select().dispatchEvent(new Event("change", { bubbles: true }));
+    });
     expect(picks).toEqual([]);
-    leave(field);
-    expect(picks).toEqual([{ auction_start_price: 12.5 }]);
-  });
-
-  it("saves nothing when the number is left as it was", () => {
-    const picks = [];
-    render({ listing_format: "AUCTION", auction_start_price: 9.99 },
-      (patch) => picks.push(patch));
-    const field = labelled("Starting bid");
-    leave(field);
-    expect(picks).toEqual([]);
-  });
-
-  // Anything the listing model would reject puts the stored value back rather
-  // than being sent -- the seller sees the box return to what is saved.
-  it("refuses a negative starting bid instead of sending it", () => {
-    const picks = [];
-    render({ listing_format: "AUCTION", auction_start_price: 9.99 },
-      (patch) => picks.push(patch));
-    const field = labelled("Starting bid");
-    change(field, "-5");
-    leave(field);
-    expect(picks).toEqual([]);
-    expect(field.value).toBe("9.99");
-  });
-
-  it("clears a starting bid the seller emptied", () => {
-    const picks = [];
-    render({ listing_format: "AUCTION", auction_start_price: 9.99 },
-      (patch) => picks.push(patch));
-    const field = labelled("Starting bid");
-    change(field, "");
-    leave(field);
-    expect(picks).toEqual([{ auction_start_price: null }]);
   });
 });
