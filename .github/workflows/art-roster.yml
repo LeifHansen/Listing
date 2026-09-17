@@ -1,7 +1,7 @@
 name: Artist roster
 
-# Refresh the art expert's artist roster from Getty ULAN and Wikidata, and
-# open a PULL REQUEST with whatever changed.
+# Refresh the art expert's artist roster from Wikidata and the Metropolitan
+# Museum's Collection API, and open a PULL REQUEST with whatever changed.
 #
 # A pull request rather than a commit, deliberately. This file decides what
 # every art listing in the app is allowed to be CALLED -- a bad refresh could
@@ -10,8 +10,17 @@ name: Artist roster
 # merges rather than replaces (scripts/build_art_roster.py), which is what
 # keeps the seeded spellings nobody's API will ever return.
 #
-# Monthly: ULAN and Wikidata move slowly, and a roster that churns weekly is a
-# roster nobody reads the diff of.
+# The museum leg (https://metmuseum.github.io/) is what fills the `ulan` column
+# and adds the spellings a registrar writes -- which is the half of an entry the
+# running app actually reads. It may add and confirm and it may never subtract
+# or rank: see `met_artist` in the script. It also makes the job SLOWER, because
+# it is one search plus a few object reads per name at a deliberately polite
+# rate, so a thousand names is twenty minutes or so rather than two. A refresh
+# nobody is waiting on can afford that, and `--no-met` skips it if the museum
+# is down or somebody wants the Wikidata half alone.
+#
+# Monthly: ULAN, Wikidata and a museum catalogue all move slowly, and a roster
+# that churns weekly is a roster nobody reads the diff of.
 
 on:
   schedule:
@@ -22,6 +31,11 @@ on:
         description: How many artists to ask Wikidata for
         required: false
         default: '1000'
+      no_met:
+        description: Skip the Met Museum leg (spellings and Getty ids)
+        required: false
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -41,20 +55,26 @@ jobs:
         with:
           python-version: '3.11'
 
+      # httpx for the two APIs; python-dotenv and pydantic because
+      # backend/tests/conftest.py imports backend.config, which the roster's
+      # own tests below go through. Without those two the check step fails at
+      # COLLECTION -- which is a green-looking job that checked nothing.
       - name: Install
-        run: pip install httpx pytest
+        run: pip install httpx pytest python-dotenv pydantic
 
       - name: Rebuild the roster
         run: |
           python3 scripts/build_art_roster.py \
-            --limit "${{ github.event.inputs.limit || '1000' }}"
+            --limit "${{ github.event.inputs.limit || '1000' }}" \
+            ${{ github.event.inputs.no_met == 'true' && '--no-met' || '' }}
 
       # The roster's own tests. A refresh that produces a file the app cannot
       # read, or that drops the seeded resale names, fails HERE rather than in
       # a pull request somebody approves on the strength of a green tick.
       - name: Check the roster still holds
         run: |
-          pytest backend/tests/test_a_misspelled_artist_is_corrected_and_an_unknown_one_is_left_alone.py -q
+          pytest backend/tests/test_a_misspelled_artist_is_corrected_and_an_unknown_one_is_left_alone.py \
+                 backend/tests/test_the_met_confirms_a_name_it_does_not_get_to_choose.py -q
 
       - name: Open a pull request if anything changed
         env:
@@ -79,7 +99,7 @@ jobs:
           # inside a YAML block scalar has to sit at column 0, which ends the
           # scalar and breaks the workflow.
           {
-            echo "Rebuilt by \`scripts/build_art_roster.py\` from Getty ULAN and Wikidata."
+            echo "Rebuilt by \`scripts/build_art_roster.py\` from Wikidata and the Met Museum's Collection API."
             echo
             echo "**What to look at in the diff**, in the order it matters:"
             echo
@@ -95,7 +115,15 @@ jobs:
             echo "  drafted afterwards."
             echo "- **\`rank\`** is a PROXY for market presence, never turnover -- real sales"
             echo "  data is paywalled. \`rank_basis\` says so on every entry, and nothing in"
-            echo "  the app reads it yet."
+            echo "  the app reads it yet. \`met_objects\` is under the same rule: it counts what"
+            echo "  one museum's TEXT SEARCH returned for the name, refusals included."
+            echo "- **A \`ulan\` that changed.** The museum leg only fills an EMPTY one, so a"
+            echo "  changed id means the file was edited by hand and is now disagreeing with"
+            echo "  Getty -- worth a look before it is stated as fact on a listing."
+            echo "- **Any \`CHECK\` line in the job log.** Those are artists whose birth or"
+            echo "  death year this file and the Met disagree about, which is the shape \"we"
+            echo "  have the wrong person\" takes across two sources. The script changes"
+            echo "  nothing when it finds one; it is asking."
             echo
             echo "Absent from this file is never a reason to drop an attribution"
             echo "(\`services/experts/art/roster.py\`), so a missing artist costs a spelling"
