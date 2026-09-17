@@ -19,8 +19,9 @@ it", and that is the one answer the model cannot give.
 So art does not go to the model. It gets its own rule, and the rule is
 geometric rather than learned:
 
-    A picture is a RECTANGLE. Find its outer border and keep everything
-    inside it, whole. Never ask what is interesting within it.
+    A picture is a RECTANGLE — at whatever angle it was held. Find its
+    outer border and keep everything inside it, whole. Never ask what is
+    interesting within it.
 
 That makes the seller's requirement structural instead of statistical.
 `border()` returns a box; `mask()` turns a box into a filled rectangle. There
@@ -86,6 +87,33 @@ _CLOSE = int(os.getenv("ART_CLOSE", "4") or 4)
 # the photo is kept as shot.
 _MIN_RECT_FILL = float(os.getenv("ART_MIN_RECT_FILL", "0.85") or 0.85)
 
+# ...and the same question asked of a picture that is not square-on in the
+# photo, which is very nearly all of them.
+#
+# The report: a framed picture, seven photos, every one of them whole in the
+# frame on a plain white background, and seven refused. A hand-held shot is a
+# rectangle turned a few degrees, and a turned rectangle fills its AXIS-ALIGNED
+# box badly -- 0.94 at 2 degrees, 0.85 at 5, 0.74 at 10. Measured that way the
+# test above refuses an ordinary phone photo of an ordinary framed picture for
+# the crime of being hand-held, and refuses the whole set the same way, because
+# one pair of hands tilts them all. Nothing about the photo was wrong and
+# nothing was logged that a seller could see; the border was simply never
+# found. The same arithmetic was already understood for a remote engine's matte
+# -- see _MIN_ALPHA_RECT_FILL, which was fitted at the best angle for exactly
+# this reason -- but the geometric scan, which is what runs when no remote
+# engine is configured at all, still asked whether the picture was UPRIGHT.
+#
+# So a shape that fails upright is asked again at its BEST ANGLE, and has to
+# clear a higher bar there: "is this a rectangle at SOME angle" is a weaker
+# question than "is this an upright rectangle", so it must be put more strictly
+# to keep out the shapes _MIN_RECT_FILL exists to refuse. The gap is wide and
+# does not close with rotation, because none of those shapes is a rectangle at
+# any angle: a framed picture scores 0.96-1.00 at every tilt from 0 to 45
+# degrees, while an ellipse -- which is never a picture -- scores 0.79, two
+# objects spanning a box between them 0.80, and a figure lifted out of a
+# painting 0.65. Same number as _MIN_ALPHA_RECT_FILL, and the same reasoning.
+_MIN_TILT_FILL = float(os.getenv("ART_MIN_TILT_FILL", "0.9") or 0.9)
+
 # The smallest share of the photo a border may enclose. Below this we have
 # found something IN the picture, or a stray object, rather than the picture.
 _MIN_AREA = float(os.getenv("ART_MIN_AREA", "0.12") or 0.12)
@@ -103,6 +131,93 @@ _BLEED_SPAN = float(os.getenv("ART_BLEED_SPAN", "0.97") or 0.97)
 # adds is a pixel of the item the seller is selling; every pixel it fails to
 # add is a slice off the edge of their frame.
 _MARGIN = float(os.getenv("ART_MARGIN", "0.02") or 0.02)
+
+# --- is it a rectangle, at whatever angle it was photographed from? ----------
+#
+# Shared by both halves of this module. The geometric scan below asks it of the
+# content it found in the photo (see _is_turned_rectangle), and quad_from_alpha
+# asks it of a remote engine's matte. It is the same question in both places
+# and it is asked the same way, because the thing being separated is the same:
+# a picture, which is a rectangle however it is held, from a shape that is not
+# a rectangle at any angle at all.
+
+# Angles tried when fitting that rectangle. A rectangle repeats every 90
+# degrees, so the sweep never needs to go further.
+_FIT_COARSE = int(os.getenv("ART_FIT_COARSE", "3") or 3)
+
+
+def _fill_at(alpha: Image.Image, deg: float) -> float:
+    """What share of its bounding box the matte fills once turned by `deg`."""
+    turned = alpha.rotate(deg, resample=Image.BILINEAR, fillcolor=0)
+    box = turned.getbbox()
+    if not box:
+        return 0.0
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if not bw or not bh:
+        return 0.0
+    kept = turned.crop(box).point(lambda a: 255 if a >= 128 else 0)
+    return sum(kept.histogram()[128:]) / float(bw * bh)
+
+
+def _best_angle(alpha: Image.Image) -> tuple[float, float]:
+    """The angle at which the matte most looks like a rectangle, and how much
+    it looks like one there. Coarse sweep, then one degree either side."""
+    best, best_fill = 0.0, 0.0
+    for deg in range(0, 90, _FIT_COARSE):
+        fill = _fill_at(alpha, float(deg))
+        if fill > best_fill:
+            best, best_fill = float(deg), fill
+    for step in (1.0, 0.5):
+        for deg in (best - step, best + step):
+            fill = _fill_at(alpha, deg)
+            if fill > best_fill:
+                best, best_fill = deg, fill
+    return best, best_fill
+
+
+def _padded(alpha: Image.Image) -> tuple[Image.Image, int, int]:
+    """`alpha` centred on a square canvas big enough that no rotation can push
+    a corner off it, with the offset it was placed at.
+
+    Padding first is not tidiness. A shape clipped by the edge of its own
+    canvas as it turns loses the corners that make it a rectangle, and scores
+    BETTER for it -- so the fit would flatter exactly the shapes it exists to
+    catch.
+    """
+    diag = int((alpha.width ** 2 + alpha.height ** 2) ** 0.5) + 4
+    out = Image.new("L", (diag, diag), 0)
+    ox, oy = (diag - alpha.width) // 2, (diag - alpha.height) // 2
+    out.paste(alpha, (ox, oy))
+    return out, ox, oy
+
+
+def _is_turned_rectangle(region: Image.Image, upright: float) -> bool:
+    """Whether `region` is a picture photographed at an angle, rather than a
+    shape that is not a picture at all.
+
+    Asked only of a region that has already FAILED the upright test, and it is
+    the difference between "this seller used a tripod" and "this is not a
+    picture". See _MIN_TILT_FILL: a hand-held photo is a rectangle turned a
+    few degrees, and a turned rectangle fills its axis-aligned box poorly
+    however perfect a rectangle it is.
+
+    The direction of error here is the module's usual one. A shape wrongly
+    called a turned picture is cut to the box around itself, which keeps a
+    margin of background on an item that is still whole; a real picture
+    wrongly refused is a seller's whole set of photos silently left as shot,
+    which is the report this was written for.
+    """
+    deg, fill = _best_angle(_padded(region)[0])
+    if fill < _MIN_TILT_FILL:
+        log.info("art border: shape fills %.2f of its box upright and %.2f of "
+                 "its best rectangle (at %.1f°) — not a picture at any angle; "
+                 "keeping the photo as shot", upright, fill, deg)
+        return False
+    log.info("art border: the picture was shot hand-held, about %.1f° off "
+             "square — it fills %.2f of its own rectangle there, against "
+             "%.2f of the upright box", deg, fill, upright)
+    return True
+
 
 # --- and the scan in from the edge of the photo ------------------------------
 #
@@ -192,8 +307,17 @@ def _content(small: Image.Image) -> Image.Image:
     return mask
 
 
-def _largest_region(mask: Image.Image) -> tuple[int, Optional[Box]]:
-    """(cells, bounding box) of the largest 4-connected region of `mask`.
+def _largest_region(mask: Image.Image) -> tuple[int, Optional[Box],
+                                                Optional[Image.Image]]:
+    """(cells, bounding box, the region on its own) for the largest
+    4-connected region of `mask`.
+
+    The region comes back as its own 1-bit image because the box alone cannot
+    answer the question that matters: a picture photographed hand-held is a
+    rectangle at an angle, and telling one from a shape that is not a
+    rectangle at all means measuring the SHAPE, not its box. See
+    _is_turned_rectangle. Everything else in the mask is dropped, so a stray
+    blob beside the picture cannot join in.
 
     An explicit stack, not recursion: the healthy case here is one region
     covering most of the mask, which is exactly the shape that blows Python's
@@ -202,29 +326,37 @@ def _largest_region(mask: Image.Image) -> tuple[int, Optional[Box]]:
     w, h = mask.size
     px = mask.load()
     seen = bytearray(w * h)
-    best = (0, None)
+    best: tuple[int, Optional[Box]] = (0, None)
+    best_cells: list[tuple[int, int]] = []
     for sy in range(h):
         for sx in range(w):
             if seen[sy * w + sx] or not px[sx, sy]:
                 continue
-            size = 0
             lo_x = hi_x = sx
             lo_y = hi_y = sy
+            found = [(sx, sy)]
             stack = [(sx, sy)]
             seen[sy * w + sx] = 1
             while stack:
                 x, y = stack.pop()
-                size += 1
                 lo_x, hi_x = min(lo_x, x), max(hi_x, x)
                 lo_y, hi_y = min(lo_y, y), max(hi_y, y)
                 for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
                     if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] \
                             and px[nx, ny]:
                         seen[ny * w + nx] = 1
+                        found.append((nx, ny))
                         stack.append((nx, ny))
-            if size > best[0]:
-                best = (size, (lo_x, lo_y, hi_x + 1, hi_y + 1))
-    return best
+            if len(found) > best[0]:
+                best = (len(found), (lo_x, lo_y, hi_x + 1, hi_y + 1))
+                best_cells = found
+    if best[1] is None:
+        return 0, None, None
+    region = Image.new("L", (w, h), 0)
+    rp = region.load()
+    for x, y in best_cells:
+        rp[x, y] = 255
+    return best[0], best[1], region
 
 
 def _scan_inward(small: Image.Image, box: Box) -> Box:
@@ -310,19 +442,20 @@ def border(rgb: Image.Image) -> Optional[Box]:
                         Image.BOX) if scale < 1 else rgb).convert("RGB")
     sw, sh = small.size
 
-    cells, box = _largest_region(_content(small))
-    if not box:
+    cells, box, region = _largest_region(_content(small))
+    if not box or region is None:
         log.info("art border: no content found — keeping the photo as shot")
         return None
     bw, bh = box[2] - box[0], box[3] - box[1]
     fill = cells / (bw * bh) if bw and bh else 0.0
     area = (bw * bh) / (sw * sh)
 
-    if fill < _MIN_RECT_FILL:
-        # Found something, but it is not a rectangle: two objects spanning a
-        # box between them, or a picture the content mask broke into pieces.
-        log.info("art border: shape fills %.2f of its box, not a picture "
-                 "— keeping the photo as shot", fill)
+    # A picture fills its own box -- and a picture that was not held square to
+    # the camera fills a TURNED one, which is why failing the first test is a
+    # question rather than an answer. Only a shape that is not a rectangle at
+    # any angle is refused here: two objects spanning a box between them, or a
+    # picture the content mask broke into pieces.
+    if fill < _MIN_RECT_FILL and not _is_turned_rectangle(region, fill):
         return None
     if area < _MIN_AREA:
         log.info("art border: box covers %.2f of the frame, too small to be "
@@ -361,40 +494,9 @@ def border(rgb: Image.Image) -> Optional[Box]:
 # batch -- while an ellipse, which is never a picture, scores 0.785 at every
 # angle. Asking "is this a rectangle at SOME angle" separates those two; asking
 # "is it an upright rectangle" only separates tripod shots from handheld ones.
+# The geometric scan asks the same question of its own content for the same
+# reason and at the same number -- see _MIN_TILT_FILL.
 _MIN_ALPHA_RECT_FILL = float(os.getenv("ART_ALPHA_RECT_FILL", "0.9") or 0.9)
-
-# Angles tried when fitting that rectangle. A rectangle repeats every 90
-# degrees, so the sweep never needs to go further.
-_FIT_COARSE = int(os.getenv("ART_FIT_COARSE", "3") or 3)
-
-
-def _fill_at(alpha: Image.Image, deg: float) -> float:
-    """What share of its bounding box the matte fills once turned by `deg`."""
-    turned = alpha.rotate(deg, resample=Image.BILINEAR, fillcolor=0)
-    box = turned.getbbox()
-    if not box:
-        return 0.0
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    if not bw or not bh:
-        return 0.0
-    kept = turned.crop(box).point(lambda a: 255 if a >= 128 else 0)
-    return sum(kept.histogram()[128:]) / float(bw * bh)
-
-
-def _best_angle(alpha: Image.Image) -> tuple[float, float]:
-    """The angle at which the matte most looks like a rectangle, and how much
-    it looks like one there. Coarse sweep, then one degree either side."""
-    best, best_fill = 0.0, 0.0
-    for deg in range(0, 90, _FIT_COARSE):
-        fill = _fill_at(alpha, float(deg))
-        if fill > best_fill:
-            best, best_fill = float(deg), fill
-    for step in (1.0, 0.5):
-        for deg in (best - step, best + step):
-            fill = _fill_at(alpha, deg)
-            if fill > best_fill:
-                best, best_fill = deg, fill
-    return best, best_fill
 
 
 def quad_from_alpha(size: tuple[int, int],
@@ -403,12 +505,15 @@ def quad_from_alpha(size: tuple[int, int],
     corners -- or None.
 
     The second opinion for the case this module otherwise answers with "do
-    nothing": a print whose border `border()` could not scan, because it was
-    photographed hand-held over a floor rather than square-on, or lies on a
-    surface close to its own colour. A segmentation model finds a sheet of
-    paper on a wooden floor easily. What it cannot be trusted with is what is
-    INSIDE that sheet, and nothing here asks it -- only the outer shape is
-    taken, and the caller fills it solid through quad().
+    nothing": a print whose border `border()` could not scan at all -- one
+    lying on a surface close to its own colour, or with too little between it
+    and the floor for the scan to stop on. Being hand-held is no longer one of
+    those cases on its own: the scan fits its own content at an angle now (see
+    _MIN_TILT_FILL), so a tilted picture with a findable edge never reaches
+    here. A segmentation model finds a sheet of paper on a wooden floor
+    easily. What it cannot be trusted with is what is INSIDE that sheet, and
+    nothing here asks it -- only the outer shape is taken, and the caller
+    fills it solid through quad().
 
     Four corners rather than a box because the photo is the angled one: the
     axis-aligned box around a print lying at 8 degrees includes a triangle of
@@ -430,12 +535,8 @@ def quad_from_alpha(size: tuple[int, int],
     small = (alpha.resize((max(8, round(alpha.width * scale)),
                            max(8, round(alpha.height * scale))), Image.BOX)
              if scale < 1 else alpha)
-    # Pad to a square big enough that no rotation can push a corner off the
-    # canvas, which would clip the shape and flatter its score.
-    diag = int((small.width ** 2 + small.height ** 2) ** 0.5) + 4
-    pad = Image.new("L", (diag, diag), 0)
-    ox, oy = (diag - small.width) // 2, (diag - small.height) // 2
-    pad.paste(small, (ox, oy))
+    pad, ox, oy = _padded(small)
+    diag = pad.width
 
     deg, fill = _best_angle(pad)
     if fill < _MIN_ALPHA_RECT_FILL:

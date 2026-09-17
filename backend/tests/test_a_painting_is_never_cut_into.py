@@ -36,6 +36,8 @@ Pillow only, no rembg and no download: the border is geometry, not inference.
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 pytest.importorskip("PIL")
@@ -64,6 +66,49 @@ def _framed(box=(300, 120, 900, 800), size=SIZE, wall=WALL, frame=FRAME):
     d.rectangle(box, fill=frame)
     _painted(d, (box[0] + 18, box[1] + 18, box[2] - 18, box[3] - 18))
     return im
+
+
+def _turn(pt, centre, deg):
+    a = math.radians(deg)
+    x, y = pt[0] - centre[0], pt[1] - centre[1]
+    return (centre[0] + x * math.cos(a) - y * math.sin(a),
+            centre[1] + x * math.sin(a) + y * math.cos(a))
+
+
+def _hand_held(deg, box=(330, 150, 870, 770), mat=50, size=SIZE,
+               sweep=(255, 255, 255), frame=FRAME):
+    """The seller's photo: a framed picture, mounted behind a white mat, lying
+    on a plain white sweep and shot by somebody holding the phone.
+
+    Returns the photo and the four corners of the frame as it actually lies in
+    it, which is what the border has to keep — not the upright rectangle it
+    was drawn from.
+    """
+    im = Image.new("RGB", size, sweep)
+    d = ImageDraw.Draw(im)
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def _corners(b):
+        return [_turn(p, centre, deg) for p in
+                ((b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3]))]
+
+    outer = _corners(box)
+    d.polygon(outer, fill=frame)
+    glazed = (box[0] + 18, box[1] + 18, box[2] - 18, box[3] - 18)
+    d.polygon(_corners(glazed), fill=(252, 252, 250))       # the white mount
+    art = (glazed[0] + mat, glazed[1] + mat,
+           glazed[2] - mat, glazed[3] - mat)
+    d.polygon(_corners(art), fill=(90, 200, 190))
+    for x in range(art[0], art[2], 22):
+        d.line([_turn((x, art[1]), centre, deg),
+                _turn((x, art[3]), centre, deg)],
+               fill=(150, 120, 200), width=3)
+    return im, outer
+
+
+def _bbox(corners):
+    return (min(x for x, _ in corners), min(y for _, y in corners),
+            max(x for x, _ in corners), max(y for _, y in corners))
 
 
 def _encloses(found, truth) -> bool:
@@ -145,6 +190,77 @@ def test_a_picture_photographed_at_an_angle():
     assert _encloses(artwork.border(im), (300, 140, 910, 790))
 
 
+# --- and it survives being hand-held -----------------------------------------
+#
+# The report: a framed picture, seven photos, every one of them whole in the
+# frame on a plain white background, and the background removed from none of
+# them. Nothing had gone wrong with the photos. A picture fills its own box
+# because a picture is a rectangle -- but a TURNED rectangle fills its
+# axis-aligned box badly (0.85 at 5 degrees, 0.74 at 10), and the test was
+# asking whether the shape was an upright rectangle rather than a rectangle.
+# One pair of hands tilts a whole set the same way, which is why the answer
+# was seven out of seven rather than a photo here and there.
+
+
+@pytest.mark.parametrize("deg", [0, 2, 4, 6, 8, 10, 12, 15, 20])
+def test_a_framed_picture_shot_hand_held_is_still_a_picture(deg):
+    """The reported set, one tilt at a time. A seller holding a phone is a few
+    degrees off square on every shot, and none of those degrees makes the
+    thing in front of them stop being a picture."""
+    im, corners = _hand_held(deg)
+
+    found = artwork.border(im)
+    assert found is not None, f"refused at {deg} degrees"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
+@pytest.mark.parametrize("deg", [5, 10, 20])
+def test_nothing_is_cut_off_the_corners_of_a_tilted_picture(deg):
+    """The direction that matters, checked on the matte that actually ships.
+    The box around a tilted picture keeps a wedge of background at each
+    corner — on a white sweep it is white on white, and on any other surface
+    it is a slightly worse cutout of an INTACT item. What it must never do is
+    clip a corner of the frame, which is the one error here that destroys the
+    thing being sold."""
+    im, corners = _hand_held(deg)
+
+    m = artwork.mask(im.size, artwork.border(im))
+    for x, y in corners:
+        assert m.getpixel((round(x), round(y))) == 255, (deg, x, y)
+
+
+@pytest.mark.parametrize("deg,taper", [(0, 0.08), (5, 0.08), (10, 0.06),
+                                       (3, 0.14), (8, 0.12)])
+def test_a_picture_shot_from_slightly_off_to_one_side(deg, taper):
+    """Hand-held is not only turned, it is KEYSTONED: a phone held a little
+    low or off to one side sees the far edge of the frame shorter than the
+    near one, so the shape is a trapezium rather than a rectangle. It is still
+    a picture, and fitting a rectangle to it still tells it apart from the
+    shapes that are not one. `taper` is how much narrower the top edge comes
+    out than the bottom."""
+    im = Image.new("RGB", SIZE, (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    box = (330, 150, 870, 770)
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+    def _shape(b):
+        inset = (b[2] - b[0]) * taper / 2
+        return [_turn(p, centre, deg) for p in
+                ((b[0] + inset, b[1]), (b[2] - inset, b[1]),
+                 (b[2], b[3]), (b[0], b[3]))]
+
+    corners = _shape(box)
+    d.polygon(corners, fill=FRAME)
+    glazed = (box[0] + 18, box[1] + 18, box[2] - 18, box[3] - 18)
+    d.polygon(_shape(glazed), fill=(252, 252, 250))
+    d.polygon(_shape((glazed[0] + 50, glazed[1] + 50,
+                      glazed[2] - 50, glazed[3] - 50)), fill=(90, 200, 190))
+
+    found = artwork.border(im)
+    assert found is not None, f"refused at {deg} degrees, taper {taper}"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
 def test_a_white_mounted_print_on_a_white_table():
     """The hard one, and the reason the scan runs inward from the edge of the
     photo instead of outward from the picture. The printed area stops eighty
@@ -187,6 +303,46 @@ def test_two_objects_spanning_a_rectangle_are_not_a_picture():
     d = ImageDraw.Draw(im)
     d.ellipse((120, 200, 340, 700), fill=(40, 110, 50))
     d.rectangle((880, 520, 1080, 660), fill=(120, 70, 40))
+
+    assert artwork.border(im) is None
+
+
+@pytest.mark.parametrize("deg", [0, 7, 15])
+def test_two_objects_are_not_a_picture_at_any_angle_either(deg):
+    """The shape above, turned. Fitting a rectangle at its best angle is a
+    weaker question than fitting an upright one, so the refusals have to hold
+    under rotation too — otherwise the hand-held case buys a picture back by
+    letting everything else in with it."""
+    im = Image.new("RGB", SIZE, WALL)
+    d = ImageDraw.Draw(im)
+    centre = (600, 450)
+    d.ellipse((120, 200, 340, 700), fill=(40, 110, 50))
+    d.rectangle((880, 520, 1080, 660), fill=(120, 70, 40))
+    im = im.rotate(deg, resample=Image.BICUBIC, fillcolor=WALL, center=centre)
+
+    assert artwork.border(im) is None
+
+
+def test_a_round_object_is_not_a_picture_at_any_angle():
+    """A circle is the shape that proves the fit is doing something: it scores
+    the same at every angle a rectangle would be rescued by, so a test that
+    merely tried harder would let it through. It is never a picture."""
+    im = Image.new("RGB", SIZE, WALL)
+    ImageDraw.Draw(im).ellipse((250, 150, 950, 780), fill=(40, 110, 50))
+
+    assert artwork.border(im) is None
+
+
+def test_a_figure_lifted_out_of_a_painting_is_not_a_picture():
+    """The original bug's shape, asked of the border finder directly. This is
+    what the model returns when it is handed a painting — the subject, cut
+    free of the artwork around it. It is a perfectly good matte and it is not
+    a rectangle at any angle."""
+    im = Image.new("RGB", SIZE, WALL)
+    d = ImageDraw.Draw(im)
+    d.ellipse((430, 250, 780, 620), fill=(240, 215, 195))       # a head
+    d.polygon([(400, 620), (810, 620), (880, 830), (330, 830)],
+              fill=(70, 90, 150))                                # and shoulders
 
     assert artwork.border(im) is None
 
