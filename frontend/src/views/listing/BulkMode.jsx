@@ -17,6 +17,7 @@ import { usePublishTargets } from "./publishShared";
 import { ebayBlockers } from "./blockers";
 import { duplicateSuspects } from "./duplicateSuspects";
 import { DraftsStrip } from "./DraftsStrip";
+import { AiNotesStep } from "./AiNotesStep";
 
 /* Bulk mode: one photo dump spanning many items. The server groups the photos,
    identifies each item, and saves each one as a draft as it finishes; this
@@ -42,6 +43,10 @@ const PHASE_MESSAGES = {
   uploading: ["Uploading your photo pile…"],
   optimizing: ["Optimizing photos…", "Straightening sideways shots…"],
   grouping: ["Sorting photos into items…", "Matching angles of the same item…"],
+  // Only ever on screen for the moment between the seller pressing the button
+  // and the next poll bringing back a batch that has moved on — the step
+  // itself replaces this card (see `awaiting` below).
+  awaiting_notes: ["Starting on your listings…"],
   identifying: ["Identifying items…", "Writing titles & prices…", "Detecting brands…"],
 };
 
@@ -134,6 +139,16 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // hit twice in the up-to-1.5s before the next poll brings back the finished
   // job — and so it can say "Stopping…" instead of looking ignored.
   const [stopping, setStopping] = useState(false);
+  // The guidance step's answer has been sent. Latched for the same reason as
+  // `stopping`: the phase this screen reads still says "waiting on you" until
+  // the next poll lands, and leaving the question up for that second and a
+  // half invites a second answer over the batch that is already drafting.
+  const [notesBusy, setNotesBusy] = useState(false);
+  // What the seller has typed at that step, keyed by item index. Held HERE
+  // rather than inside the step, which the progress card replaces the moment
+  // the answer is sent — see AiNotesStep: a failed submit has to come back to
+  // forty boxes still full of what they wrote, not to forty empty ones.
+  const [itemNotes, setItemNotes] = useState({});
   const stopped = useRef(false);
   const fails = useRef(0);
   // When the polls started failing. A deploy restarts the only server and
@@ -294,6 +309,23 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   }, [jobId, toast]);
 
+  // Answer the guidance step, and let the batch draft.
+  //
+  // Leaving every box blank is a legitimate answer and lands on exactly the
+  // drafts a batch without the step would have produced, so there is nothing
+  // to validate here. A failure leaves the question up: the batch is still
+  // paused server-side and its photos are still on the volume, so pressing
+  // again is the whole recovery.
+  const submitNotes = useCallback(async (notes) => {
+    setNotesBusy(true);
+    try {
+      await postJson(`/api/bulk/notes/${jobId}`, { notes });
+    } catch (e) {
+      setNotesBusy(false);
+      toast(`Couldn't start the listings: ${e.message}`, { kind: "error" });
+    }
+  }, [jobId, toast]);
+
   // Take an item the AI could not identify off the batch.
   //
   // Best-effort server-side: a failed identify usually produced no record at
@@ -319,10 +351,17 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     loadListings({ quiet: true });
   };
 
+  // Stopped at the guidance step: the photos are optimized and split, nothing
+  // has been drafted or charged for a draft, and the batch is waiting on the
+  // seller rather than on the machine. It takes the progress card's place —
+  // a bar that claims to be working while it waits for a person is a bar
+  // that will sit there until the tab is closed.
+  const awaiting = !notesBusy && !job?.done
+    && job?.phase === "awaiting_notes" && !!(job?.pending_items || []).length;
   // Busy from the very first frame: the batch screen goes up on the click, so
   // it opens on "Uploading your photo pile…" while the photos are still going
   // out — before there is a job id, let alone a status to poll.
-  const busy = !unwatched && (!job || !job.done);
+  const busy = !unwatched && (!job || !job.done) && !awaiting;
   const phase = job?.phase || "uploading";
   // Phase-weighted % for the progress bar shown while the job runs; the
   // cards stream in below it as each item is drafted.
@@ -334,7 +373,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     if (job.done) return 100;
     if (phase === "uploading") return 5;
     if (phase === "optimizing") return 10 + 35 * frac(job.current, job.total_photos);
-    if (phase === "grouping") return 50;
+    // The photo work is done and the drafting has not started: the same place
+    // in the bar either way, whether the batch is splitting the pile or
+    // waiting for the seller to say what it split it into.
+    if (phase === "grouping" || phase === "awaiting_notes") return 50;
     if (phase === "identifying") return 55 + 44 * frac(job.current, job.total_items);
     return 95;
   })());
@@ -398,6 +440,27 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {awaiting && (
+        <>
+          <AiNotesStep
+            items={job.pending_items}
+            values={itemNotes}
+            onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
+            onSubmit={submitNotes}
+          />
+          {/* Still the way off a batch the seller has changed their mind
+              about. Nothing has been drafted at this point, so stopping here
+              costs them nothing at all. */}
+          <div className="flex justify-end">
+            <Button
+              variant="ghost" size="sm" onClick={stopBatch} disabled={stopping}
+              title="Drop this batch. Nothing has been drafted yet, so nothing is charged."
+            >
+              <CircleStop aria-hidden /> {stopping ? "Stopping…" : "Stop batch"}
+            </Button>
+          </div>
+        </>
+      )}
       {busy && (
         <div className="flex flex-col gap-3">
           <AIStatusCard messages={[

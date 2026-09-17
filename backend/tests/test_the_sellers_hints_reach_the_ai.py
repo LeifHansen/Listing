@@ -71,7 +71,7 @@ def drafts(monkeypatch):
     """claude_ai.identify, stubbed. Returns the list of notes it was handed."""
     seen: list[str] = []
 
-    def identify(paths, names, strategy="", notes=""):
+    def identify(paths, names, strategy="", notes="", item_notes=""):
         seen.append(notes)
         return IdentifyResult(listing=Listing(title="A polo", images=list(names)),
                               confidence="medium", raw_observations="")
@@ -158,6 +158,12 @@ def batch(monkeypatch, drafts, quiet_chain):
 
     Returns (grouped_notes, items) — what the grouping pass was told, and the
     per-item sessions the batch produced.
+
+    `item_notes={}` drives it straight past the guidance step, which is the
+    seller pressing on with every box blank. What this file is about is the
+    PILE's notes — the box on the uploader — and those have to survive the
+    whole journey whether or not the seller had anything to add per item.
+    See test_the_sellers_item_notes_reach_the_ai.py for the other box.
     """
     grouped: list[str] = []
 
@@ -176,7 +182,7 @@ def batch(monkeypatch, drafts, quiet_chain):
         job_id = storage.new_session_id()
         main._register_bulk_job(job_id, {"id": job_id, "done": False,
                                          "error": None, "items": []})
-        main._run_bulk_job(job_id, staging, False, None)
+        main._run_bulk_job(job_id, staging, False, None, item_notes={})
         job = main.jobstore.snapshot(job_id)
         assert not job.get("error"), job["error"]
         return grouped, job["items"], staging

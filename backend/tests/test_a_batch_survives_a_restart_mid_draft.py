@@ -128,10 +128,10 @@ def resumed(monkeypatch):
     started = threading.Event()
 
     def _fake(job_id, staging_id, strip_bg, uid, resumed=False,
-              resume_from=None):
+              resume_from=None, item_notes=None):
         calls.append({"job_id": job_id, "staging_id": staging_id,
                       "strip_bg": strip_bg, "uid": uid, "resumed": resumed,
-                      "resume_from": resume_from})
+                      "resume_from": resume_from, "item_notes": item_notes})
         started.set()
 
     monkeypatch.setattr(main, "_run_bulk_job", _fake)
@@ -326,7 +326,11 @@ def test_a_fresh_batch_writes_its_plan_down_as_it_goes(quiet_pipeline, monkeypat
     jobstore.register("job-2", {"phase": "uploading", "done": False,
                                 "items": []}, uid="owner")
 
-    main._run_bulk_job("job-2", staging, False, "owner")
+    # item_notes={}: straight past the guidance step, which is the seller
+    # pressing on with every box blank. The plan under test here is written
+    # down BEFORE that step and the drafting happens after it, so running the
+    # whole batch is what puts both halves on screen at once.
+    main._run_bulk_job("job-2", staging, False, "owner", item_notes={})
 
     planned = [s for s in seen if s.get("_groups")]
     assert planned, "the grouping was never written down"

@@ -262,7 +262,17 @@ export function patchJson(path, body) {
 // the client polls instead of a single long request that a gateway or the
 // browser would time out ("server taking too long to respond"). If we give up
 // waiting, the server keeps working and saves the draft anyway.
-export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, onUpdate } = {}) {
+export async function pollJob(jobId, {
+  intervalMs = 1500, timeoutMs = 240000, onUpdate, stopWhen,
+} = {}) {
+  // `stopWhen(status)` (optional) is the other way out of this loop: it
+  // resolves with the RAW STATUS instead of a result, for a job that has
+  // stopped mid-chain on purpose and is waiting for something only the seller
+  // can give it (the guidance step — phase "awaiting_notes"). Without it the
+  // per-stage deadline below would declare that job stuck after four minutes
+  // of a seller thinking, and the caller would never see the question. Only a
+  // caller that passes it can be handed a non-result, so every existing call
+  // site keeps its return type exactly.
   // The timeout is per STAGE, not per job: the server heartbeats each phase
   // change (optimizing -> identifying -> category -> specifics -> maker), and
   // the deadline resets whenever the job visibly advances. A job is only
@@ -281,6 +291,7 @@ export async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 240000, on
       if (j.error) throw new Error(j.error);
       return j.result;
     }
+    if (stopWhen && stopWhen(j)) return j;
     const seen = `${j.phase || ""}|${j.beat || ""}|${j.current || ""}`;
     if (seen !== lastSeen) {
       lastSeen = seen;

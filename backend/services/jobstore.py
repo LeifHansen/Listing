@@ -62,6 +62,12 @@ MIRROR_FIELDS = (
     # never the drafts themselves, so a 250-photo batch's mirror stays a few
     # KB. See main._resume_interrupted_batches.
     "_names", "_groups", "_done", "_inflight",
+    # The guidance step (phase "awaiting_notes"): the session a paused SINGLE
+    # upload belongs to, and the per-item text a paused batch has already been
+    # handed. A batch waiting on the seller has no worker holding either, so
+    # the mirror is the only place they live between the pause and the answer
+    # — and a deploy in that window is the ordinary case, not the rare one.
+    "_session_id", "_item_notes",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",
@@ -72,6 +78,13 @@ MIRROR_FIELDS = (
 # upload path.
 MIRROR_TTL = 7 * 86400
 MIRROR_MAX = 500
+
+# The phase of a job that has stopped to ask the seller something and has no
+# worker of its own (the guidance step -- see main._AWAITING_NOTES). It lives
+# here, with the mirror fields, because both the status this module serves and
+# the restart message it writes have to know that this phase means "waiting on
+# a person", not "waiting on the machine".
+AWAITING_NOTES = "awaiting_notes"
 
 
 def _mirror_dir() -> Path:
@@ -212,6 +225,65 @@ def snapshot(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
     return {k: v for k, v in copy.items() if not k.startswith("_")}
 
 
+def internal(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
+    """The WHOLE job, bookkeeping keys and all, for this app's own code.
+
+    `snapshot` exists to strip those keys before anything leaves the process;
+    this is the other half of that split, for a route that has to ACT on them
+    rather than publish them. The guidance step is the one that needs it: its
+    answer has to reach the session a paused upload belongs to, and the
+    grouping a paused batch stopped on, and neither of those may ever be
+    served to a client.
+
+    Same ownership rule as `snapshot`, and the same None for both "no such
+    job" and "not yours", so a caller cannot turn this into a way of asking
+    whether someone else's id exists.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return None
+        owner = job.get("_uid")
+        if owner and owner != uid:
+            return None
+        return json.loads(json.dumps(job))  # deep copy, safe to hand out
+
+
+def claim(job_id: str, expect_phase: str, uid: Optional[str] = None,
+          **fields) -> Optional[dict]:
+    """Move a job OUT of `expect_phase`, and hand back what it was.
+
+    Check-then-act on a phase is a race the guidance step cannot afford. Two
+    answers arriving together — a double tap, a retry landing beside the
+    original — would both read "awaiting_notes", both start a drafting run
+    over the same pile, and the seller would be charged for every item twice.
+    Doing the read and the write under one lock means exactly one caller is
+    handed the job, and every other can be told, honestly, that it has moved
+    on.
+
+    What comes back is the job as it was BEFORE `fields` were merged — a deep
+    copy, bookkeeping keys included, like `internal`, because acting on it is
+    the whole point. None means "not in that phase", "already finished", "no
+    such job" or "not yours": the caller has not claimed it, and cannot tell
+    which, exactly as the other readers here cannot.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return None
+        owner = job.get("_uid")
+        if owner and owner != uid:
+            return None
+        if job.get("done") or job.get("phase") != expect_phase:
+            return None
+        was = json.loads(json.dumps(job))  # deep copy, safe to hand out
+        job.update(fields)
+        job["_rev"] = job.get("_rev", 0) + 1
+        record = _record(job)
+    _write_mirror(job_id, record)
+    return was
+
+
 def snapshot_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
     """`snapshot` as a ready-to-serve JSON body, cached until the job changes.
     Same None semantics (unknown job or not yours)."""
@@ -296,6 +368,15 @@ def interrupted_message(record: dict) -> str:
     current = record.get("current") or 0
     photos = record.get("total_photos") or 0
     items = record.get("total_items") or 0
+    if phase == AWAITING_NOTES:
+        # It was waiting on the SELLER, not on the machine, and nothing had
+        # been drafted or charged for a draft. The next boot normally puts the
+        # question straight back (main._resume_interrupted_batches); this is
+        # what is left when it could not, which in practice means the photos
+        # were swept while it waited.
+        return ("The server restarted while this batch was waiting for your "
+                "notes, and its photos are no longer here. Nothing was "
+                "drafted and nothing was charged — please upload them again.")
     if phase == "identifying":
         # What FINISHED, not which item it was on: several are drafted at
         # once, so "it stopped on item 2" would name one of three in flight

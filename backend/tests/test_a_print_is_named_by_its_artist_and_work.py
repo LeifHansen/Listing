@@ -308,7 +308,7 @@ def test_the_draft_the_seller_gets_carries_the_name(monkeypatch):
     monkeypatch.setattr(main.claude_ai, "identify_artwork",
                         lambda *a, **k: HOKUSAI)
 
-    def identify(paths, names, strategy="", notes=""):
+    def identify(paths, names, strategy="", notes="", item_notes=""):
         return IdentifyResult(listing=_draft(images=list(names)),
                               confidence="low", raw_observations="a wave")
     monkeypatch.setattr(main.claude_ai, "identify", identify)

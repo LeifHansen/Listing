@@ -233,6 +233,46 @@ def load_notes(session_id: str) -> str:
         return ""
 
 
+ITEM_NOTES_FILE = "item_notes.txt"
+
+
+def save_item_notes(session_id: str, notes: str) -> None:
+    """Remember what the seller said about THIS item, at the guidance step.
+
+    A second file rather than more of NOTES_FILE, because the two are
+    different claims and the prompt weighs them differently. The notes box on
+    the uploader describes a PILE -- several items, some of which these photos
+    are not -- and every item of a bulk batch inherits the whole of it. This
+    one was typed with these photos on screen, after the batch had already
+    split them, so it is about this item and nothing else. Merging them would
+    throw that away at exactly the moment it is worth most.
+
+    Written for the same reason the pile's notes are: it is an INPUT to the AI,
+    so a re-run of the identify chain months later ("Start over") needs it as
+    much as the first pass did.
+
+    Best-effort, like save_notes: guidance that cannot be written must never
+    fail the batch the seller is waiting on.
+    """
+    text = (notes or "").strip()
+    try:
+        path = ensure_session(session_id) / ITEM_NOTES_FILE
+        if text:
+            path.write_text(text)
+        else:
+            path.unlink(missing_ok=True)
+    except (OSError, InvalidSessionId) as exc:
+        log.warning(f"storage: could not save item notes for {session_id}: {exc}")
+
+
+def load_item_notes(session_id: str) -> str:
+    """What the seller told the AI about this item, or "" when they skipped."""
+    try:
+        return (session_dir(session_id) / ITEM_NOTES_FILE).read_text().strip()
+    except (OSError, InvalidSessionId):
+        return ""
+
+
 def load_listing(session_id: str) -> dict | None:
     """The saved draft as a plain dict, or None when this session has none.
 
