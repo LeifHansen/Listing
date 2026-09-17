@@ -869,6 +869,7 @@ is *no verdict*, not "medium".
 | `POST` | `/api/{marketplace}/end-listing` | End one marketplace's live listing |
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
 | `GET`  | `/api/listings` | Current user's saved listing history |
+| `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
@@ -1063,6 +1064,8 @@ backend/
     listing_prompt.py the prompts, kept testable without the SDK
     ebay_trading.py  Trading API (XML): publish, revise, end, read the store
     listing_sync.py  bi-directional sync: import the store, push edits back
+    listing_export.py the store as a CSV: the columns, and the guard that
+                     stops a spreadsheet running what it opens
     sync_merge.py    the three-way merge behind the sync
     taxonomy.py      Taxonomy API -> categories, aspects, the Size rules
     metrics.py       views / watchers / offers / bids per listing
@@ -1867,6 +1870,60 @@ set `EBAY_MESSAGING_ENABLED=1` once eBay has approved the app, and connected
 sellers reconnect once to grant it. Until then the icon simply isn't there.
 Flipping the flag can't disturb existing connections — the refresh grant
 deliberately omits `scope` — so rolling back is an env change, not a deploy.
+
+## Taking the whole store with you (CSV export)
+
+**Export CSV**, on the Sell screen beside *Sync with eBay*, downloads every
+listing on the account as a spreadsheet. It is the answer to "it's my
+inventory, let me have it": a backup, an insurance schedule, the file an
+accountant asks for, and the thing a seller leaves with.
+
+**Every listing, not the tab you are looking at.** The button sits above a tab
+strip that filters, and the file deliberately ignores it — drafts, live, sold,
+ended and Shop Mode finds alike. It ignores the *page* too: the grid caps what
+it downloads because it renders full JSON records on a phone, and the export
+walks the store with the same keyset cursor the grid pages with instead of
+mirroring that cap. A file of the first 200 listings looks exactly like a
+complete one, which is why that distinction is a test rather than a comment.
+
+**A link to every photo, in one column.** The photos are the part of a listing
+this app made, and a row naming an item with no way to see it is a row about
+nothing. Listings created here store filenames; what goes in the file is the
+public URL that serves each one — the *same* URL eBay is handed at publish
+(`services/ebay._image_urls` builds it the same way), so a link in the
+spreadsheet and a link on the live listing can be checked against each other.
+Listings imported from eBay have no local files and carry eBay's own absolute
+URLs; both kinds land in `image_urls`, pipe-separated, with `image_count`
+beside them.
+
+**The record as recorded.** Money keeps the currency it was stored in and the
+currency is a column. `price` stays the *asking* price after a sale with
+`sold_price` beside it rather than folded into it — copying one into the other
+would overstate the take on every accepted offer and auction close in the file.
+An empty cell means the record is empty, never "we didn't work it out", so a
+blank cost basis cannot average in as a zero. Nothing is shortened. The sync
+ledger (`remote_shadow`, `dirty_fields`) is left out for the same reason
+`GET /api/listings` drops it: it is the server's bookkeeping, not an inventory.
+
+**A spreadsheet runs what it opens.** Every title and description in the store
+was written by an AI draft or imported from eBay, and a cell beginning `=`,
+`+`, `-`, `@` or a control character is a *formula* to Excel, Numbers and
+Sheets — `=HYPERLINK(...)` and `=cmd|...` are the documented attack on exactly
+this kind of file. Those cells are prefixed with an apostrophe so they arrive
+as text, and the guard takes care not to fire on a negative number: a cost
+basis of `-4.50` is something the seller wants to sum. The file opens with a
+UTF-8 byte-order mark, because without one Excel on Windows reads it as the
+system codepage and every accented title arrives as mojibake.
+
+**Columns are appended to, never inserted into.** A spreadsheet somebody built
+a formula against is a file format; a column added in the middle silently moves
+every column after it in files that already exist.
+
+Size is bounded by streaming rather than by trimming: the response is generated
+a page at a time, so the seller's whole store is never in memory at once.
+`LISTING_EXPORT_CAP` (default 25,000) is a resource guard on top of that, and
+when it bites the answer says so in `X-Export-Truncated` — the seller is told
+the download was cut instead of discovering it by counting rows.
 
 ## Notes & limitations
 

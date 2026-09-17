@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle,
+  PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle, Download,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
+import { exportListingsCsv } from "@/lib/listingExport";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
@@ -174,6 +175,40 @@ export function ListingsView({ search = "" }) {
     if (r.failed) {
       toast(`${r.failed} listing${r.failed === 1 ? "" : "s"} couldn't be read from eBay.`,
         { kind: "warning" });
+    }
+  };
+
+  // Download the whole store as a spreadsheet — every listing on the account,
+  // with a link to every photo. Deliberately NOT the open tab and not the
+  // page the grid has loaded: the file is a backup, an inventory count, the
+  // thing an accountant asks for, and all three want everything. The button's
+  // tooltip says so, because it sits above a tab strip that filters.
+  const [exporting, setExporting] = useState(false);
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const { how, filename, total, exported } = await exportListingsCsv();
+      // The seller dismissed the iOS share sheet. That is a decision, not a
+      // failure, and saying "exported" about a file they declined to keep
+      // would be telling them something that did not happen.
+      if (how === null) return;
+      if (exported != null && total != null && exported < total) {
+        toast(
+          `Exported the first ${exported} of ${total} listings to ${filename} — `
+          + "that's as much as one download carries. Get in touch if you need "
+          + "the rest.",
+          { kind: "warning" });
+        return;
+      }
+      toast(
+        total != null
+          ? `Exported ${total} listing${total === 1 ? "" : "s"} to ${filename}.`
+          : `Exported your listings to ${filename}.`,
+        { kind: "success" });
+    } catch (e) {
+      toast(`Couldn't export your listings: ${e.message}`, { kind: "error" });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -396,6 +431,16 @@ export function ListingsView({ search = "" }) {
           {/* Grid or list — a viewing preference, so it sits with the other
               view-level controls and is remembered across visits. */}
           <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
+          {/* Offered once there is something to put in the file. Keyed off the
+              whole store rather than the open tab: the export ignores the
+              tabs, so a seller on an empty Inactive tab must not be told
+              there is nothing to export when their store is full. */}
+          {user && listingsState.items.length > 0 && (
+            <Button variant="soft" onClick={exportCsv} loading={exporting}
+              title="Download every listing on your account — all tabs, with prices, dates and a link to every photo — as a CSV spreadsheet.">
+              <Download aria-hidden /> Export CSV
+            </Button>
+          )}
           {user && ebay.connected && (
             <Button variant="soft" onClick={() => openShipping()}>
               <Truck aria-hidden /> Ship orders
