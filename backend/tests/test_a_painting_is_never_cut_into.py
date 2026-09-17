@@ -282,6 +282,89 @@ def test_a_white_mounted_print_on_a_white_table():
     assert _encloses(artwork.border(im), paper)
 
 
+# --- ...and survives being cropped square ------------------------------------
+#
+# The report straight after the one above, and the same shape of answer: art
+# photos, square, and the background removed from almost none of them.
+#
+# A picture fills its own box -- but only the part of the picture that is IN
+# THE MASK, and a pale mount is not. Wall and mount are both near white, so the
+# mask is the moulding with a ring of nothing inside it and the artwork in the
+# middle. A ring with a hole in it fills 0.71 of its box; an ellipse, which is
+# never a picture, fills 0.785. The gate read the picture as the worse shape of
+# the two.
+#
+# WHICH CROP that lands on is an accident of arithmetic. The working grid is
+# 240 cells on the LONG side, so a square photo's short side is 240 cells where
+# a 4:3 photo's is 180 -- the same piece, cropped square, arrives with its
+# mount a third wider in cells, and past about eight cells the closing that
+# used to bridge it no longer does. Nothing about the photo was wrong, and one
+# crop shapes a whole set the same way, which is why the answer was almost all
+# of them rather than a photo here and there.
+#
+# So the hole is filled before the shape is measured. Enclosed background only,
+# which is what keeps every refusal below standing -- the last two tests here
+# are that half of it.
+
+
+@pytest.mark.parametrize("deg", [0, 1, 3, 4, 6, 7, 9, 12])
+def test_a_matted_picture_cropped_square_is_still_a_picture(deg):
+    """The reported set, one tilt at a time. A square crop is a fact about the
+    photo; it is not a fact about the item in it."""
+    im, corners = _hand_held(deg, box=(230, 230, 770, 770), size=(1000, 1000))
+
+    found = artwork.border(im)
+    assert found is not None, f"refused a square photo at {deg} degrees"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
+@pytest.mark.parametrize("size,box", [((1200, 900), (330, 150, 870, 770)),
+                                      ((1000, 1000), (230, 230, 770, 770)),
+                                      ((900, 1200), (180, 330, 720, 870))])
+def test_the_shape_of_the_photo_does_not_decide_whether_it_is_art(size, box):
+    """One piece, three crops, at the tilt a pair of hands actually produces.
+    Whether a border is found has to be a question about the picture."""
+    im, corners = _hand_held(4, box=box, size=size)
+
+    found = artwork.border(im)
+    assert found is not None, f"refused a {size[0]}x{size[1]} photo"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
+def test_only_the_background_a_shape_encloses_is_filled():
+    """The half of the repair that keeps every refusal below standing. A gap
+    with a way out to the frame edge is not a hole in anything — it is the
+    space between two objects, and two objects spanning a box between them
+    must never read as one picture."""
+    enclosed = Image.new("L", (200, 160), 0)
+    d = ImageDraw.Draw(enclosed)
+    d.rectangle((20, 20, 180, 140), fill=255)
+    d.rectangle((50, 50, 150, 110), fill=0)            # a mount: enclosed
+    open_to_the_edge = enclosed.copy()
+    ImageDraw.Draw(open_to_the_edge).rectangle((50, 50, 150, 200), fill=0)
+
+    filled = artwork._solid(enclosed)
+    assert all(filled.getpixel((x, y)) == 255
+               for x in range(21, 180, 7) for y in range(21, 140, 7))
+    # ...and the one with a way out is handed back exactly as it came in.
+    assert artwork._solid(open_to_the_edge).tobytes() == \
+        open_to_the_edge.tobytes()
+
+
+def test_a_wreath_is_not_a_picture_just_because_its_middle_was_filled_in():
+    """The shape filling a hole could have let through, and does not. A ring
+    filled in is a disc, and a disc fills 0.785 of its box at every angle —
+    the same score as the ellipse below, and nowhere near the bar. Filling a
+    hole says nothing about the outer edge, which is the only thing that
+    decides this."""
+    im = Image.new("RGB", SIZE, WALL)
+    d = ImageDraw.Draw(im)
+    d.ellipse((250, 100, 950, 800), fill=(40, 110, 50))
+    d.ellipse((390, 240, 810, 660), fill=WALL)
+
+    assert artwork.border(im) is None
+
+
 # ------------------------------------------- ...and refuses when it cannot
 
 def test_a_picture_that_bleeds_off_the_frame_is_left_alone():

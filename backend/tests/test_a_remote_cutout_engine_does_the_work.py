@@ -415,6 +415,38 @@ def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
                 f"at {deg} degrees the pixel {xy} inside the print was altered")
 
 
+def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
+                                                             monkeypatch):
+    """The same hole the geometric scan meets, arriving from a paid engine
+    instead: it lets go of a white mount, a pale sky or the glare off the
+    glazing and hands back a rectangle with a gap in the middle of it.
+
+    A gap in the middle says nothing about the outer edge, and the outer edge
+    is the only thing asked for here — this path takes the matte's SHAPE and
+    then fills it solid itself. Measured with the gap still in it, a matted
+    print scores below an ellipse and is refused."""
+    chain("removebg", "local")
+    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    img, box = _framed_print()
+
+    def _holed(rgb):
+        cut = _cut(rgb.size, box)
+        ImageDraw.Draw(cut).rectangle(
+            (box[0] + 80, box[1] + 80, box[2] - 80, box[3] - 80),
+            fill=(0, 0, 0, 0))
+        return cut
+
+    _remote(monkeypatch, removebg=_engine(returns=_holed))
+
+    out = images.art_cutout(img)
+
+    assert out is not None, "a print is a print with or without its mount"
+    # ...and what ships is solid: the mount the engine dropped is still there.
+    mid = ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+    assert out.getpixel(mid) == img.getpixel(mid)
+    assert out.getpixel((5, 5)) == images.WHITE
+
+
 def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
     """Geometry first: it cannot be wrong about what is inside the box it
     returns, so a remote engine is only ever the second opinion."""

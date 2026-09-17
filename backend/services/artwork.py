@@ -145,6 +145,67 @@ _MARGIN = float(os.getenv("ART_MARGIN", "0.02") or 0.02)
 # degrees, so the sweep never needs to go further.
 _FIT_COARSE = int(os.getenv("ART_FIT_COARSE", "3") or 3)
 
+# The value the flood below paints the OUTSIDE with while it works. Any level
+# that is neither 0 nor 255, since what it runs over is a two-level mask.
+_OUTSIDE = 128
+
+
+def _solid(shape: Image.Image, box: Optional[Box] = None) -> Image.Image:
+    """`shape` -- a two-level mask -- with the background it ENCLOSES filled in.
+
+    Both halves of this module measure how much of its own box a shape fills,
+    and a hole is the one thing that measurement cannot survive. A framed
+    picture behind a pale mount fills 0.71 of its box; an ellipse, which is
+    never a picture, fills 0.785. Without this the gate reads the picture as
+    the worse shape of the two and keeps the photo as shot.
+
+    The hole is not a fact about the shape. It is a fact about the MASK:
+    whatever inside the picture happens to match the wall it hangs on drops
+    out of it -- a white mount, a pale sky, bare canvas, the glare off
+    glazing, or on a remote engine's matte a patch the model let go. None of
+    it says anything about whether the OUTER EDGE is a rectangle, which is
+    the only thing this module ever asks and the only thing it ever cuts to.
+
+    THE SQUARE CASE, which is how this was reported: how many cells of the
+    240px working grid a mount covers depends on the photo's own shape. The
+    long side is normalised to 240, so a square photo's short side is 240
+    where a 4:3 photo's is 180 -- the same piece, cropped square, arrives
+    with its mount a third wider in cells. Past about eight cells _CLOSE can
+    no longer bridge it, the mount stays a hole, and the fill drops from 0.90
+    to 0.71. That is the whole of it: a picture that passed in landscape was
+    refused for having been cropped square, and refused the same way on every
+    photo in the set, because one crop shapes them all.
+
+    Only background the shape fully encloses. Anything with a way out to the
+    frame edge is left alone, which is what keeps the gap between two objects
+    a gap -- two things spanning a box between them must never read as one
+    picture.
+
+    Filling can only ever ADD to a shape, and a hole is by definition inside
+    the shape's bounding box, so this moves no border: the box is what it
+    always was, and the only photo whose outcome changes is one that was
+    being kept as shot.
+
+    Flooded inside that bounding box rather than over the whole frame. The
+    shape cannot reach outside its own box, so nothing out there can be
+    enclosed by it, and a cell of background on the crop's rim is a cell with
+    a way out -- which is the difference between 3ms and 80ms per photo.
+    """
+    box = box or shape.getbbox()
+    if not box:
+        return shape
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    # One cell of background all the way around the crop, so a single seed in
+    # its corner reaches every cell outside the shape -- including the ones
+    # the shape's own edge is standing on.
+    pad = Image.new("L", (bw + 2, bh + 2), 0)
+    pad.paste(shape.crop(box), (1, 1))
+    ImageDraw.floodfill(pad, (0, 0), _OUTSIDE)
+    out = shape.copy()
+    out.paste(pad.point(lambda v: 0 if v == _OUTSIDE else 255)
+                 .crop((1, 1, bw + 1, bh + 1)), (box[0], box[1]))
+    return out
+
 
 def _fill_at(alpha: Image.Image, deg: float) -> float:
     """What share of its bounding box the matte fills once turned by `deg`."""
@@ -446,6 +507,12 @@ def border(rgb: Image.Image) -> Optional[Box]:
     if not box or region is None:
         log.info("art border: no content found — keeping the photo as shot")
         return None
+    # A white mount, a pale sky, bare canvas: none of it differs from the wall,
+    # so none of it is in the mask, and the picture reaches the rectangle test
+    # below as a ring with its middle missing. The middle is not the question.
+    # See _solid.
+    region = _solid(region, box)
+    cells = sum(region.histogram()[128:])
     bw, bh = box[2] - box[0], box[3] - box[1]
     fill = cells / (bw * bh) if bw and bh else 0.0
     area = (bw * bh) / (sw * sh)
@@ -535,6 +602,14 @@ def quad_from_alpha(size: tuple[int, int],
     small = (alpha.resize((max(8, round(alpha.width * scale)),
                            max(8, round(alpha.height * scale))), Image.BOX)
              if scale < 1 else alpha)
+    # The same hole the geometric scan meets, arriving the other way round: an
+    # engine that let go of a pale sky, or of the glare off the glazing, hands
+    # back a matte with a gap in the middle of the picture, and a gap in the
+    # middle says nothing about the outer edge. Lightened rather than
+    # replaced, so a soft rim stays soft and the shape's own bounding box --
+    # which is what the corners below are measured from -- is untouched.
+    small = ImageChops.lighter(
+        small, _solid(small.point(lambda a: 255 if a >= 128 else 0)))
     pad, ox, oy = _padded(small)
     diag = pad.width
 
