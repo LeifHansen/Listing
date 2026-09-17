@@ -25,6 +25,7 @@ import { isDraft, keptWhenEnded, listingsView, recentListings, storeTotal }
   from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
+import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
 import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
@@ -1202,6 +1203,10 @@ export function Dashboard() {
                 {/* And how it sells — Buy It Now, auction, or both. Drafts
                     only: eBay does not let a live listing change format. */}
                 {isDraft(item) && <DraftFormatEdit item={item} className="mt-1.5" />}
+                {/* And what it asks. Whichever number the format above uses,
+                    typed here instead of two screens away — with eBay's own
+                    comps one tap behind it. */}
+                {isDraft(item) && <DraftPriceEdit item={item} className="mt-1.5" />}
               </div>
             ))}
           </div>

@@ -13,7 +13,8 @@ import {
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
 import {
-  AUCTION_DURATIONS, FORMAT_HELP, LISTING_FORMATS, isAuctionFormat, normalizeFormat,
+  AUCTION, AUCTION_DURATIONS, FORMAT_HELP, LISTING_FORMATS, isAuctionFormat,
+  normalizeFormat,
 } from "@/lib/listingFormat";
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
@@ -558,23 +559,33 @@ export function TitleCard({ w }) {
   );
 }
 
-// A div with button semantics (not a <button>) because the price rows embed
-// real <a> links — interactive elements can't nest.
+// A row of the price card. A div with button semantics (not a <button>)
+// because the price rows embed real <a> links — interactive elements can't
+// nest.
+//
+// WITHOUT `onClick` it is a measurement and nothing more: no button role, no
+// focus stop, no pointer. That case is real — on a plain auction the comps
+// say what the item is worth, and the listing has no `price` field for them
+// to be applied to (see PricingCard.compsApply) — and a row that announces
+// itself as a button and does nothing is worse than a line of text.
 function SuggestionRow({ chosen, onClick, left, right }) {
   return (
     <div
-      role="button"
-      tabIndex={0}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
-      onKeyDown={(e) => {
+      onKeyDown={onClick ? (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
-      }}
+      } : undefined}
       className={cn(
         "w-full flex items-center justify-between gap-3 text-left px-4 py-3 rounded-input border",
-        "transition-colors duration-150 cursor-pointer text-sm",
+        "transition-colors duration-150 text-sm",
+        onClick && "cursor-pointer",
         chosen
           ? "border-blue bg-blue-soft"
-          : "border-line hover:border-line-strong hover:bg-bg-sunken",
+          : onClick
+            ? "border-line hover:border-line-strong hover:bg-bg-sunken"
+            : "border-line",
       )}
     >
       <span className="min-w-0 text-ink">{left}</span>
@@ -1327,6 +1338,20 @@ export function PricingCard({ w }) {
   const currency = w.form.currency || "USD";
   const fmt = normalizeFormat(w.form.listing_format);
   const isAuction = isAuctionFormat(fmt);
+  // A PLAIN auction has no `price` at all — eBay never reads that field for
+  // the format (lib/listingFormat), so every comp row here used to write a
+  // number into a box the listing does not have, and the one field an auction
+  // actually needs was the one the market data never reached. On that format
+  // the comps are evidence, not buttons: what a comparable item sells for is
+  // not where to open the bidding (see the opener row below).
+  const compsApply = fmt !== AUCTION;
+  // The opening bid eBay's own comps recommend, already charm-floored by the
+  // server (services/pricing.auction_start). Applied to the starting bid,
+  // never to `price`.
+  const opener = p?.auction || null;
+  const applyOpener = () => {
+    if (opener) w.set("auction_start_price", Number(opener.start_price).toFixed(2));
+  };
   // Three of the fields below cannot be changed once eBay has the listing:
   // format, starting bid and auction length are all absent from
   // services/ebay_trading.REVISABLE_FIELDS, because eBay does not revise
@@ -1552,6 +1577,32 @@ export function PricingCard({ w }) {
             <p className="text-sm text-ink-secondary">{priceView(p).message}</p>
           ) : (
             <div className="flex flex-col gap-2">
+              {/* WHERE TO OPEN, before what it is worth.
+                  An auction is started, not priced, and the two are different
+                  numbers: the comps below say what a comparable item fetches,
+                  and a no-reserve auction opened there gets no bids at all —
+                  while one opened at a dollar on an item nobody is hunting
+                  for sells for a dollar, because the sale ends at the floor
+                  when only one bidder turns up. The server works the opener
+                  out from the same measurement (services/pricing.auction_start:
+                  how DEEP the market is decides how far under it is safe to
+                  open) and says so in `basis`, so the seller can overrule it
+                  on purpose. Only on the formats that take bids, and only
+                  before eBay has the listing — a live auction's starting bid
+                  is not revisable. */}
+              {isAuction && opener && !settled && (
+                <SuggestionRow
+                  chosen={Number(w.form.auction_start_price) === opener.start_price}
+                  onClick={applyOpener}
+                  left={
+                    <>
+                      <strong>{opener.label}</strong> — {opener.basis} Click to
+                      open the bidding at ${opener.start_price?.toFixed(2)}.
+                    </>
+                  }
+                  right={`$${opener.start_price?.toFixed(2)}`}
+                />
+              )}
               {(p.sources || []).map((src) => (
                 <div key={src.label} className="flex flex-col gap-2">
                   {/* The row REPORTS the market (the median, as measured) and
@@ -1560,13 +1611,15 @@ export function PricingCard({ w }) {
                       rounding the applied one puts a whole-dollar price on the
                       listing, which is the thing this rule exists to stop. */}
                   <SuggestionRow
-                    chosen={Number(w.form.price) === charmPrice(src.estimate)}
-                    onClick={() => applyPrice(src.estimate)}
+                    chosen={compsApply && Number(w.form.price) === charmPrice(src.estimate)}
+                    onClick={compsApply ? () => applyPrice(src.estimate) : undefined}
                     left={
                       <>
                         <strong>{src.label}</strong> — median of {src.count} listings
-                        (typical ${src.low}–${src.high}). Click to price at{" "}
-                        ${charmPrice(src.estimate)?.toFixed(2)}.
+                        (typical ${src.low}–${src.high}).
+                        {compsApply
+                          ? <> Click to price at ${charmPrice(src.estimate)?.toFixed(2)}.</>
+                          : <> This is what the item is worth, not where to start the bidding.</>}
                       </>
                     }
                     right={`$${src.estimate}`}
@@ -1574,8 +1627,8 @@ export function PricingCard({ w }) {
                   {(src.sample || []).map((c, i) => (
                     <SuggestionRow
                       key={i}
-                      chosen={Number(w.form.price) === charmPrice(c.price)}
-                      onClick={() => applyPrice(c.price)}
+                      chosen={compsApply && Number(w.form.price) === charmPrice(c.price)}
+                      onClick={compsApply ? () => applyPrice(c.price) : undefined}
                       left={
                         <>
                           {c.title}

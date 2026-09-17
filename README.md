@@ -844,6 +844,81 @@ fact about the listing that is selling. A listing the AI never drafted (an
 import, a hand-made one, a stub saved when the AI failed) carries `""`, which
 is *no verdict*, not "medium".
 
+### The price, on the card — and where an auction opens
+
+Price was the last thing on a draft card that could only be changed by opening
+the editor. Category and format had already moved onto the card face, for a
+reason that applies to price more than to either of them: a seller reviewing a
+batch of fresh drafts is reading a grid of numbers the AI chose, and the whole
+job is changing the two or three it got wrong. Each one cost a trip into the
+editor and back.
+
+It sits under the format picker on every draft card there is — the drafts
+strip, the dashboard's recent cards and the listings manager, in both the grid
+and the list layout — and it asks for **whichever number the format actually
+uses** (`lib/listingFormat`): a price on a Buy It Now, a starting bid on an
+auction, both on an auction carrying a Buy It Now. A plain auction gets no
+price box at all, because eBay does not read that field for that format and a
+box for it invites a number that never leaves the app. Typing saves on blur —
+one `PATCH /api/listings/{id}` per number, naming that field alone, never the
+summary the card is holding (see `main.patch_listing`). **Drafts only**, like
+the two controls above it: a live listing's price *is* revisable, but only
+through a revise, and a number changed here would leave this app and eBay
+disagreeing with nothing on either screen saying so. Repricing a live listing
+keeps its own routes — the editor's save, and the dashboard's "Lower prices"
+group — both of which push the change to eBay.
+
+**An auction is started, not priced,** and that is a different number rather
+than the same one relabelled. "Check market price" answers the Buy It Now
+question — the median of comparable listings — and on a plain auction that
+answer went into `price`, the field the format does not use. So the one field
+an auction needs was the one the market data never reached, and the seller
+typed a guess.
+
+`pricing.auction_start` reads the **same eBay comps** from the other end of the
+sale, so the recommendation costs no extra call and rides along on every
+`/api/price-suggestions` answer as `auction`. Both failure modes it has to
+avoid are expensive:
+
+- open **at** the market price and it is a Buy It Now with extra steps — no
+  bids, no sale, relist;
+- open at a dollar on an item nobody is hunting for and it *sells* for a
+  dollar, because a no-reserve auction that draws one bidder ends at the floor.
+
+Which of those an item is in is exactly what the comps already measure. The
+comp **count** is the only evidence this app has that bidders will turn up at
+all, so it decides how far under the market it is safe to open: past
+`DEEP_MARKET` the opener drops well below it, and a thin market opens close to
+what comparable items fetch. The account's pricing strategy (Quick Flip /
+Median / Long Sale) then says how much of the item's value the seller will put
+at risk to attract bidding — the same question it already answers for a Buy It
+Now, asked about the other end. The number lands on a charm point *at or below*
+where that lands it (`_charm_floor`, not `money.charm_price`: rounding to the
+nearest would raise the floor under an auction the seller asked to open below
+the market), and never under eBay's $0.99 minimum.
+
+It reaches the seller in two places, both with the measurement it came from
+written beside it — a number that can be overruled on purpose is one whose
+evidence is on screen:
+
+- **on the card**, behind one press ("Suggest an opening bid"), which applies
+  it to the starting bid and, on a format that has one, the market price to the
+  Buy It Now. On request rather than on render: every press is a live eBay call
+  against an allowance shared by every seller (`main._taxonomy_guard`), and a
+  grid of thirty cards that each asked on sight would spend it in one screen;
+- **in the editor's price card**, as the top row under "Check market price" —
+  and on a plain auction the comp rows below it stop being buttons, because
+  there is no `price` field for them to be applied to. They still say what the
+  item is worth; they just no longer offer to write it somewhere eBay ignores.
+  A live auction gets no row at all: eBay does not revise `StartPrice`, and
+  bids may already be against it.
+
+A lookup that failed is still not a market with nothing in it — the card runs
+the answer through the same `priceView` split the editor and Shop Mode use, so
+"we couldn't check" never arrives as "no comparable listings, try a simpler
+title".
+
+
 ## API endpoints
 
 | Method | Path | Purpose |
@@ -862,6 +937,7 @@ is *no verdict*, not "medium".
 | `GET`  | `/api/listings/{id}/video` | The listing's video and where eBay's moderation got to, with a sentence for the seller. Asks eBay only about videos eBay has not finished with |
 | `DELETE` | `/api/listings/{id}/video/{name}` | Take the video off the listing, the volume and the bucket |
 | `POST` | `/api/category-suggestions` | Ranked eBay category IDs for a query (Taxonomy API) |
+| `POST` | `/api/price-suggestions` | What comparable items are asking (Browse) or sold for (Marketplace Insights, where approved), as a price to **list** at — and, off the same measurement, where to **open** an auction. `checked` says whether anything got to look, so a failed lookup never reports itself as an empty market |
 | `GET`  | `/api/ebay/store-categories` | The seller's OWN eBay Store shelves, flattened with their paths. Answers `store: false` for an account without a Store and `checked: false` when eBay could not be asked — different things, and the picker treats them differently |
 | `POST` | `/api/publish` | Publish (draft/live). Add `marketplaces: ["ebay","etsy","depop"]` to fan out; omit for the legacy eBay-only behavior |
 | `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
