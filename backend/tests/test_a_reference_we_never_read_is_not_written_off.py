@@ -24,6 +24,11 @@ import pytest
 
 pytest.importorskip("httpx")
 pytest.importorskip("fastapi")
+# backend.main pulls in the whole app, and the lint job installs a deliberately
+# minimal dependency profile. The 109 other test files that import it guard the
+# same way rather than turning that job red.
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
 
 from backend import main  # noqa: E402
 from backend.services import reference_fetch as rf  # noqa: E402
