@@ -48,6 +48,7 @@ const EMPTY = {
   etsy: {
     taxonomy_id: 0, who_made: "", when_made: "", is_supply: false,
     materials: [], tags: [], shipping_profile_id: "", return_policy_id: "",
+    readiness_state_id: "",
   },
   depop: { category: "", size: "" },
   marketplaces: {},

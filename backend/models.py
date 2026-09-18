@@ -182,6 +182,10 @@ class MarketplaceState(BaseModel):
     status: str = ""             # "" | "draft" | "published" | "ended"
     published_at: str = ""       # ISO-8601 UTC of the first live publish
     error: str = ""              # last failed attempt's message ("" when ok)
+    # A digest of the photo set the marketplace last received, for the ones
+    # that take photo BYTES (Etsy) and so cannot be told "same pictures" by
+    # a URL. A revise re-sends the photos only when this has moved.
+    photo_sig: str = ""
 
 
 class EtsyFields(BaseModel):
@@ -199,6 +203,9 @@ class EtsyFields(BaseModel):
     # Per-listing overrides; "" = use the account defaults saved in Settings.
     shipping_profile_id: str = ""
     return_policy_id: str = ""
+    # Etsy's "processing profile" (how long an order takes to ship), required
+    # on every physical listing since mid-2025. Same override-or-default rule.
+    readiness_state_id: str = ""
 
 
 class DepopFields(BaseModel):

@@ -1927,21 +1927,25 @@ const WHEN_MADE_OPTIONS = [
 ];
 
 // Etsy — the fields Etsy requires beyond the shared ones: its own category
-// (taxonomy), the handmade/vintage/supplies attribution, and an optional
-// shipping-profile override. Tags and materials are auto-derived from the
-// brand + item specifics at publish time; the inputs here override that.
+// (taxonomy), the handmade/vintage/supplies attribution, and per-listing
+// overrides of the shipping profile, return policy and processing profile
+// (the account defaults live in Settings). Tags and materials are
+// auto-derived from the brand + item specifics at publish time; the inputs
+// here override that.
+const NO_ETSY_OPTIONS = { shipping_profiles: [], return_policies: [], readiness_states: [] };
+
 export function EtsyCard({ w }) {
   const { toast } = useToast();
   const show = (w.chipTargets || []).includes("etsy");
   const [suggesting, setSuggesting] = useState(false);
   const [catPath, setCatPath] = useState("");
-  const [options, setOptions] = useState(null); // shipping profiles for override
+  const [options, setOptions] = useState(null); // the shop's profiles, for the overrides
 
   useEffect(() => {
     if (!show || options) return;
     api("/api/etsy/settings-options")
       .then(setOptions)
-      .catch(() => setOptions({ shipping_profiles: [] }));
+      .catch(() => setOptions(NO_ETSY_OPTIONS));
   }, [show, options]);
 
   if (!show) return null;
@@ -2036,21 +2040,47 @@ export function EtsyCard({ w }) {
           This is a craft supply (not a finished item)
         </label>
 
-        <Field
-          label="Shipping profile (this listing)"
-          help="Leave on the account default from Settings unless this item ships differently."
-        >
-          <Select
-            value={e.shipping_profile_id || ""}
-            needsFix={w.fixTarget === "etsy_shipping_profile"}
-            onChange={(ev) => setEtsy("shipping_profile_id", ev.target.value)}
+        <div className="grid sm:grid-cols-3 gap-4">
+          <Field
+            label="Shipping profile"
+            help="Leave on the account default from Settings unless this item ships differently."
           >
-            <option value="">Account default</option>
-            {((options && options.shipping_profiles) || []).map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </Select>
-        </Field>
+            <Select
+              value={e.shipping_profile_id || ""}
+              needsFix={w.fixTarget === "etsy_shipping_profile"}
+              onChange={(ev) => setEtsy("shipping_profile_id", ev.target.value)}
+            >
+              <option value="">Account default</option>
+              {((options && options.shipping_profiles) || []).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Return policy" help="Etsy requires one before a listing goes live.">
+            <Select
+              value={e.return_policy_id || ""}
+              needsFix={w.fixTarget === "etsy_return_policy"}
+              onChange={(ev) => setEtsy("return_policy_id", ev.target.value)}
+            >
+              <option value="">Account default</option>
+              {((options && options.return_policies) || []).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Processing time" help="How long an order takes you to ship — Etsy requires a profile on every listing.">
+            <Select
+              value={e.readiness_state_id || ""}
+              needsFix={w.fixTarget === "etsy_readiness_state"}
+              onChange={(ev) => setEtsy("readiness_state_id", ev.target.value)}
+            >
+              <option value="">Account default</option>
+              {((options && options.readiness_states) || []).map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
 
         <div className="grid sm:grid-cols-2 gap-4">
           <Field

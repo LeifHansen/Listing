@@ -601,10 +601,16 @@ def taxonomy_ready() -> bool:
 
 
 # --- Etsy ------------------------------------------------------------------
-# Etsy Open API v3. OAuth 2.0 authorization-code with PKCE — no client secret
-# is ever used, so the only credentials are the app "keystring" and the exact
-# redirect URI registered on the Etsy app (https://<host>/api/etsy/callback).
+# Etsy Open API v3. OAuth 2.0 authorization-code with PKCE, so the consent
+# handshake itself carries no secret — but every request to Etsy, the token
+# exchange included, identifies the APP through the `x-api-key` header, and
+# since 2026-02-09 Etsy rejects that header unless it carries the app's shared
+# secret beside the keystring (`keystring:secret`; etsy/open-api discussion
+# #1529). Both live on the app's page at etsy.com/developers/your-apps. The
+# third credential is the exact redirect URI registered on the Etsy app
+# (https://<host>/api/etsy/callback).
 ETSY_CLIENT_ID = _env("ETSY_CLIENT_ID", "ETSY_KEYSTRING")
+ETSY_SHARED_SECRET = _env("ETSY_SHARED_SECRET")
 ETSY_REDIRECT_URI = os.getenv("ETSY_REDIRECT_URI", "").strip()
 ETSY_SCOPES = "listings_r listings_w listings_d shops_r shops_w"
 ETSY_API_BASE = "https://api.etsy.com/v3"
@@ -613,8 +619,27 @@ ETSY_TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 
 
 def etsy_oauth_ready() -> bool:
-    """Enough config to run the 'Sign in with Etsy' flow."""
-    return bool(ETSY_CLIENT_ID and ETSY_REDIRECT_URI)
+    """Enough config to run the 'Sign in with Etsy' flow.
+
+    The shared secret is part of "enough": without it the consent screen
+    still renders (Etsy checks the keystring and redirect URI there), and the
+    token exchange that follows is refused — a Connect button that ends on
+    an error page after the seller has said yes. Better to keep the card in
+    its "not set up on the server" state, naming the missing variable.
+    """
+    return bool(ETSY_CLIENT_ID and ETSY_SHARED_SECRET and ETSY_REDIRECT_URI)
+
+
+def etsy_api_key() -> str:
+    """The `x-api-key` header value: `keystring:secret` since 2026-02-09.
+
+    Falls back to the bare keystring only when no secret is configured,
+    which etsy_oauth_ready() already refuses to offer to sellers — so the
+    fallback serves a developer's dry run, never a live shop.
+    """
+    if ETSY_CLIENT_ID and ETSY_SHARED_SECRET:
+        return f"{ETSY_CLIENT_ID}:{ETSY_SHARED_SECRET}"
+    return ETSY_CLIENT_ID
 
 
 # Etsy app TYPE, which is a separate gate from the credentials above and the
@@ -860,6 +885,7 @@ def _watched_names() -> list[tuple[str, str]]:
         ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),
         ("R2_SECRET_ACCESS_KEY", R2_SECRET_ACCESS_KEY),
         ("ETSY_REDIRECT_URI", ETSY_REDIRECT_URI),
+        ("ETSY_SHARED_SECRET", ETSY_SHARED_SECRET),
     ]
 
 
@@ -883,6 +909,17 @@ def config_warnings() -> list[str]:
         warnings.append(
             f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
             f"billing is OFF — which reads the same as never setting it.")
+    # A keystring without its shared secret is the newest way Etsy looks
+    # unconfigured: the credentials that worked before 2026-02-09 now fail
+    # every request, and nothing in the OAuth dance says so until the token
+    # exchange. Named here because the operator who set two Etsy variables
+    # will not think to look for a third.
+    if ETSY_CLIENT_ID and not ETSY_SHARED_SECRET:
+        warnings.append(
+            "ETSY_CLIENT_ID is set but ETSY_SHARED_SECRET is not — since "
+            "2026-02-09 Etsy rejects every request whose x-api-key carries "
+            "the keystring alone, so Etsy stays off until the shared secret "
+            "(from the app's page at etsy.com/developers/your-apps) is set.")
     # Same trap, and it fails closed: an unparsed value reads as "Commercial
     # Access not granted", so the operator thinks they opened Etsy to every
     # seller while the app is still quietly showing them a pending-review card.

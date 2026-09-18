@@ -972,12 +972,13 @@ function MarketplaceConnections() {
   );
 }
 
-// Etsy publish defaults: which shipping profile + return policy new Etsy
-// listings use (Etsy requires both for physical items). Loaded from the
-// seller's shop; saved into the account's marketplace settings.
+// Etsy publish defaults: which shipping profile, return policy and
+// processing profile new Etsy listings use (Etsy requires all three on a
+// physical item). Loaded from the seller's shop; saved into the account's
+// marketplace settings.
 function EtsyDefaults() {
   const { toast } = useToast();
-  const [data, setData] = useState(null);   // {shipping_profiles, return_policies, selected}
+  const [data, setData] = useState(null);   // {shipping_profiles, return_policies, readiness_states, selected}
   const [saving, setSaving] = useState(false);
   const [selected, setSelected] = useState({});
 
@@ -991,8 +992,8 @@ function EtsyDefaults() {
   if (data.error) {
     return (
       <p className="text-[13px] text-ink-secondary mt-3">
-        Couldn’t load your Etsy shipping profiles — retry from Settings after
-        reconnecting Etsy.
+        Couldn’t load your Etsy shipping, return and processing options — retry
+        from Settings after reconnecting Etsy.
       </p>
     );
   }
@@ -1039,6 +1040,22 @@ function EtsyDefaults() {
         >
           <option value="">— none —</option>
           {(data.return_policies || []).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+      </Field>
+      <Field
+        label="Processing time"
+        help={(data.readiness_states || []).length
+          ? "Etsy requires a processing profile on every physical listing — how long an order takes you to ship."
+          : "No processing profiles on your Etsy shop yet — add one under Shop Manager → Settings → Shipping, then reopen Settings."}
+      >
+        <Select
+          value={selected.readiness_state_id || ""}
+          onChange={(e) => setSelected((s) => ({ ...s, readiness_state_id: e.target.value }))}
+        >
+          <option value="">— none —</option>
+          {(data.readiness_states || []).map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </Select>

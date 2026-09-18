@@ -5,8 +5,9 @@ image -> PATCH state=active. Etsy has no sandbox, so the provider's dry-run
 mode (no connection) returns the exact payload this module would send.
 
 Transport note: the v3 listing endpoints take x-www-form-urlencoded bodies,
-not JSON (form_body does the conversion). Image upload is the exception —
-that one is genuinely multipart.
+not JSON (form_body does the conversion). Two exceptions: image upload is
+genuinely multipart, and the INVENTORY endpoint (price, stock, SKU — see
+update_listing_inventory) is the one write that takes JSON.
 """
 from __future__ import annotations
 
@@ -18,13 +19,15 @@ import httpx
 
 from .. import config
 from ..config import log
+from ..etsy_auth import api_headers
 from ..models import Listing
 
 
 def _headers(access_token: str) -> dict:
-    return {"Authorization": f"Bearer {access_token}",
-            "x-api-key": config.ETSY_CLIENT_ID,
-            "Accept": "application/json"}
+    # One builder for the whole Etsy surface (etsy_auth.api_headers): the
+    # x-api-key it carries changed shape in 2026 and a second copy here is
+    # exactly how one of them would have been missed.
+    return api_headers(access_token)
 
 
 def form_body(payload: dict) -> dict:
@@ -189,6 +192,38 @@ def update_listing(access_token: str, shop_id: str, listing_id: str,
             "url": body.get("url") or "", "state": body.get("state", "")}
 
 
+def get_listing_inventory(access_token: str, listing_id: str) -> dict:
+    """The listing's inventory record: its products, each with the offerings
+    that carry price, quantity and readiness state. Read before every
+    inventory write, because the PUT replaces the whole record."""
+    doing = "reading the Etsy listing's stock"
+    resp = _send(doing, False, httpx.get,
+                 f"{config.ETSY_API_BASE}/application/listings/{listing_id}/inventory",
+                 headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing, changes=False)
+    return resp.json()
+
+
+def update_listing_inventory(access_token: str, listing_id: str,
+                             body: dict) -> dict:
+    """Price and quantity on an EXISTING listing.
+
+    updateListing (the PATCH above) takes neither: they are properties of
+    the inventory's offerings, set once by createDraftListing and from then
+    on only through this endpoint. The PATCH used to carry them anyway, and
+    Etsy ignored them — a price drop here reported "updated" while Etsy went
+    on asking the old price. This is also the one v3 write that takes a JSON
+    body rather than a form (mapping_etsy.build_inventory_body shapes it).
+    """
+    doing = "updating the Etsy listing's price and stock"
+    resp = _send(
+        doing, True, httpx.put,
+        f"{config.ETSY_API_BASE}/application/listings/{listing_id}/inventory",
+        headers=_headers(access_token), json=body, timeout=60)
+    _raise_for_status(resp, doing)
+    return resp.json()
+
+
 def get_listing(access_token: str, listing_id: str) -> dict:
     doing = "reading the Etsy listing"
     resp = _send(doing, False, httpx.get,
@@ -196,6 +231,35 @@ def get_listing(access_token: str, listing_id: str) -> dict:
                  headers=_headers(access_token), timeout=30)
     _raise_for_status(resp, doing, changes=False)
     return resp.json()
+
+
+def list_listing_images(access_token: str, listing_id: str) -> list[dict]:
+    """[{listing_image_id, rank}] in Etsy's display order — what a revise
+    reconciles the seller's current photo set against."""
+    doing = "reading the Etsy listing's photos"
+    resp = _send(doing, False, httpx.get,
+                 f"{config.ETSY_API_BASE}/application/listings/{listing_id}/images",
+                 headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing, changes=False)
+    out = []
+    for img in resp.json().get("results", []):
+        image_id = str(img.get("listing_image_id") or "")
+        if image_id:
+            out.append({"listing_image_id": image_id,
+                        "rank": int(img.get("rank") or 0)})
+    return sorted(out, key=lambda i: i["rank"])
+
+
+def delete_listing_image(access_token: str, shop_id: str, listing_id: str,
+                         image_id: str) -> None:
+    """Take one photo off the listing. Etsy keeps the file, so a photo taken
+    off by mistake can be put back without a re-upload."""
+    doing = "removing a photo from the Etsy listing"
+    resp = _send(
+        doing, True, httpx.delete,
+        f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}/images/{image_id}",
+        headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing)
 
 
 def upload_listing_image(access_token: str, shop_id: str, listing_id: str,
@@ -227,9 +291,7 @@ def taxonomy_nodes() -> list[dict]:
             return _TAXONOMY_CACHE["nodes"]
         resp = httpx.get(
             f"{config.ETSY_API_BASE}/application/seller-taxonomy/nodes",
-            headers={"x-api-key": config.ETSY_CLIENT_ID,
-                     "Accept": "application/json"},
-            timeout=60)
+            headers=api_headers(), timeout=60)
         resp.raise_for_status()
         nodes = resp.json().get("results", [])
         _TAXONOMY_CACHE.update(at=time.time(), nodes=nodes)

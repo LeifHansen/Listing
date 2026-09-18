@@ -11803,9 +11803,18 @@ def marketplace_roster(request: Request) -> dict:
     return {"marketplaces": out}
 
 
-# Etsy-specific: the Settings pickers for the shop's shipping profiles and
-# return policies (Etsy's analog of /api/ebay/policies), and the AI category
-# suggestion. Literal paths, so they must sit above the {marketplace} routes.
+# Etsy-specific: the Settings pickers for the shop's shipping profiles,
+# return policies and processing profiles (Etsy's analog of
+# /api/ebay/policies), and the AI category suggestion. Literal paths, so they
+# must sit above the {marketplace} routes.
+#
+# The per-account Etsy defaults a seller may save: one id per picker. Each is
+# an Etsy numeric id, checked on the way in, because a stray value here used
+# to surface as int() crashing inside the publish rather than as a 400 at the
+# moment the seller could still fix it.
+ETSY_SETTING_KEYS = ("shipping_profile_id", "return_policy_id", "readiness_state_id")
+
+
 @app.get("/api/etsy/settings-options")
 def etsy_settings_options(request: Request) -> dict:
     provider = _marketplace_or_404("etsy")
@@ -11817,18 +11826,21 @@ def etsy_settings_options(request: Request) -> dict:
             creds["access_token"], creds["shop_id"])
         policies = etsy_auth.list_return_policies(
             creds["access_token"], creds["shop_id"])
+        readiness = etsy_auth.list_readiness_states(
+            creds["access_token"], creds["shop_id"])
     except Exception as exc:  # noqa: BLE001
         # `str(exc)` here is httpx's, so it carries the Etsy API base, the
         # path and the seller's own shop_id. Same rule as the eBay lookups.
-        raise _lookup_failed("load your Etsy shop's shipping and return "
-                             "options", exc) from exc
+        raise _lookup_failed("load your Etsy shop's shipping, return and "
+                             "processing options", exc) from exc
     settings = creds.get("settings") or {}
     return {
         "shipping_profiles": profiles,
         "return_policies": policies,
+        "readiness_states": readiness,
+        "currency_code": str(settings.get("currency_code") or ""),
         "selected": {
-            "shipping_profile_id": str(settings.get("shipping_profile_id") or ""),
-            "return_policy_id": str(settings.get("return_policy_id") or ""),
+            key: str(settings.get(key) or "") for key in ETSY_SETTING_KEYS
         },
     }
 
@@ -11839,11 +11851,15 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    fields = {k: str(payload.get(k) or "")
-              for k in ("shipping_profile_id", "return_policy_id")
-              if k in payload}
+    fields = {k: str(payload.get(k) or "").strip()
+              for k in ETSY_SETTING_KEYS if k in payload}
     if not fields:
         raise HTTPException(400, "No settings provided.")
+    stray = [k for k, v in fields.items() if v and not v.isdigit()]
+    if stray:
+        raise HTTPException(
+            400, f"{', '.join(stray)} must be an Etsy id (a number) — pick "
+                 "one from the list.")
     # The answer is a claim about a write. P0-06's rule, on a route that kept
     # its own copy of the old behaviour: a save that did not land must not
     # come back as `{"ok": true}`, or the seller closes Settings believing

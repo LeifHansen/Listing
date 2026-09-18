@@ -7,14 +7,27 @@ def test_etsy_not_ready_by_default(fresh_config):
     assert cfg.ETSY_CLIENT_ID == ""
 
 
-def test_etsy_ready_with_keystring_and_redirect(fresh_config):
-    cfg = fresh_config(ETSY_CLIENT_ID="key123",
+def test_etsy_ready_with_keystring_secret_and_redirect(fresh_config):
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
                        ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
     assert cfg.etsy_oauth_ready()
+    assert cfg.etsy_api_key() == "key123:s3cret"
+
+
+def test_etsy_is_not_ready_without_the_shared_secret(fresh_config):
+    """Since 2026-02-09 Etsy refuses an x-api-key that is the keystring
+    alone, so the two credentials that used to be enough now end on Etsy's
+    error page after the seller has consented. Not offered, and named."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
+    assert not cfg.etsy_oauth_ready()
+    assert cfg.etsy_api_key() == "key123"      # a developer's dry run only
+    warning = [w for w in cfg.config_warnings() if "ETSY_SHARED_SECRET" in w]
+    assert warning and "2026-02-09" in warning[0]
 
 
 def test_etsy_keystring_fallback_env_name(fresh_config):
-    cfg = fresh_config(ETSY_KEYSTRING="key123",
+    cfg = fresh_config(ETSY_KEYSTRING="key123", ETSY_SHARED_SECRET="s3cret",
                        ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
     assert cfg.ETSY_CLIENT_ID == "key123"
     assert cfg.etsy_oauth_ready()
@@ -22,6 +35,7 @@ def test_etsy_keystring_fallback_env_name(fresh_config):
 
 def test_etsy_placeholder_value_treated_unset(fresh_config):
     cfg = fresh_config(ETSY_CLIENT_ID="<paste your keystring>",
+                       ETSY_SHARED_SECRET="s3cret",
                        ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
     assert cfg.ETSY_CLIENT_ID == ""
     assert not cfg.etsy_oauth_ready()
@@ -195,7 +209,7 @@ def test_etsy_gate_is_off_until_an_owner_is_named(fresh_config):
     """No owner named = no way to tell the owner from anyone else, and
     guessing wrong locks the operator out of their own shop. Unconfigured
     therefore behaves exactly as it did before the gate existed."""
-    cfg = fresh_config(ETSY_CLIENT_ID="key123",
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
                        ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
     assert cfg.etsy_oauth_ready()
     assert cfg.etsy_access_pending("owner@example.com") is False

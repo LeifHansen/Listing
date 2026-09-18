@@ -26,7 +26,8 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
 
     Mutates and returns `data`. Rules:
     - dry-runs record nothing (no remote state was created);
-    - a successful attempt updates status/listing_id/url and clears error;
+    - a successful attempt updates status/listing_id/url, folds in whatever
+      the provider asked to have remembered (outcome.state) and clears error;
     - a failed attempt records the error but never rewrites lifecycle state
       (a blocked revise doesn't un-publish a live listing);
     - eBay's id is mirrored to the legacy top-level `ebay_listing_id` in both
@@ -45,6 +46,8 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
             entry["listing_id"] = str(outcome.listing_id)
         if outcome.url:
             entry["url"] = outcome.url
+        for name, value in (outcome.state or {}).items():
+            entry[name] = value
         entry["error"] = ""
     else:
         entry["error"] = outcome.message or "Publish failed."
