@@ -206,7 +206,8 @@ export function AppProvider({ children }) {
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
-    anthropic_configured: false, ebay_configured: false, taxonomy_configured: false,
+    anthropic_configured: false, google_ai_configured: false,
+    ebay_configured: false, taxonomy_configured: false,
   });
   const loadHealth = useCallback(async () => {
     try {
