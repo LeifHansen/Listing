@@ -6342,7 +6342,16 @@ def identify(session_id: str, request: Request) -> dict:
     # silent. Capped by what that same market said it is worth.
     _price_against_retail(result.listing, market)
     storage.save_listing(session_id, result.listing)
-    db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
+    # A SCAN, not a draft. This route is Shop Mode's alone (the pipeline
+    # drafts through /api/identify-async), and the seller who triggered it is
+    # standing in a shop deciding whether to buy the thing in their hand --
+    # they have not asked for a listing, and eight of every ten scans on a
+    # thrift run end in putting the item back. The row is still written, so
+    # the session id is bound to its owner before any media URL carrying it
+    # exists; "Buy" promotes it to "unlisted" (/api/inventory/add) and that is
+    # the first point the seller has asked for anything. See db.SCANNED.
+    db.upsert_listing(session_id, result.listing.model_dump(),
+                      status=db.SCANNED, user_id=_uid(request))
     return result.model_dump()
 
 
@@ -8963,7 +8972,12 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
 def inventory_add(req: PublishRequest, request: Request) -> dict:
     """Shop Mode 'Buy': save a scanned item to the user's unlisted inventory
     (status='unlisted'), so it shows up in the Sell dashboard to finish + list
-    later. Reuses the listing record; mode is ignored."""
+    later. Reuses the listing record; mode is ignored.
+
+    This is the PROMOTION of the row /api/identify wrote at scan time (see
+    db.SCANNED): the scan is invisible to every seller-facing read, and this
+    is the first point the seller has asked for the item to become a listing.
+    Writing the same id is what carries the scan's photos and draft across."""
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")

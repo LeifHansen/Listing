@@ -199,6 +199,26 @@ class MediaPurge(Base):
     requested_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+# A Shop Mode scan, before the seller has decided to buy the thing in their
+# hand. It is a real row -- written by /api/identify so the session id is bound
+# to its owner at scan time, which is what keeps a leaked id from being claimed
+# by another account -- but it is NOT a listing, and the seller never asked for
+# it. Scanning ten items on a thrift-store run and buying two used to leave
+# eight phantom drafts in the Sell pipeline, because identify wrote them with
+# status="draft" and every drafts filter in the app counts that.
+#
+# "Buy" promotes the row to "unlisted" (the Finds tab), which is the first
+# point the seller has asked for anything. Until then the seller-facing reads
+# leave it out: see `list_listings`, which excludes it BY DEFAULT rather than
+# by an allowlist of the statuses each caller wants. Same reasoning as
+# LIST_OMITTED_LISTING_FIELDS in main -- an omission list fails by showing a
+# row it should have hidden, on every surface that forgot to filter (the grid,
+# the counts, the CSV, insights, finish-all), and that failure looks like the
+# seller's own data. Defaulting the other way fails by hiding a row from a
+# caller that wanted it, which is visible and local.
+SCANNED = "scanned"
+
+
 class ListingRecord(Base):
     __tablename__ = "listings"
     # The operator console groups the whole table by status on every Overview
@@ -823,7 +843,8 @@ def mutate_listing_data(
 
 def list_listings(limit: int = 50, user_id: Optional[str] = None,
                   statuses: Optional[tuple[str, ...]] = None,
-                  before: Optional[tuple[_dt.datetime, str]] = None
+                  before: Optional[tuple[_dt.datetime, str]] = None,
+                  include_scanned: bool = False
                   ) -> list[dict]:
     """The user's listings, newest first. RAISES on a read failure.
 
@@ -858,6 +879,13 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
     Callers that genuinely tolerate an empty answer call
     list_listings_best_effort, so the decision sits at the call site where
     someone can see what it costs.
+
+    A Shop Mode scan (status SCANNED) is left out unless `include_scanned`,
+    because it is not a listing and the seller never asked for it — see
+    SCANNED for why that is the default rather than each caller's to remember.
+    `statuses` overrides it: an explicit allowlist already says what it wants.
+    Pass `include_scanned=True` only to enumerate every row a user owns, which
+    is what a deletion or a migration needs.
     """
     eng = _get_engine()
     # No database configured is a configuration, not a failure: nothing is
@@ -871,6 +899,14 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
                 q = q.where(ListingRecord.user_id == user_id)
             if statuses is not None:
                 q = q.where(ListingRecord.status.in_(statuses))
+            elif not include_scanned:
+                # Only when the caller did not name its own statuses: an
+                # explicit allowlist already says what it wants, and SCANNED
+                # is not in any of them. Excluded in SQL rather than after the
+                # fetch because this read is paged -- dropping rows from a
+                # page in Python would make `limit + 1` mis-report whether
+                # there are more, and skip rows across a keyset cursor.
+                q = q.where(ListingRecord.status != SCANNED)
             if before is not None:
                 # Spelled out rather than as a row-value comparison, which
                 # older SQLite builds do not accept. `id` breaks the ties:
@@ -894,7 +930,8 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
 
 def list_listings_best_effort(limit: int = 50,
                               user_id: Optional[str] = None,
-                              statuses: Optional[tuple[str, ...]] = None
+                              statuses: Optional[tuple[str, ...]] = None,
+                              include_scanned: bool = False
                               ) -> list[dict]:
     """list_listings, but an unreadable store answers `[]`.
 
@@ -904,7 +941,8 @@ def list_listings_best_effort(limit: int = 50,
     what to create, release, or end.
     """
     try:
-        return list_listings(limit=limit, user_id=user_id, statuses=statuses)
+        return list_listings(limit=limit, user_id=user_id, statuses=statuses,
+                             include_scanned=include_scanned)
     except StorageUnavailable:
         return []
 
@@ -1018,8 +1056,16 @@ def list_releasable_listings(user_id: str, account: str,
 
 
 def count_listings(user_id: str,
-                   statuses: Optional[tuple[str, ...]] = None) -> int:
+                   statuses: Optional[tuple[str, ...]] = None,
+                   include_scanned: bool = False) -> int:
     """How many listings this user has, optionally only in `statuses`.
+
+    Counts what `list_listings` shows, which means Shop Mode scans are left
+    out (see SCANNED). They have to agree: this is the number in the
+    delete-account dialog, and a seller with twelve listings and thirty-five
+    scans read "47 listings" against a grid showing twelve. The DELETION is
+    unaffected either way — it removes every row keyed to the user in one
+    statement, scans included, and does not enumerate them to do it.
 
     RAISES on a read failure, for the same reason `list_listings` does and
     with more at stake: the caller is the delete-account dialog, and a zero it
@@ -1044,6 +1090,8 @@ def count_listings(user_id: str,
                  .where(ListingRecord.user_id == user_id))
             if statuses is not None:
                 q = q.where(ListingRecord.status.in_(statuses))
+            elif not include_scanned:
+                q = q.where(ListingRecord.status != SCANNED)
             return int(s.execute(q).scalar_one() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: count_listings failed: {exc}")
