@@ -167,7 +167,7 @@ def test_a_fresh_draft_does_not_ask_for_what_its_own_fill_answered(monkeypatch):
     monkeypatch.setattr(main, "_price_against_comps", lambda *a, **k: None)
     monkeypatch.setattr(main, "_lookup_artwork", lambda *a, **k: None)
 
-    def identify(paths, names, strategy="", notes=""):
+    def identify(paths, names, strategy="", notes="", item_notes=""):
         return IdentifyResult(
             listing=Listing(title="A polo", images=list(names),
                             missing_info=["size", "confirm the signature"]),

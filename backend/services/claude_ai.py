@@ -37,6 +37,7 @@ from .listing_prompt import (
     expected_item_count,
     group_notes_block,
     identify_notes_block,
+    item_notes_block,
 )
 from ..models import TITLE_MAX_CHARS, IdentifyResult, ItemSpecific, Listing
 from ..money import charm_price
@@ -603,7 +604,8 @@ def warm_identify_cache() -> bool:
 
 
 def identify(image_paths: list[Path], image_names: list[str],
-             strategy: str = "", notes: str = "") -> IdentifyResult:
+             strategy: str = "", notes: str = "",
+             item_notes: str = "") -> IdentifyResult:
     """Identify the item(s) in the images and draft a full listing.
     `strategy` (optional): quick_flip | median | long_sale — tilts the
     suggested price toward that end of the market range.
@@ -611,6 +613,10 @@ def identify(image_paths: list[Path], image_names: list[str],
     in the photos — a brand the camera never caught, a variant only the owner
     knows. Rides the user message, never the cached system prefix, because it
     changes per upload.
+    `item_notes` (optional): what the seller typed about THIS item at the
+    guidance step, with these photos in front of them and the pile already
+    split. Same reason it rides the user message, and it goes LAST so it is
+    read as the final word — it outranks `notes` where the two disagree.
 
     The result also carries `tags`: bounding boxes of tags/labels the model
     spotted while examining the photos, for the zoom-and-transcribe pass —
@@ -627,6 +633,7 @@ def identify(image_paths: list[Path], image_names: list[str],
                 "These are the product photos for one listing. Draft it."
                 + _PRICING_STRATEGY_HINTS.get(strategy, "")
                 + identify_notes_block(notes)
+                + item_notes_block(item_notes)
             ),
         }
     )

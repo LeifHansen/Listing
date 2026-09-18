@@ -83,6 +83,7 @@ function Main() {
         {activeBulk && view !== "new" && (
           <BulkBanner
             done={!!activeBulk.done}
+            awaiting={!!activeBulk.awaiting}
             onReview={() => setView("new")}
             onDismiss={clearBulk}
           />

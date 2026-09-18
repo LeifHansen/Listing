@@ -5,11 +5,12 @@
 Turn product photos into a complete, ready-to-publish listing — on eBay,
 Etsy, and Depop, individually or all at once.
 
-Upload one or more images → the app **optimizes** them for eBay, uses Claude's
-vision **"lens"** to identify the item, **generates** a full listing (title,
-description, item specifics, suggested price/category), shows an **editable
-preview** where you can tweak fields manually or with a prompt, then
-**publishes** it live on eBay (and Etsy / Depop) through the seller's own
+Upload one or more images → the app **optimizes** them for eBay, **asks you
+what each item is** (one optional box per item, with its photos on screen),
+uses Claude's vision **"lens"** to identify the item, **generates** a full
+listing (title, description, item specifics, suggested price/category), shows
+an **editable preview** where you can tweak fields manually or with a prompt,
+then **publishes** it live on eBay (and Etsy / Depop) through the seller's own
 connected account. Drafts stay in the app until you publish them; with no
 marketplace connected the app writes the exact API payload it would have sent.
 
@@ -18,7 +19,8 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 ## Pipeline
 
 ```
- Upload images ──▶ Optimize (Pillow) ──▶ Identify (Claude vision) ──▶
+ Upload images ──▶ Optimize (Pillow) ──▶ [Group into items (bulk)] ──▶
+ Ask the seller (one box per item) ──▶ Identify (Claude vision) ──▶
  Editable preview (manual edits + prompt refine) ──▶ Publish (eBay / Etsy / Depop, or dry-run)
 ```
 
@@ -27,6 +29,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 | Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
 | Identify | Photos sent to Claude vision — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
+| Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
 | Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |

@@ -6,10 +6,11 @@ import {
 import { cn, once } from "@/lib/utils";
 import { turnedUprightMessage } from "@/lib/turnedUpright";
 import {
-  api, pollJob, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
+  api, pollJob, postJson, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
   UPLOAD_TIMEOUT_MS,
 } from "@/lib/api";
 import { useApp } from "@/store";
+import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
 import { Button } from "@/components/ui/Button";
 import { Field, Textarea, Toggle } from "@/components/ui/fields";
 import { Card } from "@/components/ui/Card";
@@ -17,6 +18,7 @@ import { BrandPulse } from "@/components/ui/AIStatus";
 import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 import { MAX_PHOTOS } from "./blockers";
+import { AiNotesStep } from "./AiNotesStep";
 
 // When background removal can't run (out of credits, bad key, rate limit) the
 // server KEEPS the original photo — the right call, but silent: the photos just
@@ -47,6 +49,10 @@ const MAX_BATCH_FILES = 250;
 // the server so the box stops taking characters it is about to drop, rather
 // than silently truncating a hint the seller watched themselves type.
 const MAX_NOTES_CHARS = 1000;
+
+// Where a paused upload's job id waits while the seller is somewhere else.
+// See the restore effect below for why it has to be written down at all.
+const ASK_KEY = "ask";
 
 // The seller's hints, one per comma — the same split the server prompt does,
 // so the count under the box is the number of hints the AI will actually see.
@@ -104,8 +110,63 @@ export function UploadPhase() {
   // Live status of the background pipeline job (phase/current/total_photos),
   // so the wait card reports what's actually happening instead of guessing.
   const [stage, setStage] = useState(null);
+  // The guidance step. The pipeline job stops once the photos are optimized
+  // and before anything is drafted, and hands back the item it is about to
+  // write — so this holds that question while the seller answers it.
+  // { sessionId, jobId, items } or null.
+  const [pending, setPending] = useState(null);
+  // What the seller has typed into it, keyed by item index. Held HERE rather
+  // than inside the step, which is unmounted the moment the answer is sent —
+  // see AiNotesStep: a failed submit has to come back to the words they
+  // wrote, not to an empty box.
+  const [itemNotes, setItemNotes] = useState({});
+  // Answering it. Separate from `busy` because the two render differently:
+  // `busy` is the wait before the question, this is the wait after it.
+  const [notesBusy, setNotesBusy] = useState(false);
   // Taken once, on mount — a later retry must not re-seed the drop zone.
   useEffect(() => { clearBulkRetry(); }, [clearBulkRetry]);
+
+  // A question the seller walked away from.
+  //
+  // The step lives in this component, so opening Drafts — or reloading —
+  // unmounts it. That used to cost nothing: the old straight-through pass
+  // finished in the background and left a draft behind whether anyone was
+  // watching or not. A paused job drafts NOTHING until it is answered, so
+  // losing the question loses the whole upload. Hence the id on the way into
+  // the pause, and this on the way back: return to Sell and the question is
+  // there again.
+  //
+  // Only the ids are stored. The items are re-read from the job, which is the
+  // one copy that cannot be stale — and the same read is what settles a
+  // stored id that is no longer worth putting back.
+  useEffect(() => {
+    const raw = readLocal(ASK_KEY);
+    if (!raw) return undefined;
+    let live = true;
+    (async () => {
+      let saved = null;
+      try { saved = JSON.parse(raw); } catch { /* unreadable — drop it */ }
+      // Both ids or neither: the job id finds the question, the session id is
+      // what the answer's draft is opened from. Half a record cannot do the
+      // job and must not put a question on screen that leads nowhere.
+      if (!saved?.jobId || !saved?.sessionId) { clearLocal(ASK_KEY); return; }
+      try {
+        const j = await api(`/api/bulk/status/${saved.jobId}`);
+        if (!live) return;
+        if (!j.done && j.phase === "awaiting_notes") {
+          setPending({ sessionId: saved.sessionId, jobId: saved.jobId,
+                       items: j.pending_items || [] });
+          return;
+        }
+      } catch (e) { /* 404, or not ours: no question left to put back */ }
+      // It finished, failed, or the server has no record of it. Anything it
+      // drafted is in Drafts, and a stale id must not sit in front of the
+      // drop zone forever.
+      if (live) clearLocal(ASK_KEY);
+    })();
+    return () => { live = false; };
+    // Once, on mount: this is a restore, not a subscription.
+  }, []);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -201,6 +262,65 @@ export function UploadPhase() {
     await runBulkUpload(files, removeBg, notes);
   });
 
+  // The draft has landed — the same ending for the pass that ran straight
+  // through and the one that waited for the seller's notes.
+  const finish = (sessionId, result) => {
+    setSession({
+      sessionId,
+      listing: result.listing,
+      confidence: result.confidence,
+      // Server already ran the specifics/maker enrichment for this draft —
+      // the editor's autofill effect skips its (re-charging) re-run.
+      specificsAutofilled: !!result.specifics_autofilled,
+    });
+    // A listing that did not exist a moment ago now does. Nothing else asks
+    // the server again on its own, so without this the new draft is absent
+    // from Drafts, from the tab counts and from the dashboard until some
+    // unrelated refresh happens along. See store.invalidateListings.
+    invalidateListings();
+  };
+
+  // The seller has answered the guidance step (or left every box blank, which
+  // is the same request and the same drafts a run without the step would have
+  // produced). `pending` is deliberately NOT cleared until the draft lands:
+  // a failed submit has to come back to the question, not to a dead screen —
+  // the photos are still on the server and the job is still paused.
+  const submitNotes = async (notes) => {
+    if (!pending || notesBusy) return;
+    setNotesBusy(true);
+    setStage({ phase: "identifying" });
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}`, { notes });
+      const result = await pollJob(pending.jobId, {
+        onUpdate: (j) => setStage(j),
+      });
+      clearLocal(ASK_KEY);  // answered — there is no question to come back to
+      setPending(null);
+      finish(pending.sessionId, result);
+    } catch (e) {
+      // 409 is the server saying this question has already been answered —
+      // another tab, or a reload that raced the first press. Keeping the
+      // boxes up would be a dead end: every press from here is refused. So
+      // the question goes, and the seller is pointed at the draft it made.
+      //
+      // `e.status`, not the message: api() uses the sentence the server wrote
+      // AS the message and puts the code on the error, so a status match is
+      // the only reliable one.
+      if (e.status === 409) {
+        clearLocal(ASK_KEY);
+        setPending(null);
+        invalidateListings();
+        toast("This upload has already been written — find it in Drafts.",
+              { kind: "info" });
+      } else {
+        toast(`Error: ${e.message}`, { kind: "error" });
+      }
+    } finally {
+      setNotesBusy(false);
+      setStage(null);
+    }
+  };
+
   const process = once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
@@ -222,8 +342,15 @@ export function UploadPhase() {
       const up = await api("/api/upload",
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       let last = null;
-      const result = await pollJob(up.job_id, {
+      // Stops at the guidance step, where the job pauses with the photos
+      // ready and nothing drafted — waiting on the seller rather than on the
+      // machine, which is why the poll has to be told this is not a job that
+      // has gone quiet. A server that ran straight through (nothing paused)
+      // hands back the identify result exactly as it always did, so the two
+      // are told apart by what came back rather than by trusting either.
+      const out = await pollJob(up.job_id, {
         onUpdate: (j) => { last = j; setStage(j); },
+        stopWhen: (j) => j.phase === "awaiting_notes",
       });
       const optResults = last?.upload?.optimize_results || [];
       if (removeBg) {
@@ -234,20 +361,19 @@ export function UploadPhase() {
       // change. Say so, and how to turn it back if the pass got it wrong.
       const turned = turnedUprightMessage(optResults);
       if (turned) toast(turned, { kind: "info", ttl: 10000 });
+      // The photos are on the server now and everything from here shows
+      // THOSE, so the local previews have done their job.
       files.forEach((f) => URL.revokeObjectURL(f.url));
-      setSession({
-        sessionId: up.session_id,
-        listing: result.listing,
-        confidence: result.confidence,
-        // Server already ran the specifics/maker enrichment for this draft —
-        // the editor's autofill effect skips its (re-charging) re-run.
-        specificsAutofilled: !!result.specifics_autofilled,
-      });
-      // A listing that did not exist a moment ago now does. Nothing else asks
-      // the server again on its own, so without this the new draft is absent
-      // from Drafts, from the tab counts and from the dashboard until some
-      // unrelated refresh happens along. See store.invalidateListings.
-      invalidateListings();
+      if (out?.phase === "awaiting_notes") {
+        // Written down BEFORE the question goes up, so a seller who leaves
+        // the screen a second later can still be brought back to it.
+        writeLocal(ASK_KEY, JSON.stringify({ sessionId: up.session_id,
+                                             jobId: up.job_id }));
+        setPending({ sessionId: up.session_id, jobId: up.job_id,
+                     items: out.pending_items || [] });
+        return;
+      }
+      finish(up.session_id, out);
     } catch (e) {
       toast(`Error: ${e.message}`, { kind: "error" });
     } finally {
@@ -256,7 +382,7 @@ export function UploadPhase() {
     }
   });
 
-  if (busy) {
+  if (busy || notesBusy) {
     // Real pipeline stages from the job status; the pre-job moment (uploading
     // the files themselves) is the only guessed line.
     const total = stage?.total_photos || files.length;
@@ -283,6 +409,22 @@ export function UploadPhase() {
         <BrandPulse
           message={stageLine}
           detail="Your photos are safe here — this can take a minute or two."
+        />
+      </div>
+    );
+  }
+
+  // The guidance step, in place of the uploader: the photos are already on
+  // the server, so there is nothing to drop and nothing to pick — the only
+  // thing left before the AI writes is what the seller knows about the item.
+  if (pending) {
+    return (
+      <div className="flex flex-col gap-5">
+        <AiNotesStep
+          items={pending.items}
+          values={itemNotes}
+          onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
+          onSubmit={submitNotes}
         />
       </div>
     );
