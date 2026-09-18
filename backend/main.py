@@ -3885,12 +3885,69 @@ def refresh_expert_knowledge(request: Request, record_id: str) -> dict:
     return {"ok": True, "status": "fetching"}
 
 
-def _distill_reference_row(record_id: str) -> None:
+# How long to wait before reading a page again when the site said "not now".
+# Two goes and then it waits for the seller: a site still rate limiting us ten
+# minutes later will not be talked round by a third attempt a minute after
+# that, and the Try again button in Settings is right next to the message.
+REFERENCE_RETRY_DELAYS = (90, 600)
+
+
+def _minutes_in_words(seconds: float) -> str:
+    minutes = max(1, round(float(seconds) / 60))
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def _read_reference_again(record_id: str, attempt: int, delay: float) -> None:
+    """Read a reference again once `delay` has passed.
+
+    Its own background thread, and a daemon one, so a pending retry never
+    holds a deploy open. A retry lost to a restart is a reference the seller
+    can refresh by hand -- which is the worse half of a trade against keeping
+    a schedule in the database for a wait measured in minutes.
+    """
+    time.sleep(delay)
+    _distill_reference_row(record_id, attempt)
+
+
+def _reference_not_now(record_id: str, attempt: int,
+                       now: datetime, what: str) -> None:
+    """Record a failure that is about the MOMENT, not about the page.
+
+    `enabled` is deliberately not touched and any distillate already saved is
+    left where it is: nobody has read the page this time round, so nothing has
+    been learned that would justify turning the seller's reference off or
+    throwing away what it taught us last time.
+    """
+    if attempt < len(REFERENCE_RETRY_DELAYS):
+        delay = REFERENCE_RETRY_DELAYS[attempt]
+        db.expert_knowledge_update(
+            record_id, last_fetched=now,
+            fetch_error=(f"{what} — trying again in "
+                         f"{_minutes_in_words(delay)}")[:500])
+        run_in_background(_read_reference_again, record_id, attempt + 1, delay,
+                          what="reference retry")
+        return
+    db.expert_knowledge_update(
+        record_id, last_fetched=now,
+        fetch_error=f"{what} — press Try again whenever you like"[:500])
+
+
+def _distill_reference_row(record_id: str, attempt: int = 0) -> None:
     """Fetch a saved reference and write down what it establishes.
 
     Off the request thread, always. Never raises: a reference that cannot be
     read is recorded as one -- `fetch_error` is shown in the settings screen,
     because a reference that silently stopped working is worse than none.
+
+    WHAT IS RECORDED HAS TO BE TRUE. Every failure below used to land in one
+    of two places: a bare "HTTP 429", or the sentence "that page had nothing
+    usable on it — a login wall, a paywall, or a page about something else",
+    which also turned the reference off. Most of the time neither was what had
+    happened. A rate limit, a site that refused this reader, a consent prompt,
+    a bot check and our own summariser being unavailable are all "we have not
+    seen the page", not "the page is no good" -- so they say which one it was,
+    they leave the reference on, and the ones that time can fix are tried
+    again. Only a page we actually read and found nothing in is a verdict.
     """
     row = db.expert_knowledge_get(record_id)
     if not row:
@@ -3899,24 +3956,56 @@ def _distill_reference_row(record_id: str) -> None:
     try:
         page = reference_fetch.fetch(row["url"])
         text = reference_fetch.readable_text(page)
-        result = claude_ai.distill_reference(
-            text, note=row.get("note", ""), subject=row.get("expert", ""))
+    except reference_fetch.TemporaryFailure as exc:
+        _reference_not_now(record_id, attempt, now, str(exc)[:300])
+        return
+    except reference_fetch.Blocked as exc:
+        # The site refused this reader. Nobody has seen the page, so nothing
+        # is claimed about it -- and no retry, because ninety seconds will not
+        # change a 403.
+        db.expert_knowledge_update(record_id, last_fetched=now,
+                                   fetch_error=str(exc)[:500])
+        return
     except (reference_fetch.UnsafeURL, ValueError) as exc:
+        # The link itself is wrong -- not https, unresolvable, a PDF, too big.
+        # That IS about the reference, and it is the seller's to fix.
         db.expert_knowledge_update(record_id, last_fetched=now,
                                    fetch_error=str(exc)[:500], enabled=False)
         return
     except Exception as exc:  # noqa: BLE001 - a reference is optional
-        log.info("reference distill failed for %s: %s", record_id,
+        log.info("reference fetch failed for %s: %s", record_id,
                  type(exc).__name__)
-        db.expert_knowledge_update(
-            record_id, last_fetched=now,
-            fetch_error=f"could not read the page ({type(exc).__name__})")
+        _reference_not_now(record_id, attempt, now,
+                           f"could not read the page ({type(exc).__name__})")
         return
-    if not result or not result.get("usable"):
+
+    wall = reference_fetch.unreadable_reason(page, text)
+    if reference_fetch.too_thin(text):
+        # Nothing came back worth summarising. Say WHICH wall it was, rather
+        # than spending a model call on a consent banner and then reporting
+        # the model's shrug as a fact about the page.
+        _reference_not_now(record_id, attempt, now,
+                           wall or "there was almost no text on the page")
+        return
+
+    result = claude_ai.distill_reference(
+        text, note=row.get("note", ""), subject=row.get("expert", ""))
+    if result is None:
+        # The summariser did not run: no key, an overloaded model, a reply we
+        # could not parse. Ours to own, and it used to be reported to the
+        # seller as a paywall on their page.
+        _reference_not_now(record_id, attempt, now,
+                           "we couldn’t summarise the page just now")
+        return
+    if not result.get("usable"):
+        # The one real verdict: we read the page and there was nothing on it
+        # to learn from. Off, with the reason the model actually gave.
+        because = result.get("reason") or wall
         db.expert_knowledge_update(
             record_id, last_fetched=now, distillate="", enabled=False,
-            fetch_error="that page had nothing usable on it — a login wall, "
-                        "a paywall, or a page about something else")
+            fetch_error=("we read the page, but there was no reference "
+                         "material on it to learn from"
+                         + (f" — {because}" if because else ""))[:500])
         return
     db.expert_knowledge_update(record_id, last_fetched=now, distilled_at=now,
                                distillate=result["summary"], fetch_error="")
