@@ -37,6 +37,7 @@ Pillow only, no rembg and no download: the border is geometry, not inference.
 from __future__ import annotations
 
 import math
+import random
 
 import pytest
 
@@ -439,6 +440,237 @@ def test_something_too_small_to_be_the_piece_is_refused():
 
 def test_an_empty_wall_is_refused():
     assert artwork.border(Image.new("RGB", SIZE, WALL)) is None
+
+
+# --- ...and survives being photographed on something other than a flat wall --
+#
+# The report after the two above, and the same three words: the background was
+# removed from almost none of them. Framed prints this time, shot on a cream
+# sheet, and the answer had nothing to do with the pictures. Every one of them
+# was found: a black frame on pale cloth is 0.89 of its own box and 0.42 of
+# the photo, a textbook content mask. What happened to them happened afterwards.
+#
+# "Is this still the wall" was two fixed numbers measured against ONE median
+# colour -- 6 levels of difference, 6 of texture -- and a sheet has folds in it.
+# The first line in from the edge of the photo already cleared both, on all
+# four sides, so the box grew to the whole photo and the bleed test threw the
+# picture away for running off an edge it never reached.
+#
+# A plain sweep does it too, which is what makes this MOST of a set rather than
+# the odd photo. A sweep is lit: 22 levels brighter at the top of the frame
+# than at the bottom is an ordinary lamp against a bar of 6, and every row of a
+# clean white background scores a hit share of 1.00 with no picture in it at
+# all. One backdrop, one lamp, one afternoon -- and the seller's whole set
+# comes back exactly as they shot it.
+#
+# So the bars are floors now, and the bar is whatever the background in THIS
+# photo does across the band around the edge of the frame. On a flat sweep its
+# spread is a level or two, the floor wins, and nothing that worked changes.
+
+CLOTH = (198, 188, 166)
+
+
+def _sheet(size=SIZE, seed=3, folds=14, depth=34, lamp=26):
+    """A cream sheet: soft fold shading, and a lamp on one side of it.
+
+    Nothing in here is an edge. The folds are blurred by a thirtieth of the
+    frame, which is what a fold in cloth looks like and is why the content mask
+    has no trouble with them — the fixed bars they defeat are the scan's.
+    """
+    rnd = random.Random(seed)
+    w, h = size
+    im = Image.new("RGB", size, CLOTH)
+    d = ImageDraw.Draw(im)
+    for _ in range(folds):
+        x, y = rnd.randrange(-w // 4, w), rnd.randrange(-h // 4, h)
+        k = rnd.randrange(-depth, depth)
+        d.line([(x, y), (x + rnd.randrange(-w // 2, w // 2),
+                         y + rnd.randrange(h // 3, h))],
+               width=rnd.randrange(30, 120),
+               fill=tuple(max(0, min(255, c + k)) for c in CLOTH))
+    im = im.filter(ImageFilter.GaussianBlur(min(size) // 28))
+    lit = Image.new("RGB", size)
+    ld = ImageDraw.Draw(lit)
+    for x in range(w):
+        v = round(255 - lamp * 2 * abs(x / (w - 1) - 0.25))
+        ld.line([(x, 0), (x, h)], fill=(v, v, v))
+    return Image.blend(im, lit, 0.35)
+
+
+def _sweep(size=SIZE, span=24):
+    """A plain seamless sweep with a lamp above it: one flat colour, shaded top
+    to bottom. There is no picture in the band and no texture anywhere."""
+    im = Image.new("RGB", size)
+    d = ImageDraw.Draw(im)
+    for y in range(size[1]):
+        v = round(255 - span * y / (size[1] - 1))
+        d.line([(0, y), (size[0], y)], fill=(v, v, v))
+    return im
+
+
+def _on(bg, deg=5.0, box=(300, 150, 900, 780), frame=FRAME):
+    """A framed picture lying on `bg`, held by hand."""
+    im = bg.copy()
+    d = ImageDraw.Draw(im)
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    corners = [_turn(pt, centre, deg) for pt in
+               ((box[0], box[1]), (box[2], box[1]),
+                (box[2], box[3]), (box[0], box[3]))]
+    d.polygon(corners, fill=frame)
+    glass = (box[0] + 18, box[1] + 18, box[2] - 18, box[3] - 18)
+    d.polygon([_turn(pt, centre, deg) for pt in
+               ((glass[0], glass[1]), (glass[2], glass[1]),
+                (glass[2], glass[3]), (glass[0], glass[3]))], fill=(150, 148, 145))
+    return im, corners
+
+
+def _covers(found, size) -> float:
+    """What share of the photo the border encloses."""
+    return (found[2] - found[0]) * (found[3] - found[1]) / (size[0] * size[1])
+
+
+def test_a_framed_picture_on_a_lit_sweep_is_still_a_picture():
+    """The clearest form of the report, because there is nothing in this photo
+    to be confused by: one flat colour, shaded by a lamp, and a frame in the
+    middle of it. The gradient alone used to put every row of the background
+    over the bar and take the box out to all four edges."""
+    im, corners = _on(_sweep())
+
+    found = artwork.border(im)
+    assert found is not None, "refused a framed picture on a plain lit sweep"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
+@pytest.mark.parametrize("size,box", [((1200, 900), (330, 150, 870, 770)),
+                                      ((1000, 1000), (230, 230, 770, 770)),
+                                      ((900, 1200), (180, 330, 720, 870))])
+@pytest.mark.parametrize("deg", [0, 3, 6])
+def test_a_framed_picture_on_a_cloth_backdrop_is_still_a_picture(size, box, deg):
+    """The reported set: one sheet, one pair of hands, every crop. What the
+    backdrop is made of is not a fact about the item lying on it."""
+    im, corners = _on(_sheet(size), deg=deg, box=box)
+
+    found = artwork.border(im)
+    assert found is not None, f"refused a {size[0]}x{size[1]} photo at {deg}°"
+    assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
+
+
+@pytest.mark.parametrize("bg", ["sheet", "sweep", "wall"])
+def test_the_border_is_snug_around_the_piece_not_the_whole_photo(bg):
+    """What the seller actually saw, and what "enclosing the piece" alone will
+    not catch. The old scan did return a box for some of these — a box covering
+    0.87 to 0.99 of the photo, which composites the sheet, the fold and the
+    floor onto white along with the picture and calls it a cutout. The piece
+    here is 0.30 of the frame; a border that keeps half the photo has not
+    removed a background, whatever it reports."""
+    im, corners = _on({"sheet": _sheet(), "sweep": _sweep(),
+                       "wall": Image.new("RGB", SIZE, WALL)}[bg])
+
+    found = artwork.border(im)
+    assert found is not None
+    piece = _covers(_bbox(corners), SIZE)
+    assert _covers(found, SIZE) <= piece * 1.5, (
+        f"border covers {_covers(found, SIZE):.2f} of the photo for a piece "
+        f"that is {piece:.2f} of it")
+
+
+def test_the_edge_scan_will_not_stop_inside_the_band_it_called_background():
+    """The structural half, held on its own. The band around the edge of the
+    frame is where the surround colour is sampled and where the scan's own bar
+    is measured; a side that answers "the thing starts here" about those very
+    lines has contradicted its premise and crossed no background at all. It
+    has nothing to say, so the content box stands — and the box can no longer
+    be walked out to the edge of the photo, whatever the backdrop does."""
+    small = _on(_sheet((240, 240)), box=(60, 60, 180, 180))[0]
+    content = (50, 50, 190, 190)
+
+    grown = artwork._scan_inward(small, content)
+
+    band = artwork._band(small.size)[1]
+    assert grown[0] >= band or grown[0] == content[0]
+    assert grown[1] >= band or grown[1] == content[1]
+    assert grown[2] <= 240 - band or grown[2] == content[2]
+    assert grown[3] <= 240 - band or grown[3] == content[3]
+
+
+def test_a_flat_background_is_answered_on_the_first_pass():
+    """The promise that makes the second look safe to have at all: it is only
+    ever reached by a photo that was already going to be kept as shot. A wall
+    does not wander, so its bars are the ones this module was fitted with and
+    there is nothing to look at again."""
+    small = _on(Image.new("RGB", (240, 180), WALL), box=(60, 40, 180, 140))[0]
+
+    assert artwork._second_look(small) is None
+
+
+def test_a_picture_that_bleeds_off_a_textured_backdrop_is_still_left_alone():
+    """The guard on the second look. Raising the bar until the background
+    holds still is only honest while there IS a background: a mask that still
+    reads content all the way round the rim afterwards is the picture itself,
+    running off the edge of the photo, and the seller's rule for that has not
+    changed."""
+    im = _sheet()
+    _painted(ImageDraw.Draw(im), (0, 0, SIZE[0], SIZE[1]))
+
+    assert artwork.border(im) is None
+
+
+def _draw_ellipse(d):
+    d.ellipse((250, 150, 950, 780), fill=(40, 110, 50))
+
+
+def _draw_figure(d):
+    d.ellipse((430, 250, 780, 620), fill=(240, 215, 195))       # a head
+    d.polygon([(400, 620), (810, 620), (880, 830), (330, 830)],
+              fill=(70, 90, 150))                                # and shoulders
+
+
+def _draw_two_objects(d):
+    d.ellipse((120, 200, 340, 700), fill=(40, 110, 50))         # a tree
+    d.rectangle((880, 520, 1080, 660), fill=(120, 70, 40))      # and a boat
+
+
+def _draw_wreath(d):
+    d.ellipse((250, 150, 950, 780), fill=(120, 70, 40))
+    d.ellipse((400, 290, 800, 640), fill=CLOTH)
+
+
+def _draw_small(d):
+    _painted(d, (560, 420, 660, 500))
+
+
+@pytest.mark.parametrize("draw", [_draw_ellipse, _draw_figure, _draw_two_objects,
+                                  _draw_wreath, _draw_small])
+def test_the_refusals_hold_on_the_backdrop_that_needs_a_second_look(draw):
+    """The other half of the repair, and the one worth watching. Every shape
+    this module exists to refuse is refused on a flat wall — but a flat wall
+    is answered on the first pass, so those tests never exercise the second
+    one. Moved onto the sheet, they go round again with the bar raised, and
+    they have to come back refused there too. Raising a threshold until the
+    background holds still must not be a way of buying a border for something
+    that is not a picture."""
+    im = _sheet()
+    draw(ImageDraw.Draw(im))
+
+    assert artwork.border(im) is None
+
+
+def test_the_scan_stops_on_the_edge_it_found_not_two_lines_past_it():
+    """Which line a run of non-background lines STARTED on depends on which
+    way the scan was walking. The right and the bottom walk backwards, and
+    subtracting the run as though they counted upward put their answer two
+    cells inside the edge they had just found — a shave off two sides of every
+    piece this scan located, invisible only because the margin grew it back.
+
+    A square frame centred in a square photo, so the answer is symmetry: what
+    the scan leaves at the left it has to leave at the right."""
+    small = Image.new("RGB", (240, 240), (252, 251, 249))
+    ImageDraw.Draw(small).rectangle((40, 40, 199, 199), fill=FRAME)
+
+    left, top, right, bottom = artwork._scan_inward(small, (60, 60, 180, 180))
+
+    assert (left, top) == (39, 39)
+    assert (240 - right, 240 - bottom) == (39, 39), "the far edges were shaved"
 
 
 @pytest.mark.parametrize("size", [(1, 1), (4, 4), (7, 200)])
