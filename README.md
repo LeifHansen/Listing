@@ -1271,11 +1271,41 @@ crosses it without ever standing on it.
 the frame, a shape that is not a rectangle, something too small to be the
 piece — each returns None, and None means *keep the photo exactly as shot*,
 reported in `bg_error` so the seller is told and the charge comes back. It
-never means "fall back to the model", because the model is the bug. The error
+never means "cut to what the model kept", because that is the bug. The error
 directions are not close: a cutout wrongly refused costs one photo an opt-in
 feature, and a cutout wrongly shipped destroys the item the listing is for —
 which is also why the prompt tells the model to answer **true** when it is
 torn about whether something is a picture.
+
+**A model may say where a picture is. It may never say what to keep inside
+one.** Before giving up, the scan takes a second opinion: a segmentation matte
+is fitted to its best rectangle, and if it *is* a rectangle at some angle
+(`artwork.quad_from_alpha`, floor 0.9 — a round subject scores 0.785 however
+it is turned) its four corners become the border and are filled solid. Only
+the outer shape is ever read, so the guarantee above is untouched: what ships
+is still a solid quad, and a baby lifted out of a painting is refused because
+it is not a rectangle, not because of which model drew it.
+
+That second look was written for a paid engine and, for a while, only a paid
+engine could answer it — which meant it never ran, because nothing configures
+one (`BG_ENGINE` is commented out in fly.toml with no key beside it). The
+local model answers it now (`ART_LOCAL_BORDER=off` restores the old
+behaviour), and it costs one inference on exactly the photos that were
+otherwise getting nothing. Before this, a seller's grid had shirts cut out on
+white beside framed prints and printed trays still sitting on the floor they
+were shot on, and the reason was "no paid API key".
+
+**A square object that is not a picture gets the same geometry.** A tray, a
+sign, a plaque, a boxed set, a record sleeve: the screen is right not to call
+these art — a tray with a map on it is a tray — so they go to the model like
+any other object, and the model drops them or keeps only the picture printed
+on their face. When nothing it returns survives the guards, `artwork.border()`
+is asked last, and the photo is cut to the rectangle if there is one
+(`bg_engine: "border"`). Only after the model has declined, so no photo that
+gets a cutout today changes, and `border()` answers None for anything that is
+not a rectangle, so a garment or a close-up is still kept as shot. The studio's
+**Remove background** button does the same thing, which matters most there:
+that is the button a seller presses *after* a batch left the photo as shot.
 
 One limit, stated plainly: a print with a blank white mount, on a white
 surface, under flat light with no shadow, has no detectable outer edge — there

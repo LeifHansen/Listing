@@ -123,6 +123,11 @@ _MIN_AREA = float(os.getenv("ART_MIN_AREA", "0.12") or 0.12)
 # that case is to do nothing at all, so this returns None rather than a box
 # equal to the whole photo — which would composite the picture onto white,
 # re-encode it, and change nothing except its file size.
+#
+# quad_from_alpha holds the same line against a matte, where it has to be read
+# as an AREA rather than as a span: the shape there may be turned, and a
+# picture at 12 degrees fills a bounding box spanning the whole photo while
+# leaving a wedge of floor in each corner of it. That is a real cut.
 _BLEED_SPAN = float(os.getenv("ART_BLEED_SPAN", "0.97") or 0.97)
 
 # Grow the box outward by this share of its own size before it is used. The
@@ -136,8 +141,8 @@ _MARGIN = float(os.getenv("ART_MARGIN", "0.02") or 0.02)
 #
 # Shared by both halves of this module. The geometric scan below asks it of the
 # content it found in the photo (see _is_turned_rectangle), and quad_from_alpha
-# asks it of a remote engine's matte. It is the same question in both places
-# and it is asked the same way, because the thing being separated is the same:
+# asks it of a segmentation model's matte. It is the same question in both
+# places and it is asked the same way, because what is being separated is the
 # a picture, which is a rectangle however it is held, from a shape that is not
 # a rectangle at any angle at all.
 
@@ -162,7 +167,7 @@ def _solid(shape: Image.Image, box: Optional[Box] = None) -> Image.Image:
     The hole is not a fact about the shape. It is a fact about the MASK:
     whatever inside the picture happens to match the wall it hangs on drops
     out of it -- a white mount, a pale sky, bare canvas, the glare off
-    glazing, or on a remote engine's matte a patch the model let go. None of
+    glazing, or on a segmentation matte a patch the model let go. None of
     it says anything about whether the OUTER EDGE is a rectangle, which is
     the only thing this module ever asks and the only thing it ever cuts to.
 
@@ -736,8 +741,8 @@ def _border_in(small: Image.Image,
     return box
 
 
-# How nearly a remote engine's matte must fill the best rectangle that can be
-# drawn around it before that shape is allowed to be a picture's border.
+# How nearly a segmentation model's matte must fill the best rectangle that can
+# be drawn around it before that shape is allowed to be a picture's border.
 #
 # Measured at the BEST ANGLE, not against the axis-aligned box, and that is the
 # whole point. A print photographed hand-held over a floor is a rectangle that
@@ -754,8 +759,8 @@ _MIN_ALPHA_RECT_FILL = float(os.getenv("ART_ALPHA_RECT_FILL", "0.9") or 0.9)
 
 def quad_from_alpha(size: tuple[int, int],
                     alpha: Image.Image) -> Optional[Quad]:
-    """The picture's outer edge as a remote engine's matte found it, as four
-    corners -- or None.
+    """The picture's outer edge as a segmentation model's matte found it, as
+    four corners -- or None.
 
     The second opinion for the case this module otherwise answers with "do
     nothing": a print whose border `border()` could not scan at all -- one
@@ -767,6 +772,12 @@ def quad_from_alpha(size: tuple[int, int],
     easily. What it cannot be trusted with is what is INSIDE that sheet, and
     nothing here asks it -- only the outer shape is taken, and the caller
     fills it solid through quad().
+
+    Which model drew that matte is the caller's business and makes no
+    difference to anything here. A paid engine was the only one allowed to
+    answer for a while; the local one may now too (images._border_alpha), and
+    the reason the answer is safe is the same for both -- it is checked for
+    being a rectangle, and only its outer shape is used.
 
     Four corners rather than a box because the photo is the angled one: the
     axis-aligned box around a print lying at 8 degrees includes a triangle of
@@ -814,6 +825,18 @@ def quad_from_alpha(size: tuple[int, int],
     if area < _MIN_AREA:
         log.info("art border: the matte covers %.2f of the frame, too small "
                  "to be the picture — keeping the photo as shot", area)
+        return None
+    # ...and the bleed case, which the geometric scan has always refused and
+    # this did not. A matte covering the whole frame says there is no
+    # background in this photo, so there is no border in it either: cutting to
+    # it composites the picture onto white, re-encodes it, and changes nothing
+    # except the file size -- while telling the seller their background was
+    # removed and charging them for it. See _BLEED_SPAN for why the question
+    # is put to the area here and to the span there.
+    if area >= _BLEED_SPAN:
+        log.info("art border: the matte covers %.2f of the frame — nothing in "
+                 "this photo is background, so there is no border to cut to; "
+                 "keeping it as shot", area)
         return None
 
     # Out by the usual margin, then back: the corners are found in the TURNED
