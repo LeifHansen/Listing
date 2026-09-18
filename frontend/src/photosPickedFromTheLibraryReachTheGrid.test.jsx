@@ -152,7 +152,11 @@ describe("photos picked from the library", () => {
 
   it("keeps working for a drag-and-drop, which clears nothing", async () => {
     await mountUploader();
-    const zone = host.querySelector("[class*='border-dashed']");
+    // The uploader opens folded, so what a seller drops photos onto is the
+    // one-line bar. It is a drop target for exactly that reason — a fold that
+    // took drag-and-drop away with it would have cost more than it saved.
+    const zone = [...host.querySelectorAll("button")]
+      .find((b) => (b.textContent || "").includes("Add photos"));
     await act(async () => {
       const ev = new Event("drop", { bubbles: true });
       ev.dataTransfer = { files: [photo("dragged.jpg")] };
