@@ -470,6 +470,32 @@ Rules:
     see, leave the fact out and add it to missing_info — the length comes from
     detail that is really there plus honest use, care and context, never from
     invention.
+  NO LINKS (the one mistake that costs the whole listing):
+  eBay's links policy demotes and REMOVES listings whose description points a
+  buyer off the listing page. A weak keyword costs a little search position; a
+  link costs the seller the listing, and repeat removals cost them the account.
+  Nothing you write may be a link or stand in for one:
+  * No URL in any form — no http:// or https://, no www., no bare or shortened
+    domain ("mystore.com", "etsy.com/shop/…", "bit.ly/…"), and no <a href> or
+    any other HTML, which this field does not have.
+  * No disguised or spelled-out URL either: "mystore dot com", "www(dot)…",
+    "instagram: @myshop", a domain broken up with spaces. Writing a link so it
+    slips past a filter is still a link, and it reads as a deliberate one.
+  * No email address, phone number, messaging handle, social account or QR
+    code, and no "email me", "text me", "DM me", "find us on Facebook".
+  * No off-eBay shop, marketplace, price guide, auction house or reference site
+    named as somewhere to go, and no invitation to leave the page at all: "see
+    my other items at …", "visit our store", "check our website", "Google the
+    model number", "more photos at …". eBay already puts Contact Seller and
+    Visit Store on the page, so the closing asks for questions and stops there.
+  * The ban follows the FACT, not where the fact came from. A web address is
+    still one when it was in the seller's notes, in a reference page or a
+    research source you read, printed on the box, tag or label, or sitting in a
+    photo as a watermark. Name the MAKER in words instead of reproducing the
+    maker's address — "Pyrex" is the searchable fact; "pyrex.com" is a removal.
+  * The same holds for every other text field that reaches the listing page —
+    title, subtitle, condition_description and item_specifics values. There is
+    no field here a link belongs in.
 - ALWAYS estimate the packed shipping box dimensions (package_length_in,
   package_width_in, package_height_in) and weight — judge the item's real-world
   size from the photos and add a little room for packaging. Never leave the
@@ -597,8 +623,15 @@ TITLE_BUDGET_AND_BANS = (
 # identifying words for the generic ones. The same is true of LENGTH: a model
 # handed a listing and told to change the price will happily hand back a
 # two-line description, silently undoing the SEO body the first draft wrote.
-# All of it is conditioned on the seller not asking otherwise — an explicit
-# "start it with Vintage", or "make it shorter", is their call to make.
+# The style rules are conditioned on the seller not asking otherwise — an
+# explicit "start it with Vintage", or "make it shorter", is their call to
+# make. The LINKS ban is the one that is not. "add my store link" is a thing
+# sellers genuinely ask for, and honouring it publishes a policy violation:
+# eBay removes the listing, and enough removals take the account with it. So
+# that clause is written to outrank the instruction rather than obey it, and
+# a refine also has to SCRUB links, because a draft imported from an existing
+# eBay listing (services/ebay_trading.GetItem) arrives carrying whatever the
+# old description had in it.
 REFINE_ORDER_RULE = (
     "If you rewrite the title, it must still LEAD with brand or artist, "
     "then the exact model or pattern name, then what the thing is, then "
@@ -619,6 +652,15 @@ REFINE_ORDER_RULE = (
     "the 1,800-3,500 character range — unless the seller asks for it shorter. "
     "An instruction about one field is not licence to shorten another: "
     "trimming the description is only ever what the seller asked for. "
+    "A rewritten description must carry NO link and nothing standing in for "
+    "one — no URL, no bare or spelled-out domain, no email address, phone "
+    "number, social handle or QR code, and no invitation to visit a shop, "
+    "site or search off eBay — and it must DROP any the draft already "
+    "carries, in the description and in the title, subtitle and "
+    "condition_description alike. This one is not the seller's to waive: "
+    "eBay's links policy removes the listing, so leave the link out even "
+    "when the instruction asks for one and give the seller everything else "
+    "they asked for. "
     "Never introduce a hedge the seller did not ask for — \"style\", "
     "\"after\", \"attributed to\", \"manner of\", \"-type\" or "
     "\"reproduction\" about an item that is signed, marked or labelled is a "
