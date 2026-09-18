@@ -7,9 +7,7 @@ import {
   Video as VideoIcon,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
-import {
-  api, postJson, isPhotoFile, isVideoFile, PHOTO_ACCEPT, VIDEO_ACCEPT,
-} from "@/lib/api";
+import { postJson, isPhotoFile, isVideoFile, PHOTO_ACCEPT, VIDEO_ACCEPT } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
 import {
@@ -1932,21 +1930,19 @@ const WHEN_MADE_OPTIONS = [
 // (the account defaults live in Settings). Tags and materials are
 // auto-derived from the brand + item specifics at publish time; the inputs
 // here override that.
-const NO_ETSY_OPTIONS = { shipping_profiles: [], return_policies: [], readiness_states: [] };
-
 export function EtsyCard({ w }) {
   const { toast } = useToast();
-  const show = (w.chipTargets || []).includes("etsy");
+  // The shop's profiles come from the store (loaded once Etsy is connected),
+  // so this card, the publish bar and the drafts grid all judge a listing
+  // against the same defaults.
+  const { etsyOptions: options } = useApp();
+  // Shown for a publish that includes Etsy — and for a listing that is
+  // already on Etsy whatever the chips say, because its Etsy fields are
+  // real and a seller who unticked the chip still needs to see them.
+  const onEtsy = !!((w.form.marketplaces || {}).etsy || {}).listing_id;
+  const show = (w.chipTargets || []).includes("etsy") || onEtsy;
   const [suggesting, setSuggesting] = useState(false);
   const [catPath, setCatPath] = useState("");
-  const [options, setOptions] = useState(null); // the shop's profiles, for the overrides
-
-  useEffect(() => {
-    if (!show || options) return;
-    api("/api/etsy/settings-options")
-      .then(setOptions)
-      .catch(() => setOptions(NO_ETSY_OPTIONS));
-  }, [show, options]);
 
   if (!show) return null;
   const e = w.form.etsy || {};

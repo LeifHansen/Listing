@@ -395,6 +395,28 @@ export function AppProvider({ children }) {
     () => marketplaces.filter((m) => m.connected),
     [marketplaces]);
 
+  // The Etsy shop's shipping profiles, return policies and processing
+  // profiles plus the account defaults (GET /api/etsy/settings-options).
+  // Loaded once Etsy is connected and read by everything that judges a
+  // listing "Etsy-ready" — the editor's blockers, the drafts grid, the
+  // crosspost — so the answer is the same on every screen. null until
+  // asked; {error: true} when the shop could not be read.
+  const [etsyShop, setEtsyShop] = useState(null);
+  const loadEtsyOptions = useCallback(async () => {
+    try {
+      setEtsyShop(await api("/api/etsy/settings-options"));
+    } catch (e) {
+      setEtsyShop({ error: true, shipping_profiles: [], return_policies: [],
+        readiness_states: [], selected: {} });
+    }
+  }, []);
+  const etsyConnected = connectedMarketplaces.some((m) => m.key === "etsy");
+  useEffect(() => {
+    if (etsyConnected) loadEtsyOptions();
+  }, [etsyConnected, loadEtsyOptions]);
+  // Gone the moment Etsy is disconnected, whatever was last loaded.
+  const etsyOptions = etsyConnected ? etsyShop : null;
+
   // ---------- notifications (sold alerts) ----------
   // Polled while logged in so "your item sold" reaches the seller without a
   // refresh. The bell in the TopBar renders items + the unread badge; a sold
@@ -1577,6 +1599,7 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     easypost, loadEasypostStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
+    etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     messages, loadMessages, threads, loadThread, sendMessage,
@@ -1601,6 +1624,7 @@ export function AppProvider({ children }) {
     listingsLayout, setListingsLayout,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
+    etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,

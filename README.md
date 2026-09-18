@@ -1022,6 +1022,45 @@ one failing never rolls back the others — and per-marketplace state
 Adding marketplace N+1 = one provider module + one import in
 `backend/marketplaces/__init__.py`.
 
+### Field alignment (this app · eBay · Etsy)
+
+One listing record, three vocabularies. `backend/marketplaces/field_map.py`
+is the one place the alignment is written down — the crosspost review reads
+it to say what will be filled and what is still wanted, the client mirrors
+it (`frontend/src/lib/fieldMap.js`, pinned equal by a test), and every
+`etsy_*` target the Etsy preflight can raise has to name a row here. *Filled*
+is how a value crosses from an eBay-shaped listing to Etsy: **shared**
+(copied as-is), **derived** (computed, by the named rule), **manual** (Etsy
+asks something eBay never did — answered once per crosspost batch or on the
+Etsy card), **absent** (Etsy has no such field).
+
+| Field | Here | On eBay | On Etsy | Filled | Note |
+|---|---|---|---|---|---|
+| **Title** | `title` | Title | `title` | derived (clean_title) · required | eBay allows 80 characters and capitals; Etsy 140, no $ ^ ` and few words in capitals — tidied on the way, shown before sending |
+| **Description** | `description` | Description | `description` | derived (strip_html+condition) · required | Plain text on Etsy; the condition is written in, because Etsy has no condition field |
+| **Price** | `price` | StartPrice | `price` | shared · required | Etsy's floor is 0.20 in the shop's currency; on a revise it travels through the inventory record |
+| **Currency** | `currency` | Currency | — | shared | An Etsy shop prices in one currency; a listing in another is a warning |
+| **Quantity** | `quantity` | Quantity | `quantity` | shared · required | One number; a listing with variations is refused for Etsy |
+| **Photos** | `images | image_urls` | PictureDetails | `images` | shared · required | Etsy takes up to 10 photo files (bytes, not URLs); an imported eBay listing's photos are fetched and re-uploaded |
+| **Selling format** | `listing_format` | ListingType | — | shared · required | Etsy has no auctions — Buy It Now only |
+| **Condition** | `condition | condition_description` | ConditionID | — | derived (strip_html+condition) | Etsy has no condition field; it is appended to the description |
+| **Brand** | `brand` | Brand (item specific) | `tags` | derived (tags_from_brand_and_specifics) | Becomes the first Etsy search tag |
+| **Item specifics** | `item_specifics` | ItemSpecifics | `tags` | derived (tags_from_brand_and_specifics) | Values become Etsy search tags: up to 13, 20 characters each, accents plain |
+| **Materials** | `etsy.materials | item_specifics[Material]` | Material (item specific) | `materials` | derived (materials_from_specifics) | Etsy shows materials on the listing; read off the Material specific |
+| **Package weight and size** | `package_weight_lb/oz | package_*_in` | ShippingPackageDetails | `item_weight | item_dimensions` | shared | Feeds Etsy's calculated shipping when present |
+| **Category** | `etsy.taxonomy_id` | PrimaryCategory (category_id) | `taxonomy_id` | derived (taxonomy_suggest) · required | Etsy's tree is its own: the eBay category path is matched to it first, the AI picks from a shortlist when it isn't, and the seller confirms |
+| **Who made it** | `etsy.who_made` | — | `who_made` | manual · required | Etsy's policy question — handmade, vintage or supplies — answered once per crosspost batch, never defaulted |
+| **When it was made** | `etsy.when_made` | Decade / Era / Year (item specifics) | `when_made` | derived (when_made_from_specifics) · required | Read off a decade or year specific, or a year in the title, when there is one; otherwise the batch default or the seller |
+| **Craft supply** | `etsy.is_supply` | — | `is_supply` | manual | Etsy's third allowed kind of item |
+| **Shipping profile** | `etsy.shipping_profile_id` | fulfillment policy (business policy) | `shipping_profile_id` | manual · required | Account default under Settings, per-listing override on the Etsy card |
+| **Return policy** | `etsy.return_policy_id` | return policy (business policy) | `return_policy_id` | manual · required | Required before an Etsy listing goes live; a draft may wait |
+| **Processing time** | `etsy.readiness_state_id` | DispatchTimeMax | `readiness_state_id` | manual · required | Etsy's processing profile, required on every physical listing |
+| **Variations** | `has_variations` | Variations | — | absent | No variation model here; a listing with them is refused for Etsy |
+| **Subtitle** | `subtitle` | Subtitle | — | absent | An eBay paid upgrade; Etsy has nothing like it |
+| **Store category** | `store_category_id` | StoreCategoryID | — | absent | The seller's own eBay Store shelf; Etsy shop sections are not mapped yet |
+| **Promoted Listings** | `promote | ad_rate_percent` | Promoted Listings | — | absent | eBay only |
+| **SKU** | `sku` | SKU | — | absent | Etsy's SKU lives on the inventory product and is carried over on a revise, never written |
+
 ## Database (Neon / Postgres)
 
 Set `DATABASE_URL` (e.g. a Neon connection string) to persist every listing

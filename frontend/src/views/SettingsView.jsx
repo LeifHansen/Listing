@@ -991,15 +991,20 @@ function MarketplaceConnections() {
 // marketplace settings.
 function EtsyDefaults() {
   const { toast } = useToast();
-  const [data, setData] = useState(null);   // {shipping_profiles, return_policies, readiness_states, selected}
+  // The shop's profiles and the saved defaults live in the store (loaded
+  // once Etsy is connected), so a default saved here reaches the editor's
+  // blockers and the crosspost without a reload.
+  const { etsyOptions: data, loadEtsyOptions } = useApp();
   const [saving, setSaving] = useState(false);
-  const [selected, setSelected] = useState({});
-
-  useEffect(() => {
-    api("/api/etsy/settings-options")
-      .then((d) => { setData(d); setSelected(d.selected || {}); })
-      .catch(() => setData({ error: true }));
-  }, []);
+  // What the seller has changed here, over what the shop last said: no
+  // effect copying one into the other, and a reload after save shows the
+  // saved defaults through the same overlay.
+  const [edits, setEdits] = useState({});
+  const selected = { ...((data && !data.error && data.selected) || {}), ...edits };
+  const setSelected = (update) => setEdits((prev) => {
+    const next = typeof update === "function" ? update({ ...selected, ...prev }) : update;
+    return { ...prev, ...next };
+  });
 
   if (!data) return <div className="ai-shimmer h-16 rounded-tile mt-4" aria-hidden />;
   if (data.error) {
@@ -1015,6 +1020,8 @@ function EtsyDefaults() {
     setSaving(true);
     try {
       await postJson("/api/etsy/settings-options", selected);
+      await loadEtsyOptions();
+      setEdits({});
       toast("Etsy defaults saved — new Etsy listings will use them.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't save: ${e.message}`, { kind: "error" });

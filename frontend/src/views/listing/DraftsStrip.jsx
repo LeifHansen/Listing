@@ -19,7 +19,7 @@ import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH,
 } from "./publishShared";
-import { blockerLabels, ebayBlockers } from "./blockers";
+import { blockerLabels, blockersFor, marketNames } from "./blockers";
 import {
   liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
   withCelebrating,
@@ -110,6 +110,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
     metricsById, skippedDraftIds, toggleSkipDraft,
     listingsLayout, setListingsLayout,
     draftSelection, setDraftSelection,
+    etsyOptions,
   } = useApp();
   const { confirm, toast } = useToast();
   const { selected, toggle, otherConnected, effectiveTargets } = usePublishTargets();
@@ -195,8 +196,10 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   // blockers.js, the same rules the editor uses). Bulk
   // publish holds the same line: those drafts are left selected and counted,
   // not fired off to fail one at a time.
-  const readyToPublish = selectedDrafts.filter(
-    (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
+  const etsySettings = etsyOptions && !etsyOptions.error ? etsyOptions : null;
+  const blockersOf = (d) => blockersFor(d.listing || {}, effectiveTargets,
+    { etsySettings });
+  const readyToPublish = selectedDrafts.filter((d) => blockersOf(d).length === 0);
   const allSelected = drafts.length > 0 && selectedDrafts.length === drafts.length;
   const clearSelection = () => setSel({});
   const toggleAll = () => setSel(allSelected
@@ -312,8 +315,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
         { kind: "warning" });
       return;
     }
-    const ready = picked.filter(
-      (d) => ebayBlockers(d.listing || {}, { targets: effectiveTargets }).length === 0);
+    const ready = picked.filter((d) => blockersOf(d).length === 0);
     const notReady = picked.length - ready.length;
     const these = all ? "drafts" : "selected drafts";
     if (!ready.length) {
@@ -579,7 +581,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
         ? "flex flex-col gap-3"
         : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4")}>
         {cards.map((item, i) => {
-          const blockers = ebayBlockers(item.listing || {}, { targets: effectiveTargets });
+          const blockers = blockersOf(item);
           // Two ways a draft ends up needing the seller, and the card looks
           // the same for both: fields a browser can already see eBay will
           // refuse it over, and a publish eBay actually turned down. The
@@ -595,7 +597,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
           // so "eBay refuses this" could outlive the fix. "The last publish
           // was refused" stays true either way.
           const needsInfoWhy = blockers.length
-            ? `Needs info before it can go on eBay — ${blockerLabels(blockers)}.`
+            ? `Needs info before it can go on ${marketNames(effectiveTargets)} — ${blockerLabels(blockers)}.`
             : refusal ? `The last publish was refused: ${refusal}` : null;
           // Live, and on its way off the grid. Its controls come off with it:
           // a click landing on a departing card would open, publish or delete
@@ -645,7 +647,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                       loading={!!publishing[item.id]}
                       disabled={blockers.length > 0}
                       title={blockers.length
-                        ? `eBay won't take this yet — ${blockerLabels(blockers)}. Open Review & List to finish.`
+                        ? `${marketNames(effectiveTargets)} won't take this yet — ${blockerLabels(blockers)}. Open Review & List to finish.`
                         : undefined}>
                       <Rocket aria-hidden /> Publish
                     </Button>
