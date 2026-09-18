@@ -36,12 +36,24 @@ function MetricsRow({ views, watchers, className }) {
 }
 
 // Cross-posting chips: where else this listing lives (Etsy, Depop, ...).
-// eBay stays implied by the origin/status badges.
-function MarketplaceChips({ listing }) {
-  const others = Object.entries(listing.marketplaces || {})
+// eBay stays implied by the origin/status badges for an eBay-only seller;
+// once another marketplace is connected (`showEbay`) it gets a chip too, so
+// a card reads "eBay ✓ · Etsy ✓" side by side rather than leaving eBay to be
+// inferred from the badge.
+function MarketplaceChips({ listing, status = "", showEbay = false }) {
+  const entries = Object.entries(listing.marketplaces || {})
     .filter(([key, st]) => key !== "ebay" && st && (st.status || st.error));
+  if (showEbay) {
+    const ebay = (listing.marketplaces || {}).ebay;
+    if (ebay && (ebay.status || ebay.error)) {
+      entries.unshift(["ebay", ebay]);
+    } else if (listing.ebay_listing_id && (status === "published" || status === "live")) {
+      entries.unshift(["ebay", { status: "published" }]);
+    }
+  }
+  const others = entries;
   if (!others.length) return null;
-  const label = (key) => key.charAt(0).toUpperCase() + key.slice(1);
+  const label = (key) => (key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1));
   // The one thing a seller cannot see from the pill: a revise from here
   // replaces the whole Etsy copy, so an edit made on etsy.com does not
   // survive the next "Update". Said on the pill until the revise merges.
@@ -341,6 +353,7 @@ function turnStyle(spin, square) {
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  showEbayChip = false,
   layout = "grid", className,
 }) {
   const list = layout === "list";
@@ -720,7 +733,7 @@ export const ListingCard = memo(function ListingCard({
           {/* After the blockers and the review count: those say what to
               fix, this says how far to trust the rest. */}
           {confidence && <ConfidenceChip level={confidence} />}
-          <MarketplaceChips listing={l} />
+          <MarketplaceChips listing={l} status={item.status} showEbay={showEbayChip} />
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
           )}
@@ -797,7 +810,7 @@ export const ListingCard = memo(function ListingCard({
               hold the status and the needs-info / review chip, and on a
               phone-width tile a third would sit on top of one of them. */}
           {confidence && <ConfidenceChip level={confidence} />}
-          <MarketplaceChips listing={l} />
+          <MarketplaceChips listing={l} status={item.status} showEbay={showEbayChip} />
         </div>
         {sold && (
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount}

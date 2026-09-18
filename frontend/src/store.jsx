@@ -196,6 +196,20 @@ export function AppProvider({ children }) {
     setLayout(mode);
     writeLocal("listings-layout", mode);
   }, []);
+  // Where a listing lives — the second cut of the listings pipeline, beside
+  // the lifecycle tab. Remembered like the tab is, per device.
+  const [listingsMarket, setMarket] = useState(() => {
+    try { return readLocal("listings-market") || "all"; } catch (e) { return "all"; }
+  });
+  const setListingsMarket = useCallback((next) => {
+    const id = next || "all";
+    setMarket(id);
+    try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
+  }, []);
+  // The ticks on the LIVE listings (the drafts have draftSelection below):
+  // an id -> true map of what the seller picked for a crosspost. Memory-only,
+  // and held here so opening a listing to fix it keeps the other ticks.
+  const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
@@ -1592,6 +1606,7 @@ export function AppProvider({ children }) {
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
+    listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     clearSignedInState,
@@ -1622,6 +1637,7 @@ export function AppProvider({ children }) {
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
     isSuperadmin,
     listingsLayout, setListingsLayout,
+    listingsMarket, setListingsMarket, liveSelection,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
     etsyOptions, loadEtsyOptions,

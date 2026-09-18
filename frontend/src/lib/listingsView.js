@@ -255,3 +255,44 @@ export function keptWhenEnded(item) {
   if (!String(item?.id || "").startsWith("ebay-")) return true;
   return (item?.listing?.images || []).length > 0;
 }
+
+/* ---- Where a listing lives ---------------------------------------------
+
+   The listings pipeline is cut by lifecycle (the tabs). Once a seller sells
+   on more than one marketplace the second question is WHERE — "everything
+   on Etsy", "on eBay but not on Etsy yet" (the crosspost's own shopping
+   list) — and the answer is on the record: `listing.marketplaces` is the
+   server-owned map of each marketplace's state, with eBay's older records
+   carrying only the legacy `ebay_listing_id`. */
+
+export const MARKET_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "ebay", label: "On eBay" },
+  { id: "etsy", label: "On Etsy" },
+  { id: "ebay-only", label: "eBay only, not on Etsy" },
+];
+
+const LIVE_STATUSES = ["published", "live"];
+
+// Is this listing on `key` — live there (eBay), or live or drafted there
+// (Etsy, where a draft in the shop is already a listing to reach)?
+export function onMarket(item, key) {
+  const listing = item?.listing || {};
+  const state = (listing.marketplaces || {})[key];
+  if (key === "ebay") {
+    if (state && state.status) return state.status === "published";
+    // A record from before the per-marketplace map: an eBay item id plus a
+    // live status is "on eBay", the way every eBay surface reads it.
+    return !!listing.ebay_listing_id && LIVE_STATUSES.includes(item?.status);
+  }
+  return !!state && (state.status === "published" || state.status === "draft");
+}
+
+export function inMarketFilter(filter, item) {
+  switch (filter) {
+    case "ebay": return onMarket(item, "ebay");
+    case "etsy": return onMarket(item, "etsy");
+    case "ebay-only": return onMarket(item, "ebay") && !onMarket(item, "etsy");
+    default: return true;
+  }
+}
