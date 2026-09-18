@@ -66,6 +66,22 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
     return data
 
 
+def carry_live_others(states: dict) -> dict:
+    """The per-marketplace entries a RELIST inherits: every marketplace but
+    eBay where the listing is still live.
+
+    A relist makes a new draft from a sold record; the eBay entry belongs to
+    the sale and is cleared with it. An Etsy entry that is still `published`
+    is a different thing — the item's live listing on another marketplace,
+    which nothing else will ever reach again if the new draft does not
+    carry it: the next Etsy publish would mint a twin, and end-listing
+    would answer "this listing isn't on Etsy". Ended and draft entries are
+    the sale's history and stay with it.
+    """
+    return {key: dict(entry or {}) for key, entry in (states or {}).items()
+            if key != "ebay" and (entry or {}).get("status") == "published"}
+
+
 def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, str]:
     """The server-owned publish state a client round-trip must not overwrite.
 

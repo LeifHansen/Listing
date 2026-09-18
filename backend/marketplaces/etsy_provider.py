@@ -120,17 +120,55 @@ class EtsyProvider:
             "settings": settings,
         }
 
+    @staticmethod
+    def _shop_id_of(acct: Optional[dict]) -> str:
+        settings = (acct or {}).get("settings") or {}
+        return str(settings.get("shop_id") or (acct or {}).get("external_id") or "")
+
     def account_status(self, uid: Optional[str]) -> dict:
         acct = db.get_marketplace_account(uid, "etsy") if uid else None
         connected = bool(acct and acct.get("refresh_token"))
+        shop_id = self._shop_id_of(acct) if connected else ""
         return {
             "oauth_ready": self.oauth_ready(),
             "oauth_missing": self.oauth_missing(),
             "connected": connected,
+            # A token with no shop behind it: the connect's shop lookup
+            # failed and nothing has managed it since. creds_for tries again
+            # on every use; until one lands, Settings says "reconnect" rather
+            # than "connected" over a card that can't publish.
+            "needs_reconnect": connected and not shop_id,
             "env": "production",   # Etsy has no sandbox
             "username": (acct.get("external_username") or "") if connected else "",
-            "shop_id": (acct.get("external_id") or "") if connected else "",
+            "shop_id": shop_id,
         }
+
+    def _heal_shop_id(self, uid: str, access: str) -> str:
+        """Fetch and store the shop behind a connection that has none.
+
+        exchange_code looks the shop up best-effort, and a lookup that failed
+        there used to leave the account "connected" for good with nothing
+        able to use it — Settings said connected, every publish said connect
+        Etsy first. The same two calls, made again the next time the
+        connection is used, are the way out; the answer is stored so it
+        happens once."""
+        try:
+            me = etsy_auth.fetch_me(access)
+            shop_id = str(me.get("shop_id") or "")
+            if not shop_id:
+                return ""
+            shop = etsy_auth.fetch_shop(access, shop_id)
+        except Exception as exc:  # noqa: BLE001 - reported on the status
+            log.warning("etsy: shop lookup still failing for user %s: %s", uid, exc)
+            return ""
+        settings = {"shop_id": shop_id}
+        currency = str(shop.get("currency_code") or "").upper()
+        if currency:
+            settings["currency_code"] = currency
+        db.save_marketplace_account(
+            uid, "etsy", external_id=shop_id,
+            external_username=str(shop.get("shop_name") or ""), settings=settings)
+        return shop_id
 
     def creds_for(self, uid: Optional[str]) -> Optional[dict]:
         if not uid:
@@ -176,17 +214,22 @@ class EtsyProvider:
                     access = fresh["access_token"]
                     _ACCESS_CACHE[uid] = (
                         max(time.time() + 60, fresh["expires_at"] - 90), access)
-        settings = acct.get("settings") or {}
-        shop_id = str(settings.get("shop_id") or acct.get("external_id") or "")
+        settings = dict(acct.get("settings") or {})
+        shop_id = self._shop_id_of(acct)
         if not shop_id:
-            log.warning(f"etsy: user {uid} connected but no shop id on file")
-            return None
+            shop_id = self._heal_shop_id(uid, access)
+            if not shop_id:
+                log.warning(f"etsy: user {uid} connected but no shop id on file")
+                return None
+            settings["shop_id"] = shop_id
         return {"access_token": access, "shop_id": shop_id,
                 "settings": settings, "_uid": uid}
 
     def disconnect(self, uid: str) -> None:
         db.disconnect_marketplace_account(uid, "etsy")
         _ACCESS_CACHE.pop(uid, None)
+        with _LOCKS_GUARD:
+            _REFRESH_LOCKS.pop(uid, None)
 
     def forget_cached_creds(self, uid: str) -> None:
         """Reconnect invalidates the cache: the entry is keyed by user id, so

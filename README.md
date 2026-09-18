@@ -867,7 +867,8 @@ is *no verdict*, not "medium".
 | `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
 | `GET`  | `/api/{marketplace}/connect` · `/callback` | OAuth connect flow (eBay, Etsy, Depop) |
 | `POST` | `/api/{marketplace}/end-listing` | End one marketplace's live listing |
-| `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
+| `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy / processing-profile defaults (ids only; anything else is a 400) |
+| `POST` | `/api/etsy/suggest-taxonomy/{session_id}` | Best Etsy category for a listing (login required, per-user ceiling) |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
@@ -968,13 +969,28 @@ one failing never rolls back the others — and per-marketplace state
   discount to the buyers watching a listing; the asking price never moves).
   Negotiation runs on the `sell.inventory` scope the app already asks for, so
   no seller reconnects for it.
-- **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
-  `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
-  then activated on a live publish. Etsy requires a category (AI Suggest
-  built in), who-made/when-made attribution, and a shipping profile
-  (defaults per account under Settings). Note: Etsy allows only handmade,
-  vintage (20+ years), and craft supplies, and rotates refresh tokens —
-  both are handled. First connect stopping on Etsy's own page with *"Only
+- **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID`,
+  `ETSY_SHARED_SECRET` and `ETSY_REDIRECT_URI` — since 2026-02-09 every
+  request's `x-api-key` must read `keystring:sharedSecret`, and the app
+  names the missing one on the Settings card). Listings are created as
+  Etsy drafts, photos uploaded, then activated on a live publish. Etsy
+  requires a category (AI Suggest built in), who-made/when-made
+  attribution, and — on every physical listing — a shipping profile, a
+  return policy and a **processing profile** (Etsy's `readiness_state_id`,
+  mandatory since mid-2025); all three have account defaults under
+  Settings and per-listing overrides on the Etsy card, and the preflight
+  names whichever is missing, for drafts and revises as well as live
+  publishes. A revise sends **price and stock through the inventory
+  record** (`updateListing` has no such fields) and re-sends the photo set
+  when it has changed (a digest of the last upload rides on the listing's
+  Etsy entry as `photo_sig`); titles are tidied to Etsy's character rules
+  (`$ ^ \`` refused, a cap on words in capitals) with the tidied form shown
+  as a warning. What a revise does NOT yet do is merge: it sends the whole
+  payload, so an edit made on etsy.com is replaced by this app's copy — the
+  editor says so. Note: Etsy allows only handmade, vintage (20+ years),
+  and craft supplies (an item someone else made recently is flagged as
+  Etsy's production-partner case), and rotates refresh tokens — both are
+  handled. First connect stopping on Etsy's own page with *"Only
   the app owner may authorize a seller app"* is app **type**, not config: a
   Seller app is authorizable by the one Etsy account that registered the
   keystring and nobody else. Opening it up is three tiers, not two, and

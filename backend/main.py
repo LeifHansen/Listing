@@ -10176,7 +10176,8 @@ def relist_listing(listing_id: str, request: Request) -> dict:
 
     data = dict(rec.get("listing") or {})
     data.update(_SALE_ONLY_FIELDS)
-    data["marketplaces"] = {}
+    data["marketplaces"] = marketplace_state.carry_live_others(
+        data.get("marketplaces") or {})
     # The AI's confidence in the ORIGINAL draft, from before the seller
     # reviewed it, published it and sold it. Carried over, "AI: low" would sit
     # on the new draft's card as a verdict on copy that has already sold once.
@@ -11796,6 +11797,7 @@ def marketplace_roster(request: Request) -> dict:
             "access_pending": pending,
             "access_pending_note": pending_note,
             "connected": bool(status.get("connected")),
+            "needs_reconnect": bool(status.get("needs_reconnect")),
             "username": status.get("username", ""),
             "env": status.get("env", "production"),
             "supports": p.supports(),
@@ -11883,6 +11885,15 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
     # does not do Etsy — and neither of them is news about their listing.
     if marketplaces.get("etsy") is None or not config.etsy_oauth_ready():
         raise HTTPException(400, "Etsy isn't configured on the server.")
+    # A login, and a ceiling per login: this is a Claude call, and it used to
+    # be the one AI route anyone could press without signing in.
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to get an Etsy category suggestion.")
+    if not ratelimit.check(f"etsy-taxonomy:{uid}",
+                           max_attempts=ratelimit.ETSY_SUGGEST_MAX_CALLS):
+        raise HTTPException(
+            429, "Too many category lookups at once. Wait a moment and try again.")
     _assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
     try:

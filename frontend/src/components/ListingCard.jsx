@@ -42,12 +42,18 @@ function MarketplaceChips({ listing }) {
     .filter(([key, st]) => key !== "ebay" && st && (st.status || st.error));
   if (!others.length) return null;
   const label = (key) => key.charAt(0).toUpperCase() + key.slice(1);
+  // The one thing a seller cannot see from the pill: a revise from here
+  // replaces the whole Etsy copy, so an edit made on etsy.com does not
+  // survive the next "Update". Said on the pill until the revise merges.
+  const note = (key, st) => (key === "etsy" && st.status === "published" && !st.error
+    ? " — updates from here replace the Etsy copy"
+    : "");
   return (
     <>
       {others.map(([key, st]) => (
         <span
           key={key}
-          title={st.error ? `${label(key)}: ${st.error}` : `${label(key)}: ${st.status}`}
+          title={st.error ? `${label(key)}: ${st.error}` : `${label(key)}: ${st.status}${note(key, st)}`}
           className={cn(
             "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold",
             st.error

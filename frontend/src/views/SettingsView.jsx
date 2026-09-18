@@ -894,7 +894,12 @@ function MarketplaceConnections() {
                     </TagPill>
                   )}
                 </p>
-                {m.connected ? (
+                {m.connected && m.needs_reconnect ? (
+                  <p className="text-sm text-ink-secondary">
+                    Connected, but {m.label} didn’t tell us which shop — reconnect
+                    to finish linking it.
+                  </p>
+                ) : m.connected ? (
                   <p className="text-sm text-ink-secondary">
                     Connected{m.username ? (
                       <> as <strong className="text-ink">{m.username}</strong></>
@@ -920,7 +925,15 @@ function MarketplaceConnections() {
                   </p>
                 )}
               </div>
-              {m.connected ? (
+              {m.connected && m.needs_reconnect && m.oauth_ready ? (
+                <Button
+                  variant="primary"
+                  onClick={() => startConnect(`/api/${m.key}/connect`).catch((e) =>
+                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
+                >
+                  <Link2 aria-hidden /> Reconnect {m.label}
+                </Button>
+              ) : m.connected ? (
                 <Button variant="danger" onClick={() => disconnect(m)}>
                   <Unlink aria-hidden /> Disconnect
                 </Button>

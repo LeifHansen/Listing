@@ -1977,7 +1977,9 @@ export function EtsyCard({ w }) {
   return (
     <WorkflowCard
       id="etsy" icon={Store} title="Etsy"
-      hint="What Etsy needs beyond the shared fields — category, who/when made, shipping profile"
+      hint={(w.form.marketplaces || {}).etsy?.listing_id
+        ? "Updating replaces the whole Etsy copy — an edit made on etsy.com is overwritten by what's here"
+        : "What Etsy needs beyond the shared fields — category, who/when made, shipping, returns, processing time"}
       state={complete ? "complete" : "todo"} flagged={flagged}
     >
       <div className="flex flex-col gap-5">

@@ -11,6 +11,7 @@ update_listing_inventory) is the one write that takes JSON.
 """
 from __future__ import annotations
 
+import mimetypes
 import threading
 import time
 from typing import Optional
@@ -80,6 +81,21 @@ class EtsyError(ValueError):
         self.issues = issues
 
 
+class RateLimited(EtsyError):
+    """Etsy answered 429: nothing was done, and asking again right now only
+    spends more of the allowance. Not a rejection — the listing is fine —
+    and not unknown either: a 429 is Etsy saying it did not act.
+
+    `retry_after` is Etsy's own number when it sent one (seconds), else a
+    guess small enough to wait through; the bulk paths back off by it."""
+
+    outcome_unknown = False
+
+    def __init__(self, message: str, issues: list[dict], retry_after: float):
+        super().__init__(message, issues)
+        self.retry_after = retry_after
+
+
 class UnknownOutcome(EtsyError):
     """The request went out and we never learned what Etsy did with it.
 
@@ -121,10 +137,35 @@ def _unknown(doing: str) -> "UnknownOutcome":
     return UnknownOutcome(_UNKNOWN_ISSUE["fix"], [dict(_UNKNOWN_ISSUE)])
 
 
+# A 429 with a Retry-After this short is waited through once, inside _send,
+# before anyone hears about it; longer waits are the caller's decision.
+RETRY_AFTER_WAIT_MAX = 10.0
+RETRY_AFTER_DEFAULT = 5.0
+
+
+def _retry_after(resp: httpx.Response) -> float:
+    try:
+        value = float(str(resp.headers.get("Retry-After") or "").strip())
+    except (ValueError, AttributeError):
+        return RETRY_AFTER_DEFAULT
+    return value if value > 0 else RETRY_AFTER_DEFAULT
+
+
 def _raise_for_status(resp: httpx.Response, doing: str,
                       changes: bool = True) -> None:
     if resp.status_code < 400:
         return
+    if resp.status_code == 429:
+        wait = _retry_after(resp)
+        log.warning("etsy: rate limited while %s (retry after %ss)", doing, wait)
+        raise RateLimited(
+            f"Etsy asked us to slow down while {doing}.",
+            [{"target": "generic", "level": "error",
+              "title": "Etsy asked us to slow down",
+              "fix": f"Nothing was changed. Wait about {wait:.0f} seconds "
+                     "and try again — Etsy limits how fast an app may talk "
+                     "to it."}],
+            retry_after=wait)
     if changes and resp.status_code >= 500:
         # Something that already had the request in hand failed to answer for
         # it. Not a rejection.
@@ -155,16 +196,27 @@ def _send(doing: str, changes: bool, call, *args, **kwargs) -> httpx.Response:
     """Run one Etsy request, classifying a failure to get an answer.
 
     A write with no answer is an UNKNOWN OUTCOME; a read with no answer is an
-    ordinary failure, because nothing on Etsy moved.
+    ordinary failure, because nothing on Etsy moved. A 429 whose Retry-After
+    is short is waited through once, here, because a 429 is the one refusal
+    that is nobody's mistake and cures itself.
     """
-    try:
-        return call(*args, **kwargs)
-    except _NEVER_SENT as exc:
-        raise _unreachable(doing, exc) from exc
-    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
-        if changes:
-            raise _unknown(doing) from exc
-        raise _unreachable(doing, exc) from exc
+    for attempt in (1, 2):
+        try:
+            resp = call(*args, **kwargs)
+        except _NEVER_SENT as exc:
+            raise _unreachable(doing, exc) from exc
+        except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+            if changes:
+                raise _unknown(doing) from exc
+            raise _unreachable(doing, exc) from exc
+        if resp.status_code == 429 and attempt == 1:
+            wait = _retry_after(resp)
+            if wait <= RETRY_AFTER_WAIT_MAX:
+                log.info("etsy: rate limited while %s — waiting %ss once", doing, wait)
+                time.sleep(wait)
+                continue
+        return resp
+    return resp  # pragma: no cover - the loop always returns
 
 
 def create_draft_listing(access_token: str, shop_id: str, payload: dict) -> dict:
@@ -269,7 +321,8 @@ def upload_listing_image(access_token: str, shop_id: str, listing_id: str,
         doing, True, httpx.post,
         f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}/images",
         headers=_headers(access_token),
-        files={"image": (filename, image_bytes, "image/jpeg")},
+        files={"image": (filename, image_bytes,
+                         mimetypes.guess_type(filename)[0] or "image/jpeg")},
         data={"rank": str(rank)},
         timeout=120)
     _raise_for_status(resp, doing)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import unicodedata
 from typing import Optional
 
 from ..models import Listing
@@ -35,6 +36,52 @@ WHEN_MADE = (
 
 _TAG_ALLOWED = re.compile(r"[^A-Za-z0-9' \-]+")
 _HTML_TAG = re.compile(r"<[^>]+>")
+
+# Etsy's title rules, the ones an eBay title breaks most: three characters
+# it refuses outright, four it allows once, a first character that must be
+# a letter or a digit, and a ceiling on words in capitals — which is how
+# eBay titles are written ("NIKE AIR MAX 90 VTG"). The ceiling is Etsy's
+# and unverifiable offline (there is no sandbox); the payload tidies to it
+# and the preflight shows the seller what Etsy will get.
+_TITLE_BANNED = re.compile(r"[$^`]")
+_TITLE_ONCE = "%:&+"
+ALL_CAPS_WORD_LIMIT = 3
+_WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+
+def _sentence_case(word: str) -> str:
+    """LEVI'S -> Levi's, NIKE-AIR -> Nike-Air: each run of letters keeps its
+    first capital and loses the rest, apostrophes staying inside the word."""
+    return _WORD.sub(lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(), word)
+
+
+def clean_title(title: str) -> str:
+    """The title as Etsy will accept it, or "" when nothing usable is left.
+
+    Idempotent: a title that is already clean comes back unchanged, so the
+    editor can show the tidied form and the seller can adopt it as-is.
+    """
+    text = _TITLE_BANNED.sub("", title or "")
+    seen: set[str] = set()
+    kept = []
+    for ch in text:
+        if ch in _TITLE_ONCE:
+            if ch in seen:
+                continue
+            seen.add(ch)
+        kept.append(ch)
+    text = re.sub(r"\s+", " ", "".join(kept)).strip()
+    while text and not text[0].isalnum():
+        text = text[1:].lstrip()
+    words = text.split(" ")
+    capitals = 0
+    for i, word in enumerate(words):
+        letters = [c for c in word if c.isalpha()]
+        if len(letters) >= 2 and all(c.isupper() for c in letters):
+            capitals += 1
+            if capitals > ALL_CAPS_WORD_LIMIT:
+                words[i] = _sentence_case(word)
+    return " ".join(words)[:TITLE_LIMIT].rstrip()
 
 # Etsy's own line: an item is vintage once it is at least this old, and only
 # vintage items, handmade items and craft supplies may be listed at all.
@@ -104,7 +151,11 @@ def strip_html(text: str) -> str:
 
 
 def _clean_tag(value: str) -> str:
-    tag = _TAG_ALLOWED.sub("", (value or "").strip())
+    # Accents come off rather than the letter they sit on: "Café" used to
+    # reach Etsy as "Caf". Etsy takes accented tags, but the ASCII form is
+    # what buyers type into the search box.
+    plain = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode()
+    tag = _TAG_ALLOWED.sub("", plain.strip())
     tag = re.sub(r"\s+", " ", tag).strip()
     return tag if len(tag) <= TAG_CHAR_LIMIT else ""
 
@@ -183,7 +234,7 @@ def build_listing_payload(listing: Listing, settings: dict) -> dict:
     e = listing.etsy
     payload = {
         "quantity": max(int(listing.quantity or 1), 1),
-        "title": (listing.title or "").strip()[:TITLE_LIMIT],
+        "title": clean_title(listing.title),
         "description": _description(listing),
         "price": round(float(listing.price or 0), 2),
         "who_made": e.who_made,
@@ -302,8 +353,19 @@ def preflight(listing: Listing, settings: dict, mode: str = "live") -> list[dict
         add("photos", "At least one photo is required",
             "Add a photo — Etsy requires at least one image on every listing.",
             level="error" if strict else "warn")
-    if not (listing.title or "").strip():
+    title = (listing.title or "").strip()
+    tidy = clean_title(title)
+    if not title:
         add("title", "Title is missing", "Give the listing a title.")
+    elif not tidy:
+        add("title", "Etsy can't use this title",
+            "An Etsy title has to start with a letter or a number and can't "
+            "be made of only $, ^ or ` — rewrite it.")
+    elif tidy != title:
+        add("title", "The title will be tidied for Etsy",
+            f"Etsy refuses $ ^ ` and more than {ALL_CAPS_WORD_LIMIT} words in "
+            f"capitals, so Etsy will get: “{tidy}”. Edit the title if you'd "
+            "rather word it yourself.", level="warn")
     if not strip_html(listing.description):
         add("description", "Description is missing",
             "Write a description — Etsy requires one.")
