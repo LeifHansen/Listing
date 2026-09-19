@@ -83,10 +83,16 @@ def own_media_ref(url: str) -> Optional[tuple[str, str]]:
     return session_id, name
 
 
-def _read_own_media(session_id: str, name: str) -> bytes:
-    """The bytes behind one of this app's own /media URLs: the file on the
-    volume, or the R2 object the offload sweep moved it to. Raises ValueError
-    when neither holds it -- the same contract as fetch_ebay_image."""
+def read_own_media(session_id: str, name: str) -> bytes:
+    """The bytes behind one of this app's own photos: the file on the volume,
+    or the R2 object the offload sweep moved it to. Raises ValueError when
+    neither holds it -- the same contract as fetch_ebay_image.
+
+    Public because the Etsy publish reads photos as BYTES (Etsy uploads,
+    where eBay fetches a URL), and it used to read the volume alone: once
+    the reclaim pass had freed a listing's local copies the publish found
+    nothing, uploaded nothing, and the activate call was then refused for
+    the listing having no image."""
     path = storage.optimized_path(session_id) / name  # validates the id
     if path.is_file():
         return path.read_bytes()
@@ -97,6 +103,11 @@ def _read_own_media(session_id: str, name: str) -> bytes:
             raise ValueError(f"own photo {session_id}/{name} not in object "
                              f"storage: {type(exc).__name__}") from exc
     raise ValueError(f"own photo {session_id}/{name} is no longer on the server")
+
+
+# The name the adoption path has always used; kept so nothing that reads it
+# by the old name (tests included) has to move on the same day.
+_read_own_media = read_own_media
 
 
 def fetch_ebay_image(url: str) -> bytes:

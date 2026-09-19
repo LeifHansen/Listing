@@ -124,3 +124,17 @@ def test_owned_state_on_a_brand_new_listing():
     states, ebay_id = owned_state_from({}, "")
     assert states == {}
     assert ebay_id == ""
+
+
+def test_provider_extras_land_on_the_entry_only_when_it_succeeded():
+    """What a provider asks to have remembered (Etsy's photo digest) rides
+    a successful outcome onto the entry; a refusal must not record a state
+    that was never reached."""
+    data = {}
+    merge_state(data, "etsy", PublishOutcome(ok=True, listing_id="7", status="published",
+                                             state={"photo_sig": "abc"}))
+    assert data["marketplaces"]["etsy"]["photo_sig"] == "abc"
+    merge_state(data, "etsy", PublishOutcome(ok=False, message="no",
+                                             state={"photo_sig": "def"}))
+    assert data["marketplaces"]["etsy"]["photo_sig"] == "abc"
+    assert data["marketplaces"]["etsy"]["error"] == "no"

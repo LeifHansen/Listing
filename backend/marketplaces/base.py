@@ -43,6 +43,12 @@ class PublishOutcome:
     orchestrator can return it verbatim — old clients (BulkMode, the iOS
     wrapper) keep seeing byte-identical responses.
 
+    `state` is what the provider wants remembered on the listing's entry for
+    its marketplace beyond the lifecycle fields — bookkeeping only it reads
+    back, such as Etsy's signature of the photo set it last uploaded. Folded
+    in by state.merge_state on a successful attempt and ignored on a failed
+    one, so a refusal cannot record a state that was never reached.
+
     `outcome_unknown` separates the two ways ok=False happens, and they need
     different words: the marketplace REFUSED this listing (a field to fix,
     the seller's move), or the request reached the marketplace and the answer
@@ -63,6 +69,7 @@ class PublishOutcome:
     issues: list = field(default_factory=list)   # {target, level, title, fix} dicts
     raw: dict = field(default_factory=dict)
     outcome_unknown: bool = False
+    state: dict = field(default_factory=dict)
 
 
 @runtime_checkable

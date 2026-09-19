@@ -26,7 +26,8 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
 
     Mutates and returns `data`. Rules:
     - dry-runs record nothing (no remote state was created);
-    - a successful attempt updates status/listing_id/url and clears error;
+    - a successful attempt updates status/listing_id/url, folds in whatever
+      the provider asked to have remembered (outcome.state) and clears error;
     - a failed attempt records the error but never rewrites lifecycle state
       (a blocked revise doesn't un-publish a live listing);
     - eBay's id is mirrored to the legacy top-level `ebay_listing_id` in both
@@ -45,6 +46,8 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
             entry["listing_id"] = str(outcome.listing_id)
         if outcome.url:
             entry["url"] = outcome.url
+        for name, value in (outcome.state or {}).items():
+            entry[name] = value
         entry["error"] = ""
     else:
         entry["error"] = outcome.message or "Publish failed."
@@ -61,6 +64,22 @@ def merge_state(data: dict, key: str, outcome: PublishOutcome,
             entry["listing_id"] = str(data["ebay_listing_id"])
     states[key] = entry
     return data
+
+
+def carry_live_others(states: dict) -> dict:
+    """The per-marketplace entries a RELIST inherits: every marketplace but
+    eBay where the listing is still live.
+
+    A relist makes a new draft from a sold record; the eBay entry belongs to
+    the sale and is cleared with it. An Etsy entry that is still `published`
+    is a different thing — the item's live listing on another marketplace,
+    which nothing else will ever reach again if the new draft does not
+    carry it: the next Etsy publish would mint a twin, and end-listing
+    would answer "this listing isn't on Etsy". Ended and draft entries are
+    the sale's history and stay with it.
+    """
+    return {key: dict(entry or {}) for key, entry in (states or {}).items()
+            if key != "ebay" and (entry or {}).get("status") == "published"}
 
 
 def owned_state_from(stored: dict, incoming_ebay_id: str = "") -> tuple[dict, str]:

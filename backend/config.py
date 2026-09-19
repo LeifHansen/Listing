@@ -272,6 +272,35 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-opus-4-8").strip()
 CONTENT_MODEL = os.getenv("CONTENT_MODEL", "claude-opus-4-8").strip()
 
+# --- Google / Gemini -------------------------------------------------------
+# The other vision backend the identifier can run on. The photos go to Gemini
+# exactly as they go to Claude; what Gemini adds is GROUNDING — the pricing
+# lookup runs against live Google Search results instead of the model's
+# memory, which is the half a photo can never supply. Aliased generously
+# because Google's own docs and console hand out the same secret under three
+# different names.
+GOOGLE_API_KEY = _env("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY")
+# A ROLLING ALIAS by default, not a pinned version. Google retires Gemini
+# model ids on its own schedule, and a pinned default is a name that is right
+# on the day it is written and a 404 on every draft some months later. The
+# alias follows the current build; services/google_ai falls back to whatever
+# the key can actually call if even this stops resolving. Pin a specific id
+# here when a deployment wants one and will keep it current.
+GOOGLE_VISION_MODEL = os.getenv("GOOGLE_VISION_MODEL", "gemini-pro-latest").strip()
+# Gemini 2.5 thinks before it answers, and the thinking is billed out of the
+# output budget. -1 leaves it to the model (its own dynamic budget); 0 turns
+# it off where the model allows that; a positive number caps it in tokens.
+GOOGLE_THINKING_BUDGET = os.getenv("GOOGLE_THINKING_BUDGET", "-1").strip()
+
+# Which backend drafts a listing and prices it. "auto" (the default) reads as
+# Google when a Google key is set and Anthropic otherwise: a deployment that
+# adds the key switches over without a second setting, and one that never
+# adds it is untouched. "google" / "anthropic" pin it either way — a pin to a
+# backend with no key still falls back rather than taking the app down, and
+# says so in config_warnings().
+IDENTIFY_PROVIDER = (
+    os.getenv("IDENTIFY_PROVIDER", "auto").strip().lower() or "auto")
+
 # --- Monetization: AI tokens + Stripe --------------------------------------
 # The app is free; AI features spend tokens. Every account gets
 # FREE_TOKENS_PER_MONTH each calendar month (UTC, no rollover); when they run
@@ -574,6 +603,36 @@ def anthropic_ready() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
 
+def google_ai_ready() -> bool:
+    """Enough config to send photos to Gemini."""
+    return bool(GOOGLE_API_KEY)
+
+
+def identify_provider() -> str:
+    """Which backend identify() and the pricing lookup actually run on.
+
+    Never returns a backend that has no key: a pin to one that is not
+    configured falls back to the one that is, because a seller pressing
+    Identify should get a draft, not a 400 about a setting they cannot see.
+    """
+    if IDENTIFY_PROVIDER == "anthropic" and anthropic_ready():
+        return "anthropic"
+    if google_ai_ready():
+        return "google"
+    return "anthropic"
+
+
+def vision_ready() -> bool:
+    """Enough config for SOME vision backend to draft a listing.
+
+    The gate on every route that identifies photos. `anthropic_ready()` is
+    still the gate on the passes that are Claude's alone (refine, the aspect
+    fills, the art lookup) — those have no Gemini implementation to fall
+    back to.
+    """
+    return anthropic_ready() or google_ai_ready()
+
+
 def ebay_status() -> dict:
     """Detailed breakdown of eBay readiness, for surfacing what's missing."""
     has_token = bool(EBAY_OAUTH_TOKEN) or bool(
@@ -601,10 +660,16 @@ def taxonomy_ready() -> bool:
 
 
 # --- Etsy ------------------------------------------------------------------
-# Etsy Open API v3. OAuth 2.0 authorization-code with PKCE — no client secret
-# is ever used, so the only credentials are the app "keystring" and the exact
-# redirect URI registered on the Etsy app (https://<host>/api/etsy/callback).
+# Etsy Open API v3. OAuth 2.0 authorization-code with PKCE, so the consent
+# handshake itself carries no secret — but every request to Etsy, the token
+# exchange included, identifies the APP through the `x-api-key` header, and
+# since 2026-02-09 Etsy rejects that header unless it carries the app's shared
+# secret beside the keystring (`keystring:secret`; etsy/open-api discussion
+# #1529). Both live on the app's page at etsy.com/developers/your-apps. The
+# third credential is the exact redirect URI registered on the Etsy app
+# (https://<host>/api/etsy/callback).
 ETSY_CLIENT_ID = _env("ETSY_CLIENT_ID", "ETSY_KEYSTRING")
+ETSY_SHARED_SECRET = _env("ETSY_SHARED_SECRET")
 ETSY_REDIRECT_URI = os.getenv("ETSY_REDIRECT_URI", "").strip()
 ETSY_SCOPES = "listings_r listings_w listings_d shops_r shops_w"
 ETSY_API_BASE = "https://api.etsy.com/v3"
@@ -613,8 +678,27 @@ ETSY_TOKEN_URL = "https://api.etsy.com/v3/public/oauth/token"
 
 
 def etsy_oauth_ready() -> bool:
-    """Enough config to run the 'Sign in with Etsy' flow."""
-    return bool(ETSY_CLIENT_ID and ETSY_REDIRECT_URI)
+    """Enough config to run the 'Sign in with Etsy' flow.
+
+    The shared secret is part of "enough": without it the consent screen
+    still renders (Etsy checks the keystring and redirect URI there), and the
+    token exchange that follows is refused — a Connect button that ends on
+    an error page after the seller has said yes. Better to keep the card in
+    its "not set up on the server" state, naming the missing variable.
+    """
+    return bool(ETSY_CLIENT_ID and ETSY_SHARED_SECRET and ETSY_REDIRECT_URI)
+
+
+def etsy_api_key() -> str:
+    """The `x-api-key` header value: `keystring:secret` since 2026-02-09.
+
+    Falls back to the bare keystring only when no secret is configured,
+    which etsy_oauth_ready() already refuses to offer to sellers — so the
+    fallback serves a developer's dry run, never a live shop.
+    """
+    if ETSY_CLIENT_ID and ETSY_SHARED_SECRET:
+        return f"{ETSY_CLIENT_ID}:{ETSY_SHARED_SECRET}"
+    return ETSY_CLIENT_ID
 
 
 # Etsy app TYPE, which is a separate gate from the credentials above and the
@@ -848,6 +932,7 @@ def _marketplace_warnings() -> list[str]:
 def _watched_names() -> list[tuple[str, str]]:
     return [
         ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        ("GOOGLE_API_KEY", GOOGLE_API_KEY),
         ("DATABASE_URL", DATABASE_URL),
         ("SECRET_KEY", SECRET_KEY),
         ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
@@ -860,6 +945,7 @@ def _watched_names() -> list[tuple[str, str]]:
         ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),
         ("R2_SECRET_ACCESS_KEY", R2_SECRET_ACCESS_KEY),
         ("ETSY_REDIRECT_URI", ETSY_REDIRECT_URI),
+        ("ETSY_SHARED_SECRET", ETSY_SHARED_SECRET),
     ]
 
 
@@ -878,11 +964,39 @@ def config_warnings() -> list[str]:
                 warnings.append(
                     f"{other} is set but this app reads {name} — rename the "
                     f"secret (or add {name}) or the feature stays off.")
+    # A pinned identifier backend with no key. It fails OPEN (the other
+    # backend drafts the listing), so nothing breaks and nothing says so —
+    # the operator believes every draft is coming from Gemini while every
+    # draft is still coming from Claude.
+    if IDENTIFY_PROVIDER == "google" and not GOOGLE_API_KEY:
+        warnings.append(
+            "IDENTIFY_PROVIDER=google but GOOGLE_API_KEY is not set, so "
+            "listings are still drafted by Claude — set the key or the pin "
+            "does nothing.")
+    elif IDENTIFY_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+        warnings.append(
+            "IDENTIFY_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set, "
+            "so listings are drafted by whatever backend is configured.")
+    elif IDENTIFY_PROVIDER not in ("auto", "google", "anthropic"):
+        warnings.append(
+            f"IDENTIFY_PROVIDER={IDENTIFY_PROVIDER!r} is not one of "
+            f"auto/google/anthropic — it is being read as 'auto'.")
     stray = _flag_set_but_false("TOKENS_ENABLED")
     if stray:
         warnings.append(
             f"TOKENS_ENABLED={stray!r} is not one of 1/true/yes/on, so token "
             f"billing is OFF — which reads the same as never setting it.")
+    # A keystring without its shared secret is the newest way Etsy looks
+    # unconfigured: the credentials that worked before 2026-02-09 now fail
+    # every request, and nothing in the OAuth dance says so until the token
+    # exchange. Named here because the operator who set two Etsy variables
+    # will not think to look for a third.
+    if ETSY_CLIENT_ID and not ETSY_SHARED_SECRET:
+        warnings.append(
+            "ETSY_CLIENT_ID is set but ETSY_SHARED_SECRET is not — since "
+            "2026-02-09 Etsy rejects every request whose x-api-key carries "
+            "the keystring alone, so Etsy stays off until the shared secret "
+            "(from the app's page at etsy.com/developers/your-apps) is set.")
     # Same trap, and it fails closed: an unparsed value reads as "Commercial
     # Access not granted", so the operator thinks they opened Etsy to every
     # seller while the app is still quietly showing them a pending-review card.

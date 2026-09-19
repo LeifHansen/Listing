@@ -7,7 +7,7 @@ Etsy, and Depop, individually or all at once.
 
 Upload one or more images → the app **optimizes** them for eBay, **asks you
 what each item is** (one optional box per item, with its photos on screen),
-uses Claude's vision **"lens"** to identify the item, **generates** a full
+uses a vision **"lens"** to identify the item, **generates** a full
 listing (title, description, item specifics, suggested price/category), shows
 an **editable preview** where you can tweak fields manually or with a prompt,
 then **publishes** it live on eBay (and Etsy / Depop) through the seller's own
@@ -20,14 +20,15 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 ```
  Upload images ──▶ Optimize (Pillow) ──▶ [Group into items (bulk)] ──▶
- Ask the seller (one box per item) ──▶ Identify (Claude vision) ──▶
+ Ask the seller (one box per item) ──▶ Identify (Gemini or Claude vision) ──▶
  Editable preview (manual edits + prompt refine) ──▶ Publish (eBay / Etsy / Depop, or dry-run)
 ```
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
 | Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
-| Identify | Photos sent to Claude vision — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
+| Identify | Photos sent to a vision model — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Google Gemini API (`GOOGLE_API_KEY`) or Anthropic API |
+| Price | The draft's price is the one thing the photos cannot answer, so a second pass looks it up. On the Google backend it runs with **Google Search grounding**: the model searches for what comparable items actually sold for and answers with the pages it read, and those URLs — the ones the API vouches for, not the ones the model typed — are what the finding is cited with. Never lowers a price and never demotes an item; it may raise a price to the bottom of the researched range, name a hedged item, and flag the more valuable variant the photos cannot rule out | Google Search grounding, or Claude's web search |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
@@ -53,6 +54,28 @@ cp .env.example .env
 
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
+
+### Identifying on Google instead
+
+Set `GOOGLE_API_KEY` ([AI Studio](https://aistudio.google.com/apikey)) and two
+passes move to Gemini: identifying the item, and pricing it. The key is the
+whole switch — there is no second setting to remember, `/api/health` reports
+which backend answered as `identify_provider`, and everything else in the app
+(refine, the item-specifics fills, the art lookup) still runs on Claude.
+
+Pricing is the pass that earns the move. Asking a model what a jacket is
+worth gets you the model's memory of jacket prices; on the Google backend the
+lookup runs with **Google Search grounding**, so it searches before it answers
+and hands back the pages it used. A price with a source attached is a
+different object from a price.
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `GOOGLE_API_KEY` | — | The switch. Also read as `GEMINI_API_KEY` / `GOOGLE_AI_API_KEY` |
+| `GOOGLE_VISION_MODEL` | `gemini-pro-latest` | Which Gemini looks at the photos. A rolling alias by default — Google retires model ids, and a pinned default eventually 404s every draft. If the configured model does not exist, the app lists what the key can call, picks the newest of the same tier, and logs the swap |
+| `IDENTIFY_PROVIDER` | `auto` | `auto` reads as google when a Google key is set. Pin to `google` / `anthropic` to force one; a pin to a backend with no key falls back rather than taking identification down, and says so in the config warnings |
+| `GOOGLE_THINKING_BUDGET` | `-1` | How hard the model may think, if you want to pin it. Takes a number (a 2.5-style token budget) or a word (a 3.x-style `low`/`high` level); `-1` sends neither, which is right on every model |
+| `RESEARCH_PASS` | follows the backend | The grounded pricing lookup: `auto` on Google, `off` on Claude. Claude's version is a server-tool loop that searches sequentially inside the identify request and adds a minute or more per item — Gemini's is one call that searches server-side, which is what makes running it by default affordable. Pin it to `off` / `auto` / `always` either way |
 
 ## Reading production errors
 
@@ -930,7 +953,7 @@ title".
 | `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
 | `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id`. `notes=` carries the seller's comma-separated hints, saved with the session so every later re-draft still has them |
-| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; used by Shop Mode) |
+| `POST` | `/api/identify/{session_id}` | Vision → listing draft (synchronous; Shop Mode's alone). Which model looks at the photos is `config.identify_provider()`'s call — Gemini where `GOOGLE_API_KEY` is set, Claude otherwise. Records the result as `scanned`, not `draft` — see `db.SCANNED` |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
 | `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id`. Takes the same `notes=` hints, which tell the grouping pass how many separate items to expect |
 | `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
@@ -946,7 +969,10 @@ title".
 | `GET`  | `/api/marketplaces` | Every marketplace + connection state (drives Settings & publish chips) |
 | `GET`  | `/api/{marketplace}/connect` · `/callback` | OAuth connect flow (eBay, Etsy, Depop) |
 | `POST` | `/api/{marketplace}/end-listing` | End one marketplace's live listing |
-| `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy defaults |
+| `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy / processing-profile defaults (ids only; anything else is a 400) |
+| `POST` | `/api/etsy/suggest-taxonomy/{session_id}` | Best Etsy category for a listing (login required, per-user ceiling) |
+| `POST` | `/api/crosspost/etsy/review` | What the crosspost would send for each ticked listing, before anything is sent |
+| `POST` | `/api/crosspost/etsy/start` | Run it as a job — watched through `/api/bulk/status/{id}`, stopped through `/api/bulk/cancel/{id}` |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listing-views` | The seller's **saved listing views** — a name for a tab plus a set of filters. Account data, so the same views are there on the phone they list from |
 | `PUT`  | `/api/listing-views` | Replace the strip. Stores the *question* and never the listings it matched, so a view called "Needs photos" empties as the photos get taken |
@@ -1049,13 +1075,28 @@ one failing never rolls back the others — and per-marketplace state
   discount to the buyers watching a listing; the asking price never moves).
   Negotiation runs on the `sell.inventory` scope the app already asks for, so
   no seller reconnects for it.
-- **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID` +
-  `ETSY_REDIRECT_URI`). Listings are created as Etsy drafts, photos uploaded,
-  then activated on a live publish. Etsy requires a category (AI Suggest
-  built in), who-made/when-made attribution, and a shipping profile
-  (defaults per account under Settings). Note: Etsy allows only handmade,
-  vintage (20+ years), and craft supplies, and rotates refresh tokens —
-  both are handled. First connect stopping on Etsy's own page with *"Only
+- **Etsy** — Etsy Open API v3 (OAuth + PKCE; set `ETSY_CLIENT_ID`,
+  `ETSY_SHARED_SECRET` and `ETSY_REDIRECT_URI` — since 2026-02-09 every
+  request's `x-api-key` must read `keystring:sharedSecret`, and the app
+  names the missing one on the Settings card). Listings are created as
+  Etsy drafts, photos uploaded, then activated on a live publish. Etsy
+  requires a category (AI Suggest built in), who-made/when-made
+  attribution, and — on every physical listing — a shipping profile, a
+  return policy and a **processing profile** (Etsy's `readiness_state_id`,
+  mandatory since mid-2025); all three have account defaults under
+  Settings and per-listing overrides on the Etsy card, and the preflight
+  names whichever is missing, for drafts and revises as well as live
+  publishes. A revise sends **price and stock through the inventory
+  record** (`updateListing` has no such fields) and re-sends the photo set
+  when it has changed (a digest of the last upload rides on the listing's
+  Etsy entry as `photo_sig`); titles are tidied to Etsy's character rules
+  (`$ ^ \`` refused, a cap on words in capitals) with the tidied form shown
+  as a warning. What a revise does NOT yet do is merge: it sends the whole
+  payload, so an edit made on etsy.com is replaced by this app's copy — the
+  editor says so. Note: Etsy allows only handmade, vintage (20+ years),
+  and craft supplies (an item someone else made recently is flagged as
+  Etsy's production-partner case), and rotates refresh tokens — both are
+  handled. First connect stopping on Etsy's own page with *"Only
   the app owner may authorize a seller app"* is app **type**, not config: a
   Seller app is authorizable by the one Etsy account that registered the
   keystring and nobody else. Opening it up is three tiers, not two, and
@@ -1086,6 +1127,45 @@ one failing never rolls back the others — and per-marketplace state
 
 Adding marketplace N+1 = one provider module + one import in
 `backend/marketplaces/__init__.py`.
+
+### Field alignment (this app · eBay · Etsy)
+
+One listing record, three vocabularies. `backend/marketplaces/field_map.py`
+is the one place the alignment is written down — the crosspost review reads
+it to say what will be filled and what is still wanted, the client mirrors
+it (`frontend/src/lib/fieldMap.js`, pinned equal by a test), and every
+`etsy_*` target the Etsy preflight can raise has to name a row here. *Filled*
+is how a value crosses from an eBay-shaped listing to Etsy: **shared**
+(copied as-is), **derived** (computed, by the named rule), **manual** (Etsy
+asks something eBay never did — answered once per crosspost batch or on the
+Etsy card), **absent** (Etsy has no such field).
+
+| Field | Here | On eBay | On Etsy | Filled | Note |
+|---|---|---|---|---|---|
+| **Title** | `title` | Title | `title` | derived (clean_title) · required | eBay allows 80 characters and capitals; Etsy 140, no $ ^ ` and few words in capitals — tidied on the way, shown before sending |
+| **Description** | `description` | Description | `description` | derived (strip_html+condition) · required | Plain text on Etsy; the condition is written in, because Etsy has no condition field |
+| **Price** | `price` | StartPrice | `price` | shared · required | Etsy's floor is 0.20 in the shop's currency; on a revise it travels through the inventory record |
+| **Currency** | `currency` | Currency | — | shared | An Etsy shop prices in one currency; a listing in another is a warning |
+| **Quantity** | `quantity` | Quantity | `quantity` | shared · required | One number; a listing with variations is refused for Etsy |
+| **Photos** | `images | image_urls` | PictureDetails | `images` | shared · required | Etsy takes up to 10 photo files (bytes, not URLs); an imported eBay listing's photos are fetched and re-uploaded |
+| **Selling format** | `listing_format` | ListingType | — | shared · required | Etsy has no auctions — Buy It Now only |
+| **Condition** | `condition | condition_description` | ConditionID | — | derived (strip_html+condition) | Etsy has no condition field; it is appended to the description |
+| **Brand** | `brand` | Brand (item specific) | `tags` | derived (tags_from_brand_and_specifics) | Becomes the first Etsy search tag |
+| **Item specifics** | `item_specifics` | ItemSpecifics | `tags` | derived (tags_from_brand_and_specifics) | Values become Etsy search tags: up to 13, 20 characters each, accents plain |
+| **Materials** | `etsy.materials | item_specifics[Material]` | Material (item specific) | `materials` | derived (materials_from_specifics) | Etsy shows materials on the listing; read off the Material specific |
+| **Package weight and size** | `package_weight_lb/oz | package_*_in` | ShippingPackageDetails | `item_weight | item_dimensions` | shared | Feeds Etsy's calculated shipping when present |
+| **Category** | `etsy.taxonomy_id` | PrimaryCategory (category_id) | `taxonomy_id` | derived (taxonomy_suggest) · required | Etsy's tree is its own: the eBay category path is matched to it first, the AI picks from a shortlist when it isn't, and the seller confirms |
+| **Who made it** | `etsy.who_made` | — | `who_made` | manual · required | Etsy's policy question — handmade, vintage or supplies — answered once per crosspost batch, never defaulted |
+| **When it was made** | `etsy.when_made` | Decade / Era / Year (item specifics) | `when_made` | derived (when_made_from_specifics) · required | Read off a decade or year specific, or a year in the title, when there is one; otherwise the batch default or the seller |
+| **Craft supply** | `etsy.is_supply` | — | `is_supply` | manual | Etsy's third allowed kind of item |
+| **Shipping profile** | `etsy.shipping_profile_id` | fulfillment policy (business policy) | `shipping_profile_id` | manual · required | Account default under Settings, per-listing override on the Etsy card |
+| **Return policy** | `etsy.return_policy_id` | return policy (business policy) | `return_policy_id` | manual · required | Required before an Etsy listing goes live; a draft may wait |
+| **Processing time** | `etsy.readiness_state_id` | DispatchTimeMax | `readiness_state_id` | manual · required | Etsy's processing profile, required on every physical listing |
+| **Variations** | `has_variations` | Variations | — | absent | No variation model here; a listing with them is refused for Etsy |
+| **Subtitle** | `subtitle` | Subtitle | — | absent | An eBay paid upgrade; Etsy has nothing like it |
+| **Store category** | `store_category_id` | StoreCategoryID | — | absent | The seller's own eBay Store shelf; Etsy shop sections are not mapped yet |
+| **Promoted Listings** | `promote | ad_rate_percent` | Promoted Listings | — | absent | eBay only |
+| **SKU** | `sku` | SKU | — | absent | Etsy's SKU lives on the inventory product and is carried over on a revise, never written |
 
 ## Database (Neon / Postgres)
 
@@ -1125,6 +1205,16 @@ errors on a DB problem. Tables are auto-created on first use.
    once, and the app learns which of the seller's own slots drew the most
    views. The design — data model, scheduler, readiness gate, learning loop,
    tests — is in [`SMART_LIST.md`](SMART_LIST.md).
+10. **Shop Mode** ✅ — the app in the shop, before anything is owned: a photo
+    answers "what is this and what does it sell for", and a recorded pan of a
+    shelf flags what is worth a closer look. It is the one flow that does not
+    stop to ask the seller what the item is (see the note at the top of
+    `views/ShopMode.jsx`) — the question it exists to answer is whether to buy
+    at all, and a box between the shutter and that answer costs more than a
+    wrong guess. "Buy" is the only thing that creates a listing: a scan is
+    saved as `scanned` (see `db.SCANNED`), which every seller-facing read
+    leaves out, and Buy promotes it to `unlisted` under **Finds**. So a run of
+    ten scans and two buys leaves two records, not twelve.
 
 ## Project layout
 
@@ -1144,7 +1234,11 @@ backend/
   services/
     images.py        photo pipeline (EXIF, upright, local cutout, resize)
     orient.py        the vision pass that turns an item upright
-    claude_ai.py     vision identify, refine, specifics fill, maker lookup
+    claude_ai.py     vision identify, refine, specifics fill, maker lookup —
+                     and the router that sends identify + the pricing lookup
+                     to whichever backend is configured
+    google_ai.py     the same identify and the same pricing lookup on Gemini,
+                     the second one grounded in Google Search
     listing_prompt.py the prompts, kept testable without the SDK
     ebay_trading.py  Trading API (XML): publish, revise, end, read the store
     listing_sync.py  bi-directional sync: import the store, push edits back
@@ -1447,6 +1541,61 @@ video reached eBay and uploads it if it did not — for a video added before
 eBay was connected, or an upload that failed — and **never fails the publish
 over it**: a listing with no video sells, a listing that will not publish is
 the seller's afternoon.
+
+## Crossposting an eBay store to Etsy
+
+**Crosspost to Etsy** on the Listings page: tick live listings, answer Etsy's
+questions once for the batch, review what each one will become, and send. It
+exists because the two marketplaces ask different questions about the same
+object, and answering them one listing at a time is the reason sellers
+cross-post ten items instead of two hundred.
+
+- **Which listings.** The manager gains a second cut beside its lifecycle
+  tabs — *All · On eBay · On Etsy · eBay only, not on Etsy* — and the last of
+  those is the crosspost's shopping list. Ticking live cards arms the bar.
+  Already on Etsy, an auction, variations, or not live: left out with the
+  reason, in the browser and again on the server.
+- **What is filled in.** Everything `backend/marketplaces/field_map.py` calls
+  *derived*: the title tidied to Etsy's character rules, the description in
+  plain text with the condition written into it, tags from the brand and item
+  specifics, materials from the Material specific, and the **category matched
+  from eBay's own category path** before any model is asked (`source:
+  "ebay_path"`), which is what keeps a two-hundred-item run from costing two
+  hundred AI calls. The **age** is read off a Decade / Era / Year specific or
+  a year in the title.
+- **What is asked once.** Who made it, when, and whether it is a craft
+  supply — Etsy allows only handmade, vintage (20+ years) and supplies, so
+  this is an attestation, not a field, and the wizard gates on it. Anything a
+  listing already says for itself wins over the batch answer. An item someone
+  else made *recently* is flagged: Etsy calls that a production-partner
+  listing, and for a reseller it is a refusal.
+- **Drafts by default.** Etsy charges a listing fee per listing that goes
+  live, so the run creates Etsy drafts unless the seller switches to live —
+  and the switch says what it will cost, in the footer beside the button.
+- **The run** is a job like every other long run here: sequential and paced
+  (`CROSSPOST_PACE_SECONDS`, because Etsy's rate limit is the whole app's), a
+  progress bar, a Stop honoured *between* listings, one 429 backoff, and a
+  per-listing outcome. It publishes through `main._publish_targets` — the same
+  function `/api/publish` uses — so the duplicate guard and the state fold
+  cannot drift. A restart mid-run picks the rest back up and reports the one
+  that was in flight as **unknown**, because Etsy may have created it: the
+  seller is sent to their Etsy drafts rather than having it sent twice.
+
+**One item, one unit of stock.** A crossposted listing is the same object in
+the same box, so when it sells or ends on eBay the Etsy copy is deactivated
+in the background (`services/inventory_mirror.py`) — deactivated, not
+deleted, so it can be put back if the sale falls through. A takedown that
+fails is written onto the listing's Etsy state and raised as a notification,
+because the seller has to know the thing they just sold is still for sale.
+The other direction does not exist yet: nothing reads the Etsy shop, so a
+sale *on* Etsy has to be ended here by hand, and the card and the wizard both
+say so.
+
+**Still ahead** (the honest list): an Etsy store import, which is also what a
+three-way merge needs, so an Etsy revise still sends the whole payload and
+replaces an edit made on etsy.com; per-marketplace dirty tracking; and
+per-marketplace overrides, so a listing could carry an Etsy title and price
+of its own rather than sharing eBay's.
 
 ## Bi-directional eBay sync
 

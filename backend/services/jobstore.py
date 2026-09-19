@@ -62,6 +62,11 @@ MIRROR_FIELDS = (
     # never the drafts themselves, so a 250-photo batch's mirror stays a few
     # KB. See main._resume_interrupted_batches.
     "_names", "_groups", "_done", "_inflight",
+    # What a restart needs to pick a CROSSPOST back up: which listings it was
+    # given and whether they were going to Etsy as drafts or live. The one it
+    # was sending when the process died is in `_inflight`, and is reported as
+    # unknown rather than sent again — see main._resume_interrupted_crossposts.
+    "_ids", "_mode",
     # The guidance step (phase "awaiting_notes"): the session a paused SINGLE
     # upload belongs to, and the per-item text a paused batch has already been
     # handed. A batch waiting on the seller has no worker holding either, so
@@ -353,6 +358,14 @@ def interrupted_message(record: dict) -> str:
         # nothing was written, so don't send the seller looking in Drafts.
         return ("The server restarted before the AI finished this item, so no "
                 "draft was saved. Please try again.")
+    if record.get("kind") == "crosspost-etsy":
+        total = record.get("total_items") or 0
+        current = record.get("current") or 0
+        where = f" ({min(current, total)} of {total} sent)" if total else ""
+        return ("The server restarted while crossposting to Etsy"
+                f"{where}, so the run stopped early. What it sent is on Etsy — "
+                "check your shop's drafts for the one it was sending, then run "
+                "the rest again.")
     if record.get("kind") == "enrich":
         # Filling in a group of existing listings. Each one is saved (and
         # pushed to eBay) as it finishes, so an interrupted run leaves real

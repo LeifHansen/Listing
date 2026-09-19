@@ -29,6 +29,14 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 # would otherwise spend it on synthetic squares. The tests of the pass itself
 # switch it on and stand in for the model.
 os.environ.setdefault("AUTO_ORIENT", "off")
+# The identifier's Google backend, off for the suite for the same reason: a
+# developer's shell may carry a real GOOGLE_API_KEY, and with one set
+# config.identify_provider() reads as "google" — so every identify test would
+# route past the Claude stand-in it installed and into a live Gemini call.
+# The tests of the Google path set the key themselves, through fresh_config.
+for _google_key in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
+                    "IDENTIFY_PROVIDER"):
+    os.environ.pop(_google_key, None)
 
 from backend import config, objstore  # noqa: E402
 
@@ -46,6 +54,10 @@ _SCRUBBED = (
     # they would make the warning fire (or not) for reasons unrelated to code.
     "STRIPE_API_SECRET_KEY", "STRIPE_API_WEBHOOK_SECRET",
     "ANTHROPIC_API_KEY", "ANTHROPIC_KEY", "API_SECRET_KEY",
+    # Which vision backend drafts a listing. Inherited from a developer's
+    # shell these would decide it for tests that are about something else.
+    "GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
+    "IDENTIFY_PROVIDER", "GOOGLE_VISION_MODEL",
     # The limited-release eBay scope flag. Inherited from a developer's shell
     # it would decide what EBAY_OAUTH_SCOPES contains, so the scope tests
     # would pass or fail for reasons unrelated to the code.
@@ -54,7 +66,7 @@ _SCRUBBED = (
     # Inherited from a developer's shell it would gate (or un-gate) the tests
     # for reasons unrelated to the code.
     "ETSY_COMMERCIAL_ACCESS", "ETSY_ACCESS_TIER", "ETSY_APP_SEATS",
-    "ETSY_OWNER_EMAILS",
+    "ETSY_OWNER_EMAILS", "ETSY_SHARED_SECRET",
     # The launch gate: which marketplaces the app offers at all. Inherited
     # from a developer's shell it would add or remove whole marketplaces from
     # the roster, so the gate's own tests would pass for reasons unrelated to

@@ -25,6 +25,7 @@ from pathlib import Path
 from backend.services import listing_prompt
 
 CLAUDE_AI = (Path(__file__).resolve().parents[1] / "services" / "claude_ai.py")
+GOOGLE_AI = (Path(__file__).resolve().parents[1] / "services" / "google_ai.py")
 
 # The sections the body must be built from, in the order the prompt lists
 # them. Overview and the closing carry no heading; the four in the middle are
@@ -137,15 +138,26 @@ def test_a_refine_cannot_quietly_shorten_it():
     assert "unless the seller asks for it shorter" in rule
 
 
-def _max_tokens(func: str) -> int:
+def _max_tokens(func: str, source: Path = CLAUDE_AI) -> int:
     """The max_tokens the named function asks the model for."""
-    source = CLAUDE_AI.read_text()
-    block = re.split(r"\n(?=\S)", source[source.index(f"def {func}("):])[0]
+    text = source.read_text()
+    block = re.split(r"\n(?=\S)", text[text.index(f"def {func}("):])[0]
     return int(re.search(r"max_tokens=(\d+)", block).group(1))
 
 
 def test_the_reply_has_room_for_the_description_it_asks_for():
     """A description that overruns the cap is not a short description — it is
     a truncated JSON object, which reaches the seller as a failed draft."""
-    for func in ("identify", "refine"):
+    # _identify_claude, not identify: identify() is the router that picks a
+    # backend, and the budget is asked for by the backend that answers.
+    for func in ("_identify_claude", "refine"):
         assert _max_tokens(func) >= 8192, f"{func}() cannot fit the body it asks for"
+
+
+def test_the_google_backend_has_the_same_room_and_then_some():
+    """Gemini drafts against this same prompt, so it needs this same budget —
+    and on a 2.5 model the thinking tokens come out of it too, which is why
+    the floor here is higher than Claude's rather than equal to it."""
+    budget = int(re.search(r'GOOGLE_IDENTIFY_MAX_TOKENS", "(\d+)"',
+                           GOOGLE_AI.read_text()).group(1))
+    assert budget >= 16384

@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle, Download,
+  ArrowRightLeft, X,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { exportListingsCsv } from "@/lib/listingExport";
@@ -20,12 +21,14 @@ import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
-  endedGraceDays, isDraft, keptWhenEnded, listingsView, orderListings,
+  endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listingsView,
+  MARKET_FILTERS, orderListings,
 } from "@/lib/listingsView";
 import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
+import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. Rendered as the lower section of the merged Sell screen —
@@ -113,6 +116,8 @@ export function ListingsView({ search = "" }) {
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
     listingFilters, clearListingFilters,
     health,
+    listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
+    marketplaces, connectedMarketplaces,
   } = useApp();
   const { confirm, toast } = useToast();
 
@@ -133,6 +138,20 @@ export function ListingsView({ search = "" }) {
   const counts = Object.fromEntries(TABS.map((t) => [
     t.id, listingsState.items.filter((i) => inTab(t, i)).length,
   ]));
+
+  // The second cut, WHERE a listing lives, appears once there is a second
+  // marketplace to cut by: one connected, or one already on a record. An
+  // eBay-only seller sees the pipeline exactly as before.
+  const otherMarketplaces = connectedMarketplaces.some((m) => m.key !== "ebay")
+    || listingsState.items.some((i) => Object.keys(i.listing?.marketplaces || {})
+      .some((k) => k !== "ebay"));
+  const marketId = otherMarketplaces
+    && MARKET_FILTERS.some((f) => f.id === listingsMarket) ? listingsMarket : "all";
+  const marketCounts = Object.fromEntries(MARKET_FILTERS.map((f) => [
+    f.id, listingsState.items.filter((i) => inTab(tab, i) && inMarketFilter(f.id, i)).length,
+  ]));
+  const etsy = marketplaces.find((m) => m.key === "etsy");
+  const [crosspostOpen, setCrosspostOpen] = useState(false);
 
   // Manual re-run of the store mirror (the mirror itself runs at app load).
   const importFromEbay = async () => {
@@ -288,16 +307,34 @@ export function ListingsView({ search = "" }) {
   const items = useMemo(() => {
     const shown = listingsState.items
       .filter((i) => inTab(tab, i))
+      .filter((i) => inMarketFilter(marketId, i))
       .filter((i) => !q
         || (i.listing?.title || i.title || "").toLowerCase().includes(q)
         || (i.listing?.brand || "").toLowerCase().includes(q)
         || (i.listing?.description || "").toLowerCase().includes(q));
-    // The filter bar's cut, last: the search box and the tab are both about
-    // one field each, and this is the one that stacks. Every predicate lives
-    // in lib/listingFilters, so the grid, the "showing N of M" line and the
-    // empty state below all ask the same question of the same list.
+    // The filter bar's cut, last: the tab, the marketplace and the search box
+    // are each about one field, and this is the one that stacks. Every
+    // predicate lives in lib/listingFilters, so the grid, the "showing N of M"
+    // line and the empty state below all ask the same question of the same
+    // list.
     return orderListings(filterListings(shown, listingFilters), metricsById);
-  }, [listingsState.items, tab, q, metricsById, listingFilters]);
+  }, [listingsState.items, tab, marketId, q, metricsById, listingFilters]);
+
+  // Ticks on the live listings, for the crosspost: on the tabs that show
+  // live listings, and only once there is somewhere else to post them.
+  //
+  // Off `items`, so a filtered grid ticks what it is SHOWING. "Select all"
+  // over listings the seller cannot see is how a crosspost reaches an item
+  // they had deliberately filtered out.
+  const selectable = otherMarketplaces && (tabId === "active" || tabId === "all");
+  const liveItems = selectable ? items.filter(isLive) : [];
+  const selectedLive = liveItems.filter((i) => liveSelection[i.id]);
+  const allLiveSelected = liveItems.length > 0 && selectedLive.length === liveItems.length;
+  const toggleLive = useCallback((id) => setLiveSelection((s) => ({ ...s, [id]: !s[id] })),
+    [setLiveSelection]);
+  const toggleAllLive = () => setLiveSelection(allLiveSelected
+    ? {} : Object.fromEntries(liveItems.map((i) => [i.id, true])));
+  const clearLive = () => setLiveSelection({});
 
   // "Create Listing" from an empty tab used to look broken: this list now
   // lives on the Sell screen, so startNew() lands you where you already are
@@ -419,7 +456,11 @@ export function ListingsView({ search = "" }) {
               skipped={skippedDraftIds.has(item.id)}
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
-              metrics={metricsById[item.id]} />
+              metrics={metricsById[item.id]}
+              showEbayChip={otherMarketplaces}
+              selectable={selectable && isLive(item)}
+              selected={!!liveSelection[item.id]}
+              onSelect={() => toggleLive(item.id)} />
             {/* Drafts carry their category on the card here too — the "All"
                 tab mixes them in with live listings, and a draft is exactly
                 where the category is still wrong and still free to fix. It
@@ -521,12 +562,81 @@ export function ListingsView({ search = "" }) {
         ))}
       </div>
 
-      {/* The cut on top of the tab, and the named views that keep one. The
-          "of" number is the whole tab rather than the page or the store:
-          it is the count the badge above shows, so the two cannot disagree
-          about how much a filter took away. */}
+      {/* Where a listing lives — the second cut, for a seller on more than
+          one marketplace. "eBay only, not on Etsy" is the crosspost's own
+          shopping list. Scrolls sideways at phone width like the tabs. */}
+      {otherMarketplaces && (
+        <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 pb-0.5 -mt-2"
+          role="group" aria-label="Where a listing lives">
+          {MARKET_FILTERS.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => setListingsMarket(f.id)}
+              aria-pressed={marketId === f.id}
+              className={cn(
+                "shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-full text-[12px]",
+                "font-semibold cursor-pointer transition-colors duration-150 border",
+                marketId === f.id
+                  ? "bg-ink text-bg border-ink"
+                  : "bg-card text-ink-secondary border-line hover:text-ink hover:border-line-strong",
+              )}
+            >
+              {f.label}
+              <span className="font-display tabular-nums text-[11px] font-bold opacity-80">
+                {view.kind === "unavailable" ? "—" : marketCounts[f.id]}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* The cut on top of those two, and the named views that keep one. The
+          "of" number is the whole tab AS THE MARKETPLACE STRIP LEFT IT
+          (marketCounts), not the whole store: those are the counts the badges
+          above show, so nothing on screen can disagree about how much this
+          filter took away. */}
       <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
-        total={view.kind === "unavailable" ? null : counts[tabId]} />
+        total={view.kind === "unavailable" ? null : marketCounts[marketId]} />
+
+      {/* The crosspost's bar: arrives with the first tick on a live listing
+          and leaves with the last, like the drafts' bulk bar above. */}
+      {selectedLive.length > 0 && (
+        <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-card
+          border border-blue/35 bg-blue-soft/90 backdrop-blur px-3 py-2.5 shadow-card">
+          <label className="flex items-center gap-2 text-[13px] font-semibold text-ink cursor-pointer select-none mr-1">
+            <input
+              type="checkbox"
+              checked={allLiveSelected}
+              ref={(el) => { if (el) el.indeterminate = selectedLive.length > 0 && !allLiveSelected; }}
+              onChange={toggleAllLive}
+              className="size-4 accent-(--brand-blue) cursor-pointer"
+            />
+            Select all
+            <span className="text-ink-secondary font-medium tabular-nums">
+              ({selectedLive.length} of {liveItems.length})
+            </span>
+          </label>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            {etsy && (
+              <Button variant="primary" size="sm" onClick={() => setCrosspostOpen(true)}
+                disabled={!etsy.connected}
+                title={etsy.connected ? undefined
+                  : etsy.access_pending
+                    ? etsy.access_pending_note
+                    : "Connect Etsy under Settings → Cross-posting marketplaces first."}>
+                <ArrowRightLeft aria-hidden /> Crosspost to Etsy ({selectedLive.length})
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" onClick={clearLive}>
+              <X aria-hidden /> Clear
+            </Button>
+          </div>
+        </div>
+      )}
+      {crosspostOpen && (
+        <CrosspostWizard items={selectedLive} onClose={() => setCrosspostOpen(false)} />
+      )}
 
       {/* Profit framework: on the archive tab, total up what the SOLD items
           with a recorded cost basis made (sale − purchase price, before

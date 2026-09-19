@@ -46,7 +46,8 @@ from .. import db, ebay_auth, objstore, storage
 from ..config import log
 from ..errors import StorageUnavailable
 from ..models import Listing
-from . import (ebay_account, ebay_trading, ebay_video, notifications,
+from . import (ebay_account, ebay_trading, ebay_video, inventory_mirror,
+               notifications,
                publish_guard, recommender, sync_merge, taxonomy)
 from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
 
@@ -1067,6 +1068,9 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         if prior and status == "sold" and prior.get("status") != "sold":
             notifications.notify_sold(user_id, rid, data,
                                       sold_quantity=data.get("sold_quantity") or 0)
+            # Same item, same box: if it is live on Etsy too, that copy is
+            # still taking orders for stock this seller no longer has.
+            inventory_mirror.on_ebay_finished(user_id, rid, data, "sold on eBay")
         if prior:
             updated += 1
         else:
@@ -1188,6 +1192,8 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
                 if rec.get("status") != "sold":
                     notifications.notify_sold(user_id, rec["id"], updates,
                                               sold_quantity=sold)
+                    inventory_mirror.on_ebay_finished(
+                        user_id, rec["id"], updates, "sold on eBay")
                 # Archived — reclaim the volume space its working copies held,
                 # matching what the app-listing sync path already does.
                 storage.purge_session(rec["id"])

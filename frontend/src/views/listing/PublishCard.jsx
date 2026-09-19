@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
+import { blockerHeadline, marketNames } from "./blockers";
 import { MarketTargetChips, usePublishTargets } from "./publishShared";
 import { Button } from "@/components/ui/Button";
 import { endedGraceDays, keptWhenEnded } from "@/lib/listingsView";
@@ -399,20 +400,23 @@ export function PublishBar({ w }) {
   // finish" reads like a chore list and says nothing about consequence. A
   // listing that's already live gets its own wording — it plainly IS on eBay,
   // so the thing at risk is the update, not the listing.
+  // Named for the marketplaces this publish is going to, never "eBay" by
+  // habit: with Etsy among the chips the list includes Etsy's own asks.
   const n = blockers.length;
   const many = n === 1 ? "1 field" : `${n} fields`;
+  const names = marketNames(w.chipTargets);
   const status = w.isLive
     ? {
-        head: ready ? "Live on eBay" : `${many} eBay won't accept`,
+        head: ready ? "Live on eBay" : blockerHeadline(blockers, w.chipTargets),
         sub: ready
           ? "Your edits publish straight to the live listing."
           : "Fix these before updating the live listing.",
       }
     : {
         head: ready ? "Ready to publish"
-          : `${many} ${n === 1 ? "is" : "are"} keeping this off eBay`,
+          : `${many} ${n === 1 ? "is" : "are"} keeping this off ${names}`,
         sub: ready
-          ? "List it live on eBay, or keep it as a draft for now."
+          ? `List it live on ${names}, or keep it as a draft for now.`
           : "That's the whole list — fix them and it goes live.",
       };
 

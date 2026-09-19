@@ -894,7 +894,12 @@ function MarketplaceConnections() {
                     </TagPill>
                   )}
                 </p>
-                {m.connected ? (
+                {m.connected && m.needs_reconnect ? (
+                  <p className="text-sm text-ink-secondary">
+                    Connected, but {m.label} didn’t tell us which shop — reconnect
+                    to finish linking it.
+                  </p>
+                ) : m.connected ? (
                   <p className="text-sm text-ink-secondary">
                     Connected{m.username ? (
                       <> as <strong className="text-ink">{m.username}</strong></>
@@ -920,7 +925,15 @@ function MarketplaceConnections() {
                   </p>
                 )}
               </div>
-              {m.connected ? (
+              {m.connected && m.needs_reconnect && m.oauth_ready ? (
+                <Button
+                  variant="primary"
+                  onClick={() => startConnect(`/api/${m.key}/connect`).catch((e) =>
+                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
+                >
+                  <Link2 aria-hidden /> Reconnect {m.label}
+                </Button>
+              ) : m.connected ? (
                 <Button variant="danger" onClick={() => disconnect(m)}>
                   <Unlink aria-hidden /> Disconnect
                 </Button>
@@ -972,27 +985,33 @@ function MarketplaceConnections() {
   );
 }
 
-// Etsy publish defaults: which shipping profile + return policy new Etsy
-// listings use (Etsy requires both for physical items). Loaded from the
-// seller's shop; saved into the account's marketplace settings.
+// Etsy publish defaults: which shipping profile, return policy and
+// processing profile new Etsy listings use (Etsy requires all three on a
+// physical item). Loaded from the seller's shop; saved into the account's
+// marketplace settings.
 function EtsyDefaults() {
   const { toast } = useToast();
-  const [data, setData] = useState(null);   // {shipping_profiles, return_policies, selected}
+  // The shop's profiles and the saved defaults live in the store (loaded
+  // once Etsy is connected), so a default saved here reaches the editor's
+  // blockers and the crosspost without a reload.
+  const { etsyOptions: data, loadEtsyOptions } = useApp();
   const [saving, setSaving] = useState(false);
-  const [selected, setSelected] = useState({});
-
-  useEffect(() => {
-    api("/api/etsy/settings-options")
-      .then((d) => { setData(d); setSelected(d.selected || {}); })
-      .catch(() => setData({ error: true }));
-  }, []);
+  // What the seller has changed here, over what the shop last said: no
+  // effect copying one into the other, and a reload after save shows the
+  // saved defaults through the same overlay.
+  const [edits, setEdits] = useState({});
+  const selected = { ...((data && !data.error && data.selected) || {}), ...edits };
+  const setSelected = (update) => setEdits((prev) => {
+    const next = typeof update === "function" ? update({ ...selected, ...prev }) : update;
+    return { ...prev, ...next };
+  });
 
   if (!data) return <div className="ai-shimmer h-16 rounded-tile mt-4" aria-hidden />;
   if (data.error) {
     return (
       <p className="text-[13px] text-ink-secondary mt-3">
-        Couldn’t load your Etsy shipping profiles — retry from Settings after
-        reconnecting Etsy.
+        Couldn’t load your Etsy shipping, return and processing options — retry
+        from Settings after reconnecting Etsy.
       </p>
     );
   }
@@ -1001,6 +1020,8 @@ function EtsyDefaults() {
     setSaving(true);
     try {
       await postJson("/api/etsy/settings-options", selected);
+      await loadEtsyOptions();
+      setEdits({});
       toast("Etsy defaults saved — new Etsy listings will use them.", { kind: "success" });
     } catch (e) {
       toast(`Couldn't save: ${e.message}`, { kind: "error" });
@@ -1039,6 +1060,22 @@ function EtsyDefaults() {
         >
           <option value="">— none —</option>
           {(data.return_policies || []).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+      </Field>
+      <Field
+        label="Processing time"
+        help={(data.readiness_states || []).length
+          ? "Etsy requires a processing profile on every physical listing — how long an order takes you to ship."
+          : "No processing profiles on your Etsy shop yet — add one under Shop Manager → Settings → Shipping, then reopen Settings."}
+      >
+        <Select
+          value={selected.readiness_state_id || ""}
+          onChange={(e) => setSelected((s) => ({ ...s, readiness_state_id: e.target.value }))}
+        >
+          <option value="">— none —</option>
+          {(data.readiness_states || []).map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </Select>

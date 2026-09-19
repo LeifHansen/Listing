@@ -48,8 +48,18 @@ CHANGES_SOMETHING = {
     "backend.services.etsy.update_listing":
         "edits, or activates, a listing on the seller's shop.",
     "backend.services.etsy.upload_listing_image":
-        "adds a photo at a rank — a repeat is a duplicate photo. All three go "
-        "through etsy._send, whose `changes` argument carries the answer.",
+        "adds a photo at a rank — a repeat is a duplicate photo. All of these "
+        "go through etsy._send, whose `changes` argument carries the answer.",
+    "backend.services.etsy.delete_listing_image":
+        "takes a photo off the seller's listing. Etsy keeps the file, so a "
+        "repeat is at worst a 404 — but a lost answer on a live listing is "
+        "a photo that may or may not still be showing, and it is reported "
+        "as such rather than as a refusal.",
+    "backend.services.etsy.update_listing_inventory":
+        "replaces the listing's price and stock. The PUT is idempotent, but a "
+        "lost answer still means Etsy may already ask the new price while the "
+        "record here says the revise failed — so it is reported as unknown, "
+        "with the listing id kept, rather than as a refusal to fix.",
     "backend.services.depop._request":
         "the single choke point for Depop; classified by HTTP method, so a "
         "new call cannot slip past unclassified.",
@@ -92,6 +102,10 @@ SAFE_TO_REPEAT = {
         "asks the carrier to void a label: money comes back to the seller, "
         "never goes away, and EasyPost refuses a second request on the same "
         "shipment rather than filing two.",
+    "backend.services.google_ai._generate":
+        "a POST that READS: it asks Gemini a question about the seller's "
+        "photos. Nothing of theirs exists on Google's side to change, and a "
+        "lost answer costs the tokens of asking again and nothing else.",
     "backend.services.promotions.suggested_ad_rates":
         "a POST that READS: findListingRecommendations. Commits to no fee.",
     "backend.services.tokens._stripe_post":
