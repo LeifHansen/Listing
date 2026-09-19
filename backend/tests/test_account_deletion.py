@@ -36,7 +36,10 @@ def test_delete_user_clears_every_table(dbmod):
     assert dbmod.get_user_by_id(uid) is None
     assert dbmod.get_ebay_account(uid) is None
     assert dbmod.get_prefs(uid) == {}
-    assert dbmod.list_listings(user_id=uid) == []
+    # include_scanned, so "every table is emptied" still means every ROW:
+    # the seller-facing read hides Shop Mode scans by default (db.SCANNED),
+    # and a retention bug in exactly those rows would pass unnoticed here.
+    assert dbmod.list_listings(user_id=uid, include_scanned=True) == []
     assert dbmod.get_listing("sess0001") is None
     # Live OAuth credentials for other marketplaces must not survive.
     assert dbmod.get_marketplace_account(uid, "etsy") is None

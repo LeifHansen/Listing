@@ -953,7 +953,7 @@ title".
 | `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
 | `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id`. `notes=` carries the seller's comma-separated hints, saved with the session so every later re-draft still has them |
-| `POST` | `/api/identify/{session_id}` | Vision → listing draft (synchronous; used by Shop Mode). Which model looks at the photos is `config.identify_provider()`'s call — Gemini where `GOOGLE_API_KEY` is set, Claude otherwise |
+| `POST` | `/api/identify/{session_id}` | Vision → listing draft (synchronous; Shop Mode's alone). Which model looks at the photos is `config.identify_provider()`'s call — Gemini where `GOOGLE_API_KEY` is set, Claude otherwise. Records the result as `scanned`, not `draft` — see `db.SCANNED` |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
 | `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id`. Takes the same `notes=` hints, which tell the grouping pass how many separate items to expect |
 | `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
@@ -1146,6 +1146,16 @@ errors on a DB problem. Tables are auto-created on first use.
    once, and the app learns which of the seller's own slots drew the most
    views. The design — data model, scheduler, readiness gate, learning loop,
    tests — is in [`SMART_LIST.md`](SMART_LIST.md).
+10. **Shop Mode** ✅ — the app in the shop, before anything is owned: a photo
+    answers "what is this and what does it sell for", and a recorded pan of a
+    shelf flags what is worth a closer look. It is the one flow that does not
+    stop to ask the seller what the item is (see the note at the top of
+    `views/ShopMode.jsx`) — the question it exists to answer is whether to buy
+    at all, and a box between the shutter and that answer costs more than a
+    wrong guess. "Buy" is the only thing that creates a listing: a scan is
+    saved as `scanned` (see `db.SCANNED`), which every seller-facing read
+    leaves out, and Buy promotes it to `unlisted` under **Finds**. So a run of
+    ten scans and two buys leaves two records, not twelve.
 
 ## Project layout
 

@@ -13,7 +13,11 @@ import { useToast } from "@/components/ui/Toaster";
 import { relTime, mergeRows } from "@/lib/adminView";
 import { useAdminRead } from "@/views/admin/useAdminRead";
 
-const STATUSES = ["", "draft", "live", "published", "sold", "ended", "unlisted"];
+// "scanned" is a Shop Mode scan the seller has not bought (see db.SCANNED).
+// Every seller-facing read leaves those out, so the console is the only
+// place they can be seen at all -- which is the reason it is in this list.
+const STATUSES = ["", "draft", "scanned", "live", "published", "sold", "ended",
+                  "unlisted"];
 
 // Read-only, whole-platform browse. Rows are summaries (the API never ships
 // the full listing blobs in a list); opening one fetches the full record.
