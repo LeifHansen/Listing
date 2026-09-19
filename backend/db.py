@@ -1277,6 +1277,48 @@ def save_duplicate_dismissals(user_id: str, dismissals: dict) -> bool:
     return bool(save_prefs(user_id, {_DISMISSED_DUPLICATES: dict(dismissals)}))
 
 
+# The seller's saved listing views — a name for a tab plus a set of filters,
+# so "Nike under $20" or "drafts still missing photos" costs one tap tomorrow
+# instead of being worked out again by scrolling.
+#
+# Same reserved-key arrangement as the dismissal ledger above, for the same
+# reasons: a handful of small objects, read on one screen, and `prefs` already
+# exists to hold exactly this. It is unreachable from POST /api/prefs, whose
+# whitelist is scalars only, so the Settings screen can never overwrite a
+# seller's saved views by saving a package weight.
+#
+# It rides the ACCOUNT rather than the browser deliberately — unlike the
+# grid/list layout, which is a per-device viewing preference in localStorage.
+# A named list the seller built is work, and work that only exists on the
+# laptop it was made on is work they do twice.
+_LISTING_VIEWS = "listing_views"
+
+
+def saved_listing_views(user_id: str, strict: bool = False) -> list:
+    """The seller's saved listing views, oldest first.
+
+    Best-effort by default: these draw a strip of pills above the grid, and a
+    read that fell over should cost the pills rather than the screen.
+
+    `strict=True` for the read that precedes a write — see
+    save_listing_views, where `[]` out of a broken read is not an empty strip,
+    it is every view the seller ever saved, deleted.
+    """
+    prefs = get_prefs(user_id) if strict else get_prefs_best_effort(user_id)
+    stored = prefs.get(_LISTING_VIEWS)
+    return [v for v in stored if isinstance(v, dict)] if isinstance(stored, list) else []
+
+
+def save_listing_views(user_id: str, views: list) -> bool:
+    """Replace the seller's saved views; True when the write landed.
+
+    RAISES StorageUnavailable on a write failure, like every other save here.
+    A "Save view" that quietly did not persist is worse than not offering one:
+    the seller finds out tomorrow, when the list they built is gone.
+    """
+    return bool(save_prefs(user_id, {_LISTING_VIEWS: list(views)}))
+
+
 def create_user(user_id: str, email: str, password_hash: str):
     """Create a user. Returns the user dict, EMAIL_TAKEN, or None on DB error."""
     try:

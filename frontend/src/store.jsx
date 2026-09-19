@@ -2,6 +2,10 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
 import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import {
+  EMPTY_FILTERS, addSavedView, normalizeFilters, normalizeSavedView,
+  normalizeSavedViews, removeSavedView,
+} from "@/lib/listingFilters";
 import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
@@ -82,6 +86,11 @@ const NO_STORE_SYNC = {
 const NO_LISTINGS = {
   loaded: false, loading: false, authed: false, dbConfigured: true, items: [],
 };
+// The seller's saved listing views, before anyone has asked for them.
+// `loaded` is the same distinction `easypost` draws above: "nothing saved" and
+// "not asked yet" look identical in an empty array, and only one of them is a
+// reason to tell a seller they have no saved views.
+const NO_SAVED_VIEWS = { items: [], loaded: false, saving: false };
 
 // What the eBay callback's ?why= means, in words a seller can act on. The
 // backend picks the bucket from eBay's own error code; "eBay connection
@@ -216,6 +225,105 @@ export function AppProvider({ children }) {
     listingsJumpRef.current = tab || "active";
     setSession(null);
     setView("new");
+  }, []);
+
+  // ---------- the listings filters ----------
+  // What the grid is cut down to on top of its tab — format, condition,
+  // price range, brand, category, photos, age, unfinished. See
+  // lib/listingFilters, which owns every predicate; this holds the choice.
+  //
+  // Memory-only, like `listingsTab` and unlike the grid/list layout and the
+  // marketplace cut, which are both remembered per device. A filter is a
+  // thing the seller did a moment ago and can see chips for; one restored
+  // silently on the next visit is how somebody concludes their listings are
+  // missing. The way to keep a filter IS a saved view, which is named,
+  // visible and applied on purpose.
+  const [listingFilters, setFilters] = useState(EMPTY_FILTERS);
+  const setListingFilters = useCallback((next) => {
+    setFilters((cur) => normalizeFilters(
+      typeof next === "function" ? next(cur) : next));
+  }, []);
+  const clearListingFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
+
+  // ---------- saved views ----------
+  // A name for a tab plus a set of filters, kept on the ACCOUNT (the same
+  // per-user JSON the new-listing defaults ride in) rather than in this
+  // browser: a named list the seller built is work, and work that exists only
+  // on the laptop it was made on is work they do twice.
+  //
+  // `loaded` separates "nothing saved" from "not asked yet", so the strip
+  // does not flash an empty state at a seller who has ten views.
+  const [savedViews, setSavedViews] = useState(NO_SAVED_VIEWS);
+  const loadSavedViews = useCallback(async () => {
+    try {
+      const res = await api("/api/listing-views");
+      setSavedViews({
+        items: normalizeSavedViews(res.views), loaded: true, saving: false,
+      });
+    } catch (e) {
+      // Not `loaded`, and not empty: a read that fell over must not render as
+      // a seller who has saved nothing. The strip simply doesn't appear.
+      setSavedViews((v) => ({ ...v, saving: false }));
+    }
+  }, []);
+
+  // Both writes send the WHOLE strip and adopt the server's answer, so what
+  // is on screen is what is stored — there is no local copy to drift.
+  const writeSavedViews = useCallback(async (views) => {
+    setSavedViews((v) => ({ ...v, saving: true }));
+    try {
+      const res = await postJson("/api/listing-views", { views },
+        { method: "PUT" });
+      setSavedViews({
+        items: normalizeSavedViews(res.views), loaded: true, saving: false,
+      });
+      return { ok: true };
+    } catch (e) {
+      setSavedViews((v) => ({ ...v, saving: false }));
+      return { ok: false, error: e.message };
+    }
+  }, []);
+
+  const saveListingView = useCallback(async (name) => {
+    const result = addSavedView(savedViews.items, {
+      name, tab: listingsTab, filters: listingFilters,
+    });
+    if (!result.ok) {
+      toast(result.error, { kind: "warning" });
+      return result;
+    }
+    const written = await writeSavedViews(result.views);
+    if (!written.ok) {
+      toast(`Couldn't save that view: ${written.error}`, { kind: "error" });
+      return written;
+    }
+    toast(result.replaced
+      ? `Updated “${result.view.name}”.`
+      : `Saved “${result.view.name}” — it's on every device you sign in from.`,
+    { kind: "success" });
+    return result;
+  }, [savedViews.items, listingsTab, listingFilters, writeSavedViews, toast]);
+
+  const deleteListingView = useCallback(async (id) => {
+    const gone = savedViews.items.find((v) => v.id === id);
+    const written = await writeSavedViews(removeSavedView(savedViews.items, id));
+    if (!written.ok) {
+      toast(`Couldn't delete that view: ${written.error}`, { kind: "error" });
+      return written;
+    }
+    if (gone) toast(`Deleted “${gone.name}”.`, { kind: "success" });
+    return written;
+  }, [savedViews.items, writeSavedViews, toast]);
+
+  // Applying one sets both halves at once — the tab it was saved on and the
+  // filters on top of it. A view that restored only the filters would land a
+  // seller on whatever tab they happened to be on, which is a different list
+  // under the same name.
+  const applyListingView = useCallback((viewToApply) => {
+    const v = normalizeSavedView(viewToApply);
+    if (!v) return;
+    setListingsTab(v.tab);
+    setFilters(v.filters);
   }, []);
 
   // ---------- server health ----------
@@ -1418,6 +1526,11 @@ export function AppProvider({ children }) {
     setActiveBulk(null);
     clearLocal("bulk");
     setListingsTab("active");
+    // The grid the next person sees is the whole store, not the last one's
+    // cut of it — and their saved views are theirs, not the strip left over
+    // from the account that just signed out.
+    setFilters(EMPTY_FILTERS);
+    setSavedViews(NO_SAVED_VIEWS);
     listingsJumpRef.current = null;
 
     // ...and land where signing back in is the obvious next move. There is no
@@ -1582,6 +1695,13 @@ export function AppProvider({ children }) {
     loadMarketplaces();
   }, [user, loadListings, loadMarketplaces]);
 
+  // The saved views belong to the account, so they are fetched with it and
+  // never for a visitor who isn't signed in — /api/listing-views 401s, and a
+  // refused request is not a strip worth drawing.
+  useEffect(() => {
+    if (user) loadSavedViews();
+  }, [user, loadSavedViews]);
+
   // eBay views/watchers/offers for live listings (best-effort; empty until
   // eBay is connected and the analytics scope granted). Refreshes as the live
   // set changes. Signed out / disconnected is handled during render above
@@ -1620,6 +1740,9 @@ export function AppProvider({ children }) {
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
+    listingFilters, setListingFilters, clearListingFilters,
+    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    applyListingView,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     clearSignedInState,
@@ -1651,6 +1774,9 @@ export function AppProvider({ children }) {
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,
+    listingFilters, setListingFilters, clearListingFilters,
+    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
     etsyOptions, loadEtsyOptions,

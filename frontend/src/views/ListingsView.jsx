@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/Button";
 import { OriginChip, originOf } from "@/components/ui/badges";
 import { InfoTip } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
+import { ListingFilters } from "@/components/ListingFilters";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -23,6 +24,7 @@ import {
   endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listingsView,
   MARKET_FILTERS, orderListings,
 } from "@/lib/listingsView";
+import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
@@ -112,6 +114,7 @@ export function ListingsView({ search = "" }) {
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
+    listingFilters, clearListingFilters,
     health,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     marketplaces, connectedMarketplaces,
@@ -309,11 +312,20 @@ export function ListingsView({ search = "" }) {
         || (i.listing?.title || i.title || "").toLowerCase().includes(q)
         || (i.listing?.brand || "").toLowerCase().includes(q)
         || (i.listing?.description || "").toLowerCase().includes(q));
-    return orderListings(shown, metricsById);
-  }, [listingsState.items, tab, marketId, q, metricsById]);
+    // The filter bar's cut, last: the tab, the marketplace and the search box
+    // are each about one field, and this is the one that stacks. Every
+    // predicate lives in lib/listingFilters, so the grid, the "showing N of M"
+    // line and the empty state below all ask the same question of the same
+    // list.
+    return orderListings(filterListings(shown, listingFilters), metricsById);
+  }, [listingsState.items, tab, marketId, q, metricsById, listingFilters]);
 
   // Ticks on the live listings, for the crosspost: on the tabs that show
   // live listings, and only once there is somewhere else to post them.
+  //
+  // Off `items`, so a filtered grid ticks what it is SHOWING. "Select all"
+  // over listings the seller cannot see is how a crosspost reaches an item
+  // they had deliberately filtered out.
   const selectable = otherMarketplaces && (tabId === "active" || tabId === "all");
   const liveItems = selectable ? items.filter(isLive) : [];
   const selectedLive = liveItems.filter((i) => liveSelection[i.id]);
@@ -391,17 +403,35 @@ export function ListingsView({ search = "" }) {
       </Card>
     );
   } else if (items.length === 0) {
+    // Three empties, and they are not the same claim. "No listings yet" is
+    // about the ACCOUNT; a tab emptied by the search box or the filter bar is
+    // about the question that was asked, and it has to say so and offer the
+    // way back — otherwise a seller who forgot a filter was on is looking at
+    // an empty store with a button to create their first listing.
+    const filtered = !isEmptyFilters(listingFilters);
     body = (
       <Card className="p-0">
         <EmptyState
           illustration={tab.empty.illustration}
-          title={q ? "No matches" : tab.empty.title}
-          message={q ? `Nothing matches "${search}" here.` : tab.empty.message}
-          action={!q && tab.empty.action && (
+          title={q || filtered ? "No matches" : tab.empty.title}
+          message={
+            q && filtered
+              ? `Nothing here matches "${search}" with these filters on.`
+              : filtered
+                ? "No listings on this tab match the filters you've set."
+                : q
+                  ? `Nothing matches "${search}" here.`
+                  : tab.empty.message
+          }
+          action={filtered ? (
+            <Button variant="soft" size="lg" onClick={clearListingFilters}>
+              Clear filters
+            </Button>
+          ) : (!q && tab.empty.action && (
             <Button variant="primary" size="lg" onClick={go}>
               <tab.empty.action.icon aria-hidden /> {tab.empty.action.label}
             </Button>
-          )}
+          ))}
         />
       </Card>
     );
@@ -560,6 +590,14 @@ export function ListingsView({ search = "" }) {
           ))}
         </div>
       )}
+
+      {/* The cut on top of those two, and the named views that keep one. The
+          "of" number is the whole tab AS THE MARKETPLACE STRIP LEFT IT
+          (marketCounts), not the whole store: those are the counts the badges
+          above show, so nothing on screen can disagree about how much this
+          filter took away. */}
+      <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
+        total={view.kind === "unavailable" ? null : marketCounts[marketId]} />
 
       {/* The crosspost's bar: arrives with the first tick on a live listing
           and leaves with the last, like the drafts' bulk bar above. */}
