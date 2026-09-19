@@ -24,6 +24,12 @@ What is pinned here:
     and always as a SOLID shape, so the thing services/artwork exists to
     prevent stays impossible.
 
+A paid engine is no longer the only model allowed to LOCATE that border --
+the local one may too, which is what makes the second look work on a deploy
+with no key, and is pinned in test_a_square_object_is_a_product_too.py. What
+is pinned here is that a configured engine still goes first and that the
+matte, whoever drew it, never becomes the matte that ships.
+
 No httpx here on purpose. The engines are stubbed at the cutout_api boundary,
 because the `cutout` CI job installs Pillow and pytest and nothing else, and
 fails on a SKIP. What talks to the wire is tested in
@@ -537,20 +543,21 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
         "the corner was rounded off the print — that is the matte, not a box"
 
 
-def test_the_local_model_is_never_asked_about_a_picture(chain, monkeypatch):
-    """Unchanged and load-bearing: art must not reach the model, remote engine
-    configured or not."""
-    img, _ = _framed_print()
+def test_a_paid_engine_is_still_asked_about_a_border_first(chain, no_local,
+                                                           monkeypatch):
+    """The local model may locate a border now (see
+    test_a_square_object_is_a_product_too.py), and this is where it does not:
+    with a key configured, the engine that was paid for answers, and the
+    local slot is never taken."""
+    img, box = _framed_print()
     chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(returns=None))
-    calls = []
-    monkeypatch.setattr(images, "_mask",
-                        lambda rgb, wait=None: calls.append(1) or
-                        Image.new("L", rgb.size, 255))
+    asked = []
+    _remote(monkeypatch, removebg=_engine(
+        returns=lambda rgb: _cut(rgb.size, box), log=asked))
     monkeypatch.setattr(artwork, "border", lambda rgb: None)
 
-    assert images.art_cutout(img) is None
-    assert calls == [], "the model was asked about a picture"
+    assert images.art_cutout(img) is not None
+    assert asked == [img.size], "the paid engine located the border"
 
 
 def test_the_inference_lock_is_untouched_by_a_remote_run(chain, no_local,

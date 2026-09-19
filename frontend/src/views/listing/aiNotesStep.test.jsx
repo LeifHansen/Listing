@@ -274,7 +274,9 @@ describe("a question the seller walked away from", () => {
 
     await mountUploader();
 
-    expect(host.textContent).toContain("Drag photos here");
+    // The uploader is what's on screen instead — folded, the way it opens.
+    expect(host.textContent).toContain("Add photos");
+    expect(host.textContent).not.toContain("Anything the photos don't show?");
     expect(host.querySelector("textarea")).toBeNull();
   });
 
@@ -294,7 +296,8 @@ describe("a question the seller walked away from", () => {
 
     await mountUploader();
 
-    expect(host.textContent).toContain("Drag photos here");
+    expect(host.textContent).toContain("Add photos");
+    expect(host.querySelector("textarea")).toBeNull();
   });
 });
 

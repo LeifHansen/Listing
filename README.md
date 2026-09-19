@@ -7,7 +7,7 @@ Etsy, and Depop, individually or all at once.
 
 Upload one or more images → the app **optimizes** them for eBay, **asks you
 what each item is** (one optional box per item, with its photos on screen),
-uses Claude's vision **"lens"** to identify the item, **generates** a full
+uses a vision **"lens"** to identify the item, **generates** a full
 listing (title, description, item specifics, suggested price/category), shows
 an **editable preview** where you can tweak fields manually or with a prompt,
 then **publishes** it live on eBay (and Etsy / Depop) through the seller's own
@@ -20,14 +20,15 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 ```
  Upload images ──▶ Optimize (Pillow) ──▶ [Group into items (bulk)] ──▶
- Ask the seller (one box per item) ──▶ Identify (Claude vision) ──▶
+ Ask the seller (one box per item) ──▶ Identify (Gemini or Claude vision) ──▶
  Editable preview (manual edits + prompt refine) ──▶ Publish (eBay / Etsy / Depop, or dry-run)
 ```
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
 | Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
-| Identify | Photos sent to Claude vision — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Anthropic API |
+| Identify | Photos sent to a vision model — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Google Gemini API (`GOOGLE_API_KEY`) or Anthropic API |
+| Price | The draft's price is the one thing the photos cannot answer, so a second pass looks it up. On the Google backend it runs with **Google Search grounding**: the model searches for what comparable items actually sold for and answers with the pages it read, and those URLs — the ones the API vouches for, not the ones the model typed — are what the finding is cited with. Never lowers a price and never demotes an item; it may raise a price to the bottom of the researched range, name a hedged item, and flag the more valuable variant the photos cannot rule out | Google Search grounding, or Claude's web search |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
 | Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
@@ -53,6 +54,28 @@ cp .env.example .env
 
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
+
+### Identifying on Google instead
+
+Set `GOOGLE_API_KEY` ([AI Studio](https://aistudio.google.com/apikey)) and two
+passes move to Gemini: identifying the item, and pricing it. The key is the
+whole switch — there is no second setting to remember, `/api/health` reports
+which backend answered as `identify_provider`, and everything else in the app
+(refine, the item-specifics fills, the art lookup) still runs on Claude.
+
+Pricing is the pass that earns the move. Asking a model what a jacket is
+worth gets you the model's memory of jacket prices; on the Google backend the
+lookup runs with **Google Search grounding**, so it searches before it answers
+and hands back the pages it used. A price with a source attached is a
+different object from a price.
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `GOOGLE_API_KEY` | — | The switch. Also read as `GEMINI_API_KEY` / `GOOGLE_AI_API_KEY` |
+| `GOOGLE_VISION_MODEL` | `gemini-pro-latest` | Which Gemini looks at the photos. A rolling alias by default — Google retires model ids, and a pinned default eventually 404s every draft. If the configured model does not exist, the app lists what the key can call, picks the newest of the same tier, and logs the swap |
+| `IDENTIFY_PROVIDER` | `auto` | `auto` reads as google when a Google key is set. Pin to `google` / `anthropic` to force one; a pin to a backend with no key falls back rather than taking identification down, and says so in the config warnings |
+| `GOOGLE_THINKING_BUDGET` | `-1` | How hard the model may think, if you want to pin it. Takes a number (a 2.5-style token budget) or a word (a 3.x-style `low`/`high` level); `-1` sends neither, which is right on every model |
+| `RESEARCH_PASS` | follows the backend | The grounded pricing lookup: `auto` on Google, `off` on Claude. Claude's version is a server-tool loop that searches sequentially inside the identify request and adds a minute or more per item — Gemini's is one call that searches server-side, which is what makes running it by default affordable. Pin it to `off` / `auto` / `always` either way |
 
 ## Reading production errors
 
@@ -930,7 +953,7 @@ title".
 | `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
 | `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id`. `notes=` carries the seller's comma-separated hints, saved with the session so every later re-draft still has them |
-| `POST` | `/api/identify/{session_id}` | Claude vision → listing draft (synchronous; Shop Mode's alone). Records the result as `scanned`, not `draft` — see `db.SCANNED` |
+| `POST` | `/api/identify/{session_id}` | Vision → listing draft (synchronous; Shop Mode's alone). Which model looks at the photos is `config.identify_provider()`'s call — Gemini where `GOOGLE_API_KEY` is set, Claude otherwise. Records the result as `scanned`, not `draft` — see `db.SCANNED` |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
 | `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id`. Takes the same `notes=` hints, which tell the grouping pass how many separate items to expect |
 | `GET`  | `/api/bulk/status/{job_id}` | Poll any of the jobs above (phase, per-photo progress, result) |
@@ -1152,7 +1175,11 @@ backend/
   services/
     images.py        photo pipeline (EXIF, upright, local cutout, resize)
     orient.py        the vision pass that turns an item upright
-    claude_ai.py     vision identify, refine, specifics fill, maker lookup
+    claude_ai.py     vision identify, refine, specifics fill, maker lookup —
+                     and the router that sends identify + the pricing lookup
+                     to whichever backend is configured
+    google_ai.py     the same identify and the same pricing lookup on Gemini,
+                     the second one grounded in Google Search
     listing_prompt.py the prompts, kept testable without the SDK
     ebay_trading.py  Trading API (XML): publish, revise, end, read the store
     listing_sync.py  bi-directional sync: import the store, push edits back
@@ -1281,11 +1308,41 @@ crosses it without ever standing on it.
 the frame, a shape that is not a rectangle, something too small to be the
 piece — each returns None, and None means *keep the photo exactly as shot*,
 reported in `bg_error` so the seller is told and the charge comes back. It
-never means "fall back to the model", because the model is the bug. The error
+never means "cut to what the model kept", because that is the bug. The error
 directions are not close: a cutout wrongly refused costs one photo an opt-in
 feature, and a cutout wrongly shipped destroys the item the listing is for —
 which is also why the prompt tells the model to answer **true** when it is
 torn about whether something is a picture.
+
+**A model may say where a picture is. It may never say what to keep inside
+one.** Before giving up, the scan takes a second opinion: a segmentation matte
+is fitted to its best rectangle, and if it *is* a rectangle at some angle
+(`artwork.quad_from_alpha`, floor 0.9 — a round subject scores 0.785 however
+it is turned) its four corners become the border and are filled solid. Only
+the outer shape is ever read, so the guarantee above is untouched: what ships
+is still a solid quad, and a baby lifted out of a painting is refused because
+it is not a rectangle, not because of which model drew it.
+
+That second look was written for a paid engine and, for a while, only a paid
+engine could answer it — which meant it never ran, because nothing configures
+one (`BG_ENGINE` is commented out in fly.toml with no key beside it). The
+local model answers it now (`ART_LOCAL_BORDER=off` restores the old
+behaviour), and it costs one inference on exactly the photos that were
+otherwise getting nothing. Before this, a seller's grid had shirts cut out on
+white beside framed prints and printed trays still sitting on the floor they
+were shot on, and the reason was "no paid API key".
+
+**A square object that is not a picture gets the same geometry.** A tray, a
+sign, a plaque, a boxed set, a record sleeve: the screen is right not to call
+these art — a tray with a map on it is a tray — so they go to the model like
+any other object, and the model drops them or keeps only the picture printed
+on their face. When nothing it returns survives the guards, `artwork.border()`
+is asked last, and the photo is cut to the rectangle if there is one
+(`bg_engine: "border"`). Only after the model has declined, so no photo that
+gets a cutout today changes, and `border()` answers None for anything that is
+not a rectangle, so a garment or a close-up is still kept as shot. The studio's
+**Remove background** button does the same thing, which matters most there:
+that is the button a seller presses *after* a batch left the photo as shot.
 
 One limit, stated plainly: a print with a blank white mount, on a white
 surface, under flat light with no shadow, has no detectable outer edge — there

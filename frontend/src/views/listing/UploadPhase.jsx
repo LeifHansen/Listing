@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Sparkles, FolderOpen, Trash2, Camera, MessageSquareText, Check, CheckCheck, X,
+  ChevronDown, ChevronUp, ImagePlus,
 } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { turnedUprightMessage } from "@/lib/turnedUpright";
@@ -90,6 +91,18 @@ export function UploadPhase() {
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
+  // Is the drop zone unfolded? Shut on every mount, and deliberately not
+  // remembered.
+  //
+  // The uploader is a half-screen panel sitting at the top of Sell, above the
+  // drafts strip and the whole listing manager — so a seller who came to Sell
+  // to look at what they are already selling had to scroll past a box asking
+  // for photos first, every single visit. Folded, it is one line, and the
+  // lists are where the screen starts. "Open, like last time" would be the
+  // same trap the cutout toggle above documents: a decision made on another
+  // visit, re-applied to this one without being asked — and re-opening itself
+  // on arrival is precisely what this fold exists to stop.
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // Select mode: pick several photos out of the pile and drop them in one go.
   // A per-tile trash is one tap for one wrong photo, and forty taps for the
@@ -178,6 +191,12 @@ export function UploadPhase() {
     list.some((e) => e.file.name === f.name && e.file.size === f.size);
 
   const addFiles = (fileList) => {
+    // Photos arriving is the panel's cue to open — dropped onto the folded
+    // bar, picked from the library, or handed back by a failed batch. It
+    // stays open afterwards even if the pile is emptied again: a seller
+    // deleting the last wrong shot is about to pick another one, not asking
+    // for the uploader to fold away under their hands.
+    setOpen(true);
     // Copied before anything else runs. `fileList` is the input's own LIVE
     // FileList, and the change handler clears the input the moment this
     // returns (`e.target.value = ""`, without which picking the same photo
@@ -430,49 +449,130 @@ export function UploadPhase() {
     );
   }
 
+  // A pile on screen is never folded away. The staged photos, the notes box
+  // and the button that starts the AI all live in the card below this one —
+  // hiding them behind a bar that reads "Add photos" is how a seller loses a
+  // shoot they thought was queued. So the fold is offered only while there is
+  // nothing in it, which is also the only state it was ever in the way in.
+  const collapsed = !open && files.length === 0;
+
+  // One drop target's worth of handlers, shared by the folded bar and the
+  // open drop zone: dropping photos has to work in both, or folding the panel
+  // would quietly take the app's main gesture away with it.
+  const dropHandlers = {
+    onDragOver: (e) => { e.preventDefault(); setDrag(true); },
+    onDragEnter: (e) => { e.preventDefault(); setDrag(true); },
+    onDragLeave: (e) => { e.preventDefault(); setDrag(false); },
+    onDrop: (e) => {
+      e.preventDefault();
+      setDrag(false);
+      addFiles(e.dataTransfer.files);
+    },
+  };
+
   return (
     <div className="flex flex-col gap-5">
-      <Card
-        className={cn(
-          "border-2 border-dashed transition-colors duration-200 cursor-pointer",
-          drag ? "border-blue bg-blue-soft" : "border-line-strong hover:border-blue/60",
-        )}
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-        onDragEnter={(e) => { e.preventDefault(); setDrag(true); }}
-        onDragLeave={(e) => { e.preventDefault(); setDrag(false); }}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
-      >
-        <div className="flex flex-col items-center text-center gap-3 py-8">
-          <PhotoUploadIllustration />
-          <h2 className="text-xl font-bold text-ink">Drag photos here</h2>
-          <p className="text-sm text-ink-secondary">
-            or bring them in another way — the AI writes the listing from your shots.
-          </p>
-          <div className="flex flex-wrap justify-center gap-2.5 mt-1">
-            <Button
-              variant="primary" size="lg"
-              onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
-            >
-              <FolderOpen aria-hidden /> Browse Files
-            </Button>
-            <Button
-              variant="secondary" size="lg"
-              onClick={(e) => { e.stopPropagation(); cameraRef.current?.click(); }}
-            >
-              <Camera aria-hidden /> Take Photos
-            </Button>
-          </div>
-        </div>
-        <input
-          ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple hidden
-          onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
-        />
-        <input
-          ref={cameraRef} type="file" accept={PHOTO_ACCEPT} capture="environment" hidden
-          onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
-        />
-      </Card>
+      {/* Mounted in both states. Browse Files and the camera reach these
+          through their refs, and a photo handed straight to the input — which
+          is what a phone's library picker does — must land in the pile
+          whether or not the panel happens to be open. */}
+      <input
+        ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple hidden
+        onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+      />
+      <input
+        ref={cameraRef} type="file" accept={PHOTO_ACCEPT} capture="environment" hidden
+        onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+      />
+
+      {collapsed ? (
+        /* Folded: one line at the top of Sell instead of half the screen —
+           and still a drop target, because that is the gesture the big box
+           spent its whole life teaching. Photos dropped here open it. */
+        <Card
+          className={cn(
+            "p-0 overflow-hidden transition-colors duration-200",
+            drag ? "border-blue bg-blue-soft" : "hover:border-line-strong",
+          )}
+          {...dropHandlers}
+        >
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-expanded={false}
+            className="w-full flex items-center gap-3 p-4 sm:px-5 text-left cursor-pointer group"
+          >
+            <span className="grid place-items-center size-10 rounded-[13px] bg-blue-soft text-blue shrink-0">
+              <ImagePlus size={19} strokeWidth={2} aria-hidden />
+            </span>
+            <span className="flex-1 min-w-0">
+              <span className="block font-bold text-[16px] text-ink">Add photos</span>
+              {/* Wraps rather than truncates: on a phone this is the line
+                  that says the bar is still a drop target, and half of it
+                  followed by an ellipsis says nothing. */}
+              <span className="block text-[13px] text-ink-secondary">
+                Drop them here, or open it to browse and shoot.
+              </span>
+            </span>
+            <ChevronDown
+              size={19} aria-hidden
+              className="shrink-0 text-ink-faint group-hover:text-ink transition-colors duration-150"
+            />
+          </button>
+        </Card>
+      ) : (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+          className="overflow-hidden"
+        >
+          <Card
+            className={cn(
+              "relative border-2 border-dashed transition-colors duration-200 cursor-pointer",
+              drag ? "border-blue bg-blue-soft" : "border-line-strong hover:border-blue/60",
+            )}
+            onClick={() => inputRef.current?.click()}
+            {...dropHandlers}
+          >
+            {/* The way back to one line. Offered only while the pile is empty,
+                for the reason `collapsed` gives — with photos staged this would
+                be a button that visibly does nothing. stopPropagation because the
+                card it sits in is itself one big "open the picker" target. */}
+            {files.length === 0 && (
+              <Button
+                variant="ghost" size="sm"
+                aria-expanded={true}
+                className="absolute top-3 right-3 text-ink-faint"
+                onClick={(e) => { e.stopPropagation(); setOpen(false); }}
+              >
+                <ChevronUp aria-hidden /> Hide
+              </Button>
+            )}
+            <div className="flex flex-col items-center text-center gap-3 py-8">
+              <PhotoUploadIllustration />
+              <h2 className="text-xl font-bold text-ink">Drag photos here</h2>
+              <p className="text-sm text-ink-secondary">
+                or bring them in another way — the AI writes the listing from your shots.
+              </p>
+              <div className="flex flex-wrap justify-center gap-2.5 mt-1">
+                <Button
+                  variant="primary" size="lg"
+                  onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
+                >
+                  <FolderOpen aria-hidden /> Browse Files
+                </Button>
+                <Button
+                  variant="secondary" size="lg"
+                  onClick={(e) => { e.stopPropagation(); cameraRef.current?.click(); }}
+                >
+                  <Camera aria-hidden /> Take Photos
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </motion.div>
+      )}
 
       <AnimatePresence>
         {files.length > 0 && (

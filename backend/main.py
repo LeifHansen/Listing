@@ -858,6 +858,12 @@ def health() -> dict:
         # Read by the UI: App.jsx's setup banner, useListingForm's category
         # lookups, ShopMode. Capability, not configuration.
         "anthropic_configured": config.anthropic_ready(),
+        "google_ai_configured": config.google_ai_ready(),
+        # Which backend actually drafts a listing. Capability, not a secret:
+        # "the AI is configured" stopped being one bit the moment there were
+        # two of them, and a seller reporting a bad draft is reporting it
+        # about whichever model this names.
+        "identify_provider": config.identify_provider(),
         "ebay_configured": config.ebay_ready(),
         "taxonomy_configured": config.taxonomy_ready(),
         # How long a listing of the seller's own is kept after it ends
@@ -881,6 +887,8 @@ def _diagnostics() -> dict:
         # diff response shapes against git history and guess.
         "build": config.BUILD_SHA or "unknown",
         "anthropic_configured": config.anthropic_ready(),
+        "google_ai_configured": config.google_ai_ready(),
+        "identify_provider": config.identify_provider(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
@@ -4231,15 +4239,28 @@ RETAIL_FLOOR_RATIO = float(os.getenv("RETAIL_FLOOR_RATIO", "0.45") or 0.45)
 # It may never downgrade an item, lower a price, or overwrite something the
 # seller can already see is right.
 #
-# OFF unless asked for. The lookup is a second vision call with up to
-# RESEARCH_MAX_SEARCHES web searches inside it, and it runs INSIDE the
-# identify request — the seller (or the whole bulk batch) waits on it. The
-# gate below catches most of a thrift store ("edition", "rare", "book",
+# OFF unless asked for, ON THE CLAUDE BACKEND. There, the lookup is a second
+# vision call with up to RESEARCH_MAX_SEARCHES web searches inside it, run as
+# a server-tool loop that pauses and resumes — sequentially, INSIDE the
+# identify request, with the seller (or the whole bulk batch) waiting on it.
+# The gate below catches most of a thrift store ("edition", "rare", "book",
 # "record", "glass"...), so the morning it shipped on "auto" every identify
-# went from seconds to a minute or more and the app read as broken. Set
-# RESEARCH_PASS=auto (or always) to turn it on; the fix that lets it run
-# without holding the draft hostage is the one that earns "auto" back.
-RESEARCH_PASS = os.getenv("RESEARCH_PASS", "off").strip().lower() or "off"
+# went from seconds to a minute or more and the app read as broken.
+#
+# The Google backend is where that cost stops being the deciding factor: the
+# grounded lookup is ONE generateContent call that searches server-side and
+# comes back with the pages it read attached. That is the "fix that lets it
+# run without holding the draft hostage" this note has been waiting for, so
+# the resolved default follows the backend — see research_pass(). An explicit
+# RESEARCH_PASS still wins over both, in either direction.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "").strip().lower()
+
+
+def research_pass() -> str:
+    """off | auto | always — the setting, or the backend's own default."""
+    if RESEARCH_PASS:
+        return RESEARCH_PASS
+    return "auto" if config.identify_provider() == "google" else "off"
 
 # Words in a draft that mean an identification decides the price. Any of them
 # and the item gets looked up: this is the "is this the expensive one?" list.
@@ -4869,9 +4890,10 @@ def _research_reason(listing: Listing, observations: str = "") -> str:
     what this is worth", which is a property of the item and of how sure the
     draft sounds, never of the number on it.
     """
-    if RESEARCH_PASS == "off":
+    setting = research_pass()
+    if setting == "off":
         return ""
-    if RESEARCH_PASS == "always":
+    if setting == "always":
         return "always"
     haystack = " ".join([
         listing.title or "", listing.brand or "", listing.description or "",
@@ -4913,7 +4935,7 @@ def _research_draft(listing: Listing, image_paths: list,
     reason = _research_reason(listing, observations)
     if not reason:
         return None
-    if not config.anthropic_ready():
+    if not config.vision_ready():
         return None
     # A first pass that was SURE and hedged nothing has earned its answer;
     # research still runs on everything else, including "high" confidence on a
@@ -5562,6 +5584,12 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
 # Caps raised on request. A high bound stays so a pathological huge upload
 # can't OOM the box; per-image dimension downscale (MAX_WORK_SIDE) bounds pixel
 # memory regardless.
+# What a seller is told when no vision backend is configured at all. Names
+# BOTH keys: either one is enough to identify photos, and a message naming
+# only Anthropic sent an operator with a Google key to buy a second one.
+NO_VISION_BACKEND = ("No vision backend is configured (set GOOGLE_API_KEY or "
+                     "ANTHROPIC_API_KEY); cannot identify images.")
+
 MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
 MAX_BULK_FILES = 250    # per bulk batch (many items) — the supported batch size
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
@@ -5605,9 +5633,8 @@ async def upload(
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
     run_pipeline = str(pipeline).lower() in ("true", "1", "yes", "on")
-    if run_pipeline and not config.anthropic_ready():
-        raise HTTPException(
-            400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if run_pipeline and not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
@@ -6285,11 +6312,13 @@ async def image_smart_crop(
 
 @app.post("/api/identify/{session_id}")
 def identify(session_id: str, request: Request) -> dict:
-    """Run Claude vision over the optimized images and draft a listing."""
-    if not config.anthropic_ready():
-        raise HTTPException(
-            400, "ANTHROPIC_API_KEY not configured; cannot identify images."
-        )
+    """Run vision over the optimized images and draft a listing.
+
+    Which model looks at the photos is config.identify_provider()'s call —
+    Gemini where a Google key is set, Claude otherwise. Either way the draft
+    that comes back has the same shape, so nothing below this line changes."""
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
@@ -8469,8 +8498,8 @@ async def bulk_upload(
     notes: the seller's comma-separated inventory of the pile. Saved with the
     staging session, which is also what makes it survive a restart — a resumed
     batch re-reads it from disk exactly like the first run did."""
-    if not config.anthropic_ready():
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     # The worker thread can't return a 401, so the login requirement (billing
     # is per-account) is enforced before the upload is accepted.
     if tokens.enabled() and await run_in_threadpool(_uid, request) is None:
@@ -8917,8 +8946,8 @@ def identify_async(session_id: str, request: Request) -> dict:
     """Start a background identify; poll /api/bulk/status/{job_id} for the
     result. Same outcome as POST /api/identify, but it never holds a long
     synchronous request open, so slow vision calls can't time out the browser."""
-    if not config.anthropic_ready():
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     _assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")

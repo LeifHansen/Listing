@@ -123,6 +123,11 @@ _MIN_AREA = float(os.getenv("ART_MIN_AREA", "0.12") or 0.12)
 # that case is to do nothing at all, so this returns None rather than a box
 # equal to the whole photo — which would composite the picture onto white,
 # re-encode it, and change nothing except its file size.
+#
+# quad_from_alpha holds the same line against a matte, where it has to be read
+# as an AREA rather than as a span: the shape there may be turned, and a
+# picture at 12 degrees fills a bounding box spanning the whole photo while
+# leaving a wedge of floor in each corner of it. That is a real cut.
 _BLEED_SPAN = float(os.getenv("ART_BLEED_SPAN", "0.97") or 0.97)
 
 # Grow the box outward by this share of its own size before it is used. The
@@ -136,8 +141,8 @@ _MARGIN = float(os.getenv("ART_MARGIN", "0.02") or 0.02)
 #
 # Shared by both halves of this module. The geometric scan below asks it of the
 # content it found in the photo (see _is_turned_rectangle), and quad_from_alpha
-# asks it of a remote engine's matte. It is the same question in both places
-# and it is asked the same way, because the thing being separated is the same:
+# asks it of a segmentation model's matte. It is the same question in both
+# places and it is asked the same way, because what is being separated is the
 # a picture, which is a rectangle however it is held, from a shape that is not
 # a rectangle at any angle at all.
 
@@ -162,7 +167,7 @@ def _solid(shape: Image.Image, box: Optional[Box] = None) -> Image.Image:
     The hole is not a fact about the shape. It is a fact about the MASK:
     whatever inside the picture happens to match the wall it hangs on drops
     out of it -- a white mount, a pale sky, bare canvas, the glare off
-    glazing, or on a remote engine's matte a patch the model let go. None of
+    glazing, or on a segmentation matte a patch the model let go. None of
     it says anything about whether the OUTER EDGE is a rectangle, which is
     the only thing this module ever asks and the only thing it ever cuts to.
 
@@ -308,9 +313,46 @@ def _is_turned_rectangle(region: Image.Image, upright: float) -> bool:
 # Stopping late is the only outcome that cuts the artwork, so every threshold
 # here errs toward stopping early, and the result is unioned with the content
 # box so a scan that finds nothing can never shrink it.
+#
+# WHAT "STILL THE WALL" LOOKS LIKE IS A FACT ABOUT THE PHOTO, NOT A NUMBER.
+#
+# The report: framed prints shot on a rumpled sheet, and the background removed
+# from almost none of them. The content mask had the picture exactly right in
+# every one of them -- a dark frame on pale cloth, filling 0.89 of its own box
+# and 0.42 of the photo, a textbook find. What refused them was this scan. A
+# sheet has creases in it and a crease is texture, so the FIRST line in from
+# the edge already read as "not the wall". Every side stopped where it started,
+# the box grew to the whole photo, the bleed test saw a picture running off all
+# four edges, and the photo was kept as shot.
+#
+# The same arithmetic refuses a plain seamless sweep, which is the commonest
+# backdrop there is. The surround is one median colour and a sweep is LIT: 22
+# levels brighter at the top of the frame than at the bottom is an ordinary
+# lamp, against an _EDGE_DIST of 6. Measured on a clean white sweep with no
+# picture in the band at all, every row scores a hit share of 1.00. Neither
+# case is a photo with anything wrong with it, and neither was visible: the
+# only line logged was the bleed refusal, which named the one thing that had
+# not happened.
+#
+# That is also why the answer was MOST of them rather than the odd photo. The
+# trigger is the backdrop, and a seller shoots their whole set on one backdrop.
+#
+# So the two thresholds are FLOORS, and the bar is whatever the surround in
+# this photo actually does: the top of its own spread across the band, or the
+# floor, whichever is higher. On a flat sweep the band's spread is a level or
+# two, the floor wins, and nothing about a photo that already worked changes.
+# On a lit sweep, a crumpled sheet or a wood table the bar rises above the
+# gradient and the creases, and the scan goes back to looking for something
+# the backdrop is not already doing by itself.
 _EDGE_DIST = int(os.getenv("ART_EDGE_DIST", "6") or 6)
 _EDGE_TEXTURE = int(os.getenv("ART_EDGE_TEXTURE", "6") or 6)
 _EDGE_SHARE = float(os.getenv("ART_EDGE_SHARE", "0.10") or 0.10)
+# How much of the surround's own spread is left BELOW the bar. The band is
+# mostly surround by assumption, so the bar sits near the top of what it does:
+# high enough that a crease or a gradient is not an edge, low enough to still
+# be a bar. A picture poking into the band can only push it UP, which stops the
+# scan sooner and leaves the content box as it was -- the safe way to be wrong.
+_EDGE_QUANTILE = float(os.getenv("ART_EDGE_QUANTILE", "0.99") or 0.99)
 # How many consecutive non-surround lines end the scan. One line is a scratch
 # on the table or a row of sensor noise; two in a row is an edge.
 _EDGE_RUN = int(os.getenv("ART_EDGE_RUN", "2") or 2)
@@ -321,6 +363,22 @@ Box = tuple[int, int, int, int]
 Quad = tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]
 
 
+def _band(size: tuple[int, int]) -> tuple[Image.Image, int]:
+    """The ring around the edge of the frame that is ASSUMED to be surround,
+    as a mask, and how many lines deep it is.
+
+    Everything this module knows about the background comes from here: its
+    colour (_surround) and how far that colour wanders (_scan_inward). The two
+    have to read the same band or the second is calibrating against something
+    the first never sampled.
+    """
+    w, h = size
+    band = max(1, round(min(w, h) * _SURROUND_BAND))
+    ring = Image.new("L", (w, h), 255)
+    ring.paste(0, (band, band, max(band, w - band), max(band, h - band)))
+    return ring, band
+
+
 def _surround(small: Image.Image) -> tuple[int, int, int]:
     """The colour of whatever the picture is lying on or hanging against,
     sampled from a band around the edge of the frame.
@@ -328,38 +386,59 @@ def _surround(small: Image.Image) -> tuple[int, int, int]:
     Median rather than mean: a mean is dragged by the corner of the picture
     poking into the band, and a median is not until half the band is picture.
     """
-    w, h = small.size
-    band = max(1, round(min(w, h) * _SURROUND_BAND))
-    ring = Image.new("L", (w, h), 255)
-    inner = (band, band, max(band, w - band), max(band, h - band))
-    ring.paste(0, inner)
-    med = ImageStat.Stat(small, ring).median
+    med = ImageStat.Stat(small, _band(small.size)[0]).median
     return (int(med[0]), int(med[1]), int(med[2]))
 
 
-def _content(small: Image.Image) -> Image.Image:
+def _away_from(small: Image.Image, colour: tuple[int, int, int]) -> Image.Image:
+    """How far each pixel sits from `colour` — Chebyshev over the channels, so
+    a picture that differs in only one channel is still a picture."""
+    far = ImageChops.difference(small, Image.new("RGB", small.size, colour))
+    r, g, b = far.split()
+    return ImageChops.lighter(ImageChops.lighter(r, g), b)
+
+
+def _texture(small: Image.Image) -> Image.Image:
+    """How busy each pixel's neighbourhood is — the morphological gradient, the
+    local range over a 3x3 window. Cheap, and unlike an edge kernel it responds
+    to texture as well as to lines."""
+    grey = small.convert("L")
+    return ImageChops.difference(grey.filter(ImageFilter.MaxFilter(3)),
+                                 grey.filter(ImageFilter.MinFilter(3)))
+
+
+def _quantile(hist: list[int], q: float) -> int:
+    """The level at or below which `q` of the samples in `hist` fall."""
+    total = sum(hist)
+    if not total:
+        return 0
+    want, run = total * q, 0
+    for level, n in enumerate(hist):
+        run += n
+        if run >= want:
+            return level
+    return len(hist) - 1
+
+
+def _content(small: Image.Image,
+             bars: Optional[tuple[int, int]] = None) -> Image.Image:
     """A 1-bit mask of everything that is not the surround.
 
     Two signals, ORed, because each one alone misses a picture the other
     catches: colour (a bright print on a white wall) and local contrast (a
     pale drawing on paper the same white as the table it is on).
-    """
-    far = ImageChops.difference(small, Image.new("RGB", small.size,
-                                                 _surround(small)))
-    r, g, b = far.split()
-    # Chebyshev over the channels: the largest single-channel difference. A
-    # picture that differs in only one channel is still a picture.
-    chroma = ImageChops.lighter(ImageChops.lighter(r, g), b)
 
-    grey = small.convert("L")
-    # Morphological gradient — the local range over a 3x3 window. Cheap, and
-    # unlike an edge kernel it responds to texture as well as to lines.
-    busy = ImageChops.difference(grey.filter(ImageFilter.MaxFilter(3)),
-                                 grey.filter(ImageFilter.MinFilter(3)))
+    `bars` overrides the two thresholds for a photo whose background does not
+    hold still at them — see _second_look. The default is the pair this module
+    was fitted with, and it is what every photo is asked first.
+    """
+    dist, busy_at = bars or (_SURROUND_DIST, _BUSY_LEVEL)
+    chroma = _away_from(small, _surround(small))
+    busy = _texture(small)
 
     mask = ImageChops.lighter(
-        chroma.point(lambda v: 255 if v >= _SURROUND_DIST else 0),
-        busy.point(lambda v: 255 if v >= _BUSY_LEVEL else 0))
+        chroma.point(lambda v: 255 if v >= dist else 0),
+        busy.point(lambda v: 255 if v >= busy_at else 0))
     if _CLOSE > 0:
         k = _CLOSE * 2 + 1
         # Close: join the parts of one picture, then take back the growth.
@@ -430,6 +509,12 @@ def _scan_inward(small: Image.Image, box: Box) -> Box:
     table top and a sheet of backing card have neither; a frame's moulding, a
     sheet's drop shadow and a canvas's edge all have one or the other.
 
+    Weak against the SURROUND IN THIS PHOTO, not against a fixed number. A
+    crumpled sheet and a lit sweep both clear a fixed 6 with nothing in front
+    of the camera at all, which refused the seller's whole set — see the note
+    on _EDGE_DIST. The floors still apply; the bar is the higher of the floor
+    and the top of what the band does on its own.
+
     Unioned with `box`, never replacing it: a scan that finds nothing at all
     leaves the content box exactly as it was, and can only ever make the
     result larger. See the note on _EDGE_DIST for why every error this can
@@ -437,33 +522,56 @@ def _scan_inward(small: Image.Image, box: Box) -> Box:
     """
     w, h = small.size
     surround = _surround(small)
-    px = small.load()
-    grey = small.convert("L")
-    texture = ImageChops.difference(grey.filter(ImageFilter.MaxFilter(3)),
-                                    grey.filter(ImageFilter.MinFilter(3)))
-    tx = texture.load()
+    away, texture = _away_from(small, surround), _texture(small)
+    ap, tx = away.load(), texture.load()
+    ring, band = _band(small.size)
+    wanders = _quantile(away.histogram(ring), _EDGE_QUANTILE)
+    carries = _quantile(texture.histogram(ring), _EDGE_QUANTILE)
+    dist_bar, tex_bar = (max(_EDGE_DIST, wanders + 1),
+                         max(_EDGE_TEXTURE, carries + 1))
+    if dist_bar > _EDGE_DIST or tex_bar > _EDGE_TEXTURE:
+        log.info("art border: the background of this photo is not flat — it "
+                 "wanders %d levels off its own colour and carries %d of "
+                 "texture, so the edge scan looks for %d/%d rather than %d/%d",
+                 wanders, carries, dist_bar, tex_bar,
+                 _EDGE_DIST, _EDGE_TEXTURE)
+    inside_band = []
 
     def _not_surround(pts) -> bool:
         pts = list(pts)
         if not pts:
             return False
-        hits = 0
-        for x, y in pts:
-            r, g, b = px[x, y][:3]
-            if (max(abs(r - surround[0]), abs(g - surround[1]),
-                    abs(b - surround[2])) >= _EDGE_DIST
-                    or tx[x, y] >= _EDGE_TEXTURE):
-                hits += 1
+        hits = sum(1 for x, y in pts
+                   if ap[x, y] >= dist_bar or tx[x, y] >= tex_bar)
         return hits / len(pts) >= _EDGE_SHARE
 
-    def _first(lines) -> Optional[int]:
-        """The index of the first of _EDGE_RUN consecutive non-surround lines."""
+    def _first(lines, step: int, span: int) -> Optional[int]:
+        """The OUTERMOST of _EDGE_RUN consecutive non-surround lines, or None
+        when this side has nothing to say.
+
+        `step` is +1 scanning from the top or the left and -1 from the bottom
+        or the right, which is what turns the index the run ENDED on back into
+        the one it started on. A reverse scan used to subtract it as though it
+        counted upward, landing two lines INSIDE the edge it had just found —
+        a couple of cells off the right and the bottom of every piece this
+        scan located, invisible only because _MARGIN grew them back.
+        """
         run = 0
         for i, pts in lines:
             if _not_surround(pts):
                 run += 1
                 if run >= _EDGE_RUN:
-                    return i - run + 1
+                    at = i - step * (run - 1)
+                    # Inside the band this scan ASSUMED was surround, which is
+                    # where its own colour and its own bar were measured. A
+                    # side that answers "the thing starts here" about the lines
+                    # it just called wall has contradicted its premise, and it
+                    # has crossed no surround at all, so it has learned nothing
+                    # about where a mount ends. The content box stands.
+                    if (at if step > 0 else span - 1 - at) < band:
+                        inside_band.append(True)
+                        return None
+                    return at
             else:
                 run = 0
         return None
@@ -472,14 +580,73 @@ def _scan_inward(small: Image.Image, box: Box) -> Box:
     # box's span: the frame's moulding reaches past the printed area it
     # surrounds, and a scan confined to that area's rows would step over the
     # corners of its own frame.
-    left = _first((x, ((x, y) for y in range(h))) for x in range(w))
-    right = _first((x, ((x, y) for y in range(h))) for x in range(w - 1, -1, -1))
-    top = _first((y, ((x, y) for x in range(w))) for y in range(h))
-    bottom = _first((y, ((x, y) for x in range(w))) for y in range(h - 1, -1, -1))
+    left = _first(((x, ((x, y) for y in range(h))) for x in range(w)), 1, w)
+    right = _first(((x, ((x, y) for y in range(h)))
+                    for x in range(w - 1, -1, -1)), -1, w)
+    top = _first(((y, ((x, y) for x in range(w))) for y in range(h)), 1, h)
+    bottom = _first(((y, ((x, y) for x in range(w)))
+                     for y in range(h - 1, -1, -1)), -1, h)
+    if inside_band:
+        log.info("art border: %d of the four edge scans stopped inside the "
+                 "band they had assumed was background — those sides keep the "
+                 "border the content mask found", len(inside_band))
     return (min(box[0], left if left is not None else box[0]),
             min(box[1], top if top is not None else box[1]),
             max(box[2], (right + 1) if right is not None else box[2]),
             max(box[3], (bottom + 1) if bottom is not None else box[3]))
+
+
+# The share of the assumed-background band a raised content mask may still
+# call content before the second look is dropped. A picture nicking the band
+# with a corner is ordinary; a mask that still finds content all round the rim
+# after the bar was raised above the background's own spread is not looking at
+# a background at all — it is the picture, running off the edge of the photo,
+# and the seller's rule for that case is to do nothing.
+_BAND_QUIET = float(os.getenv("ART_BAND_QUIET", "0.15") or 0.15)
+
+
+def _second_look(small: Image.Image) -> Optional[tuple[int, int]]:
+    """Content thresholds raised to clear the background's OWN variation, or
+    None when there is nothing to gain or nothing to trust.
+
+    _SURROUND_DIST and _BUSY_LEVEL are fixed numbers measured against one
+    median colour, which is a fair description of a wall and a poor one of a
+    lit sweep or a crumpled sheet. When the background wanders past them the
+    mask turns the whole photo on, the largest region is the photo, and the
+    picture in the middle of it is never found — see the note on _EDGE_DIST,
+    which is the same failure one step down.
+
+    The bar comes from the band around the edge of the frame — the same band
+    the surround colour comes from, read at the same quantile the edge scan
+    reads it at and for the same reason — and it can only ever RISE: the
+    floors are what this module was fitted with, and no photo is asked less.
+
+    Two things make it a second look rather than the first. It is only ever
+    reached by a photo that was already going to be kept as shot, so nothing
+    that works today can change. And it is dropped unless the raised mask
+    leaves the band QUIET — a mask that still finds content all the way round
+    the rim was never looking at a background, and the picture that fills the
+    frame is the bleed case, which stays refused.
+    """
+    ring = _band(small.size)[0]
+    bars = (max(_SURROUND_DIST,
+                _quantile(_away_from(small, _surround(small)).histogram(ring),
+                          _EDGE_QUANTILE) + 1),
+            max(_BUSY_LEVEL,
+                _quantile(_texture(small).histogram(ring), _EDGE_QUANTILE) + 1))
+    if bars == (_SURROUND_DIST, _BUSY_LEVEL):
+        return None
+    band_hist = _content(small, bars).histogram(ring)
+    still_on = band_hist[255] / max(1, sum(band_hist))
+    if still_on > _BAND_QUIET:
+        log.info("art border: raising the bar to %d/%d still leaves %.2f of "
+                 "the rim reading as content — that is the picture, not a "
+                 "background; keeping the photo as shot", *bars, still_on)
+        return None
+    log.info("art border: no border at %d/%d, and this photo's background is "
+             "not flat — looking again at %d/%d, which is where its own rim "
+             "settles", _SURROUND_DIST, _BUSY_LEVEL, *bars)
+    return bars
 
 
 def border(rgb: Image.Image) -> Optional[Box]:
@@ -494,6 +661,13 @@ def border(rgb: Image.Image) -> Optional[Box]:
     a picture, or a picture that bleeds off the edge. The caller must treat
     None as "do nothing" rather than as "fall back to the model" — falling
     back to the model is the bug this module exists for.
+
+    Asked twice at most. The first pass is the one this module was fitted
+    with, and a photo that answers it is finished there — so no photo whose
+    border is found today can change. Only a REFUSAL goes round again, with
+    the background measured off this photo's own rim instead of assumed flat,
+    and a refusal is the one outcome a second look cannot make worse: the
+    alternative to whatever it finds is the photo, kept as shot.
     """
     w, h = rgb.size
     if w < 8 or h < 8:
@@ -501,9 +675,35 @@ def border(rgb: Image.Image) -> Optional[Box]:
     scale = _SIDE / max(w, h)
     small = (rgb.resize((max(8, round(w * scale)), max(8, round(h * scale))),
                         Image.BOX) if scale < 1 else rgb).convert("RGB")
-    sw, sh = small.size
 
-    cells, box, region = _largest_region(_content(small))
+    box = _border_in(small, None)
+    if box is None:
+        bars = _second_look(small)
+        if bars is not None:
+            box = _border_in(small, bars)
+    if box is None:
+        return None
+
+    # Back to full resolution, then outward. Rounded out on every side (floor
+    # the near edges, ceil the far ones) so the scaling itself never shaves a
+    # row off the artwork.
+    k = 1 / scale if scale < 1 else 1.0
+    left, top = box[0] * k, box[1] * k
+    right, bottom = box[2] * k, box[3] * k
+    mx, my = (right - left) * _MARGIN, (bottom - top) * _MARGIN
+    return (max(0, int(left - mx)), max(0, int(top - my)),
+            min(w, int(right + mx + 0.999)), min(h, int(bottom + my + 0.999)))
+
+
+def _border_in(small: Image.Image,
+               bars: Optional[tuple[int, int]]) -> Optional[Box]:
+    """The picture's outer border in `small`'s own coordinates, or None.
+
+    Every refusal in this module is here, and each one means the same thing to
+    the caller: keep the photo as shot.
+    """
+    sw, sh = small.size
+    cells, box, region = _largest_region(_content(small, bars))
     if not box or region is None:
         log.info("art border: no content found — keeping the photo as shot")
         return None
@@ -538,20 +738,11 @@ def border(rgb: Image.Image) -> Optional[Box]:
         log.info("art border: the picture runs off every edge — no border to "
                  "cut to, keeping the photo as shot")
         return None
-
-    # Back to full resolution, then outward. Rounded out on every side (floor
-    # the near edges, ceil the far ones) so the scaling itself never shaves a
-    # row off the artwork.
-    k = 1 / scale if scale < 1 else 1.0
-    left, top = box[0] * k, box[1] * k
-    right, bottom = box[2] * k, box[3] * k
-    mx, my = (right - left) * _MARGIN, (bottom - top) * _MARGIN
-    return (max(0, int(left - mx)), max(0, int(top - my)),
-            min(w, int(right + mx + 0.999)), min(h, int(bottom + my + 0.999)))
+    return box
 
 
-# How nearly a remote engine's matte must fill the best rectangle that can be
-# drawn around it before that shape is allowed to be a picture's border.
+# How nearly a segmentation model's matte must fill the best rectangle that can
+# be drawn around it before that shape is allowed to be a picture's border.
 #
 # Measured at the BEST ANGLE, not against the axis-aligned box, and that is the
 # whole point. A print photographed hand-held over a floor is a rectangle that
@@ -568,8 +759,8 @@ _MIN_ALPHA_RECT_FILL = float(os.getenv("ART_ALPHA_RECT_FILL", "0.9") or 0.9)
 
 def quad_from_alpha(size: tuple[int, int],
                     alpha: Image.Image) -> Optional[Quad]:
-    """The picture's outer edge as a remote engine's matte found it, as four
-    corners -- or None.
+    """The picture's outer edge as a segmentation model's matte found it, as
+    four corners -- or None.
 
     The second opinion for the case this module otherwise answers with "do
     nothing": a print whose border `border()` could not scan at all -- one
@@ -581,6 +772,12 @@ def quad_from_alpha(size: tuple[int, int],
     easily. What it cannot be trusted with is what is INSIDE that sheet, and
     nothing here asks it -- only the outer shape is taken, and the caller
     fills it solid through quad().
+
+    Which model drew that matte is the caller's business and makes no
+    difference to anything here. A paid engine was the only one allowed to
+    answer for a while; the local one may now too (images._border_alpha), and
+    the reason the answer is safe is the same for both -- it is checked for
+    being a rectangle, and only its outer shape is used.
 
     Four corners rather than a box because the photo is the angled one: the
     axis-aligned box around a print lying at 8 degrees includes a triangle of
@@ -628,6 +825,18 @@ def quad_from_alpha(size: tuple[int, int],
     if area < _MIN_AREA:
         log.info("art border: the matte covers %.2f of the frame, too small "
                  "to be the picture — keeping the photo as shot", area)
+        return None
+    # ...and the bleed case, which the geometric scan has always refused and
+    # this did not. A matte covering the whole frame says there is no
+    # background in this photo, so there is no border in it either: cutting to
+    # it composites the picture onto white, re-encodes it, and changes nothing
+    # except the file size -- while telling the seller their background was
+    # removed and charging them for it. See _BLEED_SPAN for why the question
+    # is put to the area here and to the span there.
+    if area >= _BLEED_SPAN:
+        log.info("art border: the matte covers %.2f of the frame — nothing in "
+                 "this photo is background, so there is no border to cut to; "
+                 "keeping it as shot", area)
         return None
 
     # Out by the usual margin, then back: the corners are found in the TURNED

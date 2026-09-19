@@ -89,12 +89,30 @@ function Main() {
           />
         )}
 
-        {health._loaded && !health.anthropic_configured && (
+        {/* Two backends now, so "the AI isn't configured" has two meanings and
+            they need different sentences. Identification runs on Gemini where
+            GOOGLE_API_KEY is set; refine and the specifics fills are Claude's
+            either way. A server with only a Google key identifies photos
+            perfectly well, and nagging it for ANTHROPIC_API_KEY sent an
+            operator to add a key they did not need. */}
+        {health._loaded && !health.anthropic_configured && !health.google_ai_configured && (
           <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">
             <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
             <span>
-              The AI isn't configured on the server yet (missing ANTHROPIC_API_KEY) —
-              photo identification and refine won't work until it's set.
+              The AI isn't configured on the server yet (missing GOOGLE_API_KEY
+              and ANTHROPIC_API_KEY) — photo identification won't work until
+              one of them is set.
+            </span>
+          </div>
+        )}
+
+        {health._loaded && !health.anthropic_configured && health.google_ai_configured && (
+          <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">
+            <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+            <span>
+              Photo identification is running on Google, but ANTHROPIC_API_KEY
+              isn't set — refine and the item-specifics fills won't work until
+              it is.
             </span>
           </div>
         )}

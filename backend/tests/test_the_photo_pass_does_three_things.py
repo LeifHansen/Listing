@@ -221,9 +221,13 @@ def test_the_studio_gets_the_cutout_or_a_reason(model):
     assert out.getpixel((5, 5)) == (255, 255, 255)
     assert out.getpixel((300, 200)) == ITEM
 
+    # ...and the reason, when there is nothing to cut. An EMPTY frame, not
+    # the one above: a photo with a rectangular item in it that the model
+    # will not keep is cut to that item's own scanned border now, which is
+    # test_a_square_object_is_a_product_too.py's subject.
     model.matte = lambda rgb: Image.new("L", rgb.size, 0)
     with pytest.raises(ValueError, match="separate"):
-        images.remove_background_white(photo)
+        images.remove_background_white(Image.new("RGB", (600, 400), BACKDROP))
 
 
 def test_the_studio_is_told_busy_rather_than_made_to_wait(monkeypatch):
