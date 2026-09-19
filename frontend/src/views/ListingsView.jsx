@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { OriginChip, originOf } from "@/components/ui/badges";
 import { InfoTip } from "@/components/ui/fields";
 import { ListingCard } from "@/components/ListingCard";
+import { ListingFilters } from "@/components/ListingFilters";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -21,6 +22,7 @@ import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
   endedGraceDays, isDraft, keptWhenEnded, listingsView, orderListings,
 } from "@/lib/listingsView";
+import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
@@ -109,6 +111,7 @@ export function ListingsView({ search = "" }) {
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
+    listingFilters, clearListingFilters,
     health,
   } = useApp();
   const { confirm, toast } = useToast();
@@ -289,8 +292,12 @@ export function ListingsView({ search = "" }) {
         || (i.listing?.title || i.title || "").toLowerCase().includes(q)
         || (i.listing?.brand || "").toLowerCase().includes(q)
         || (i.listing?.description || "").toLowerCase().includes(q));
-    return orderListings(shown, metricsById);
-  }, [listingsState.items, tab, q, metricsById]);
+    // The filter bar's cut, last: the search box and the tab are both about
+    // one field each, and this is the one that stacks. Every predicate lives
+    // in lib/listingFilters, so the grid, the "showing N of M" line and the
+    // empty state below all ask the same question of the same list.
+    return orderListings(filterListings(shown, listingFilters), metricsById);
+  }, [listingsState.items, tab, q, metricsById, listingFilters]);
 
   // "Create Listing" from an empty tab used to look broken: this list now
   // lives on the Sell screen, so startNew() lands you where you already are
@@ -359,17 +366,35 @@ export function ListingsView({ search = "" }) {
       </Card>
     );
   } else if (items.length === 0) {
+    // Three empties, and they are not the same claim. "No listings yet" is
+    // about the ACCOUNT; a tab emptied by the search box or the filter bar is
+    // about the question that was asked, and it has to say so and offer the
+    // way back — otherwise a seller who forgot a filter was on is looking at
+    // an empty store with a button to create their first listing.
+    const filtered = !isEmptyFilters(listingFilters);
     body = (
       <Card className="p-0">
         <EmptyState
           illustration={tab.empty.illustration}
-          title={q ? "No matches" : tab.empty.title}
-          message={q ? `Nothing matches "${search}" here.` : tab.empty.message}
-          action={!q && tab.empty.action && (
+          title={q || filtered ? "No matches" : tab.empty.title}
+          message={
+            q && filtered
+              ? `Nothing here matches "${search}" with these filters on.`
+              : filtered
+                ? "No listings on this tab match the filters you've set."
+                : q
+                  ? `Nothing matches "${search}" here.`
+                  : tab.empty.message
+          }
+          action={filtered ? (
+            <Button variant="soft" size="lg" onClick={clearListingFilters}>
+              Clear filters
+            </Button>
+          ) : (!q && tab.empty.action && (
             <Button variant="primary" size="lg" onClick={go}>
               <tab.empty.action.icon aria-hidden /> {tab.empty.action.label}
             </Button>
-          )}
+          ))}
         />
       </Card>
     );
@@ -495,6 +520,13 @@ export function ListingsView({ search = "" }) {
           </button>
         ))}
       </div>
+
+      {/* The cut on top of the tab, and the named views that keep one. The
+          "of" number is the whole tab rather than the page or the store:
+          it is the count the badge above shows, so the two cannot disagree
+          about how much a filter took away. */}
+      <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
+        total={view.kind === "unavailable" ? null : counts[tabId]} />
 
       {/* Profit framework: on the archive tab, total up what the SOLD items
           with a recorded cost basis made (sale − purchase price, before
