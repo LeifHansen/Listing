@@ -46,6 +46,11 @@ STUDIO_MAX_CALLS = 120
 # item and a bulk batch does that for a pile, so this has to sit far above a
 # real session and far below a day's allowance.
 TAXONOMY_MAX_CALLS = 300
+# The Etsy category suggestion is one Claude call per press, behind a login
+# and keyed on the user rather than the address: the cost is the model's, so
+# the budget belongs to whoever is signed in. A crosspost review of a whole
+# store makes one per listing, which is what the size allows for.
+ETSY_SUGGEST_MAX_CALLS = 120
 # Cap the number of tracked keys so a spray across many IPs can't grow the
 # dict without bound; cold entries are swept when the cap is reached, and if
 # none are cold the coldest are dropped anyway (see check).

@@ -169,3 +169,37 @@ def test_every_registered_provider_is_named_in_the_roster():
     wondering where the marketplace went."""
     assert ([p.key for p in mp.every_provider()]
             == list(config.MARKETPLACE_KEYS))
+
+
+def test_the_roster_order_survives_a_provider_imported_from_somewhere_else():
+    """The order is the app's, not whichever module python imported first.
+
+    Providers self-register at module import, and the roster used to be in
+    registration order — so `_ensure_loaded` importing eBay first was the
+    only thing keeping eBay at the head of it. Any other import of a
+    provider module beat that to the registry and silently reordered the
+    seller's roster; a test file importing etsy_provider to instantiate the
+    class was enough to do it. This registers them backwards and expects the
+    roster to come out in MARKETPLACE_KEYS order regardless.
+    """
+    import importlib
+
+    from backend import config
+    from backend.marketplaces import depop_provider, ebay_provider, etsy_provider
+
+    registry = importlib.import_module("backend.marketplaces")
+    saved_registry = dict(registry._REGISTRY)
+    saved_order = list(registry._ORDER)
+    try:
+        registry._REGISTRY.clear()
+        registry._ORDER.clear()
+        # Backwards on purpose.
+        for module in (depop_provider, etsy_provider, ebay_provider):
+            registry.register(
+                next(v for v in vars(module).values()
+                     if isinstance(v, type) and getattr(v, "key", None))())
+        assert [p.key for p in registry.every_provider()] == list(config.MARKETPLACE_KEYS)
+    finally:
+        registry._REGISTRY.clear()
+        registry._REGISTRY.update(saved_registry)
+        registry._ORDER[:] = saved_order

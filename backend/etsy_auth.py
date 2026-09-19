@@ -1,8 +1,12 @@
 """'Sign in with Etsy' — OAuth 2.0 Authorization Code with PKCE (Etsy v3).
 
-Etsy never sees a client secret: the app keystring (ETSY_CLIENT_ID) plus a
-per-flow PKCE verifier is the whole handshake, and every API call carries the
-keystring again as the x-api-key header.
+The consent handshake is the app keystring (ETSY_CLIENT_ID) plus a per-flow
+PKCE verifier — no client secret changes hands there. Every request to Etsy
+after that, the token exchange included, identifies the app through the
+x-api-key header, and since 2026-02-09 that header must read
+`keystring:sharedSecret` (config.etsy_api_key); the bare keystring that used
+to suffice is refused outright. api_headers() below is the one place the
+header is built, and services/etsy imports it rather than spelling its own.
 
 Two Etsy quirks shape this module:
 - Refresh tokens ROTATE: every refresh returns a new ~90-day refresh token
@@ -44,11 +48,21 @@ def authorize_url(state: str, code_challenge: str) -> str:
     return f"{config.ETSY_AUTH_URL}?{urlencode(params)}"
 
 
+def api_headers(access_token: str = "") -> dict:
+    """Headers for one Etsy v3 request: the app's x-api-key (keystring and
+    shared secret, see the module docstring) plus, when the call is made on
+    a seller's behalf, their bearer token."""
+    headers = {"x-api-key": config.etsy_api_key(), "Accept": "application/json"}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    return headers
+
+
 def _token_request(data: dict) -> dict:
     resp = httpx.post(
         config.ETSY_TOKEN_URL,
         json=data,
-        headers={"x-api-key": config.ETSY_CLIENT_ID},
+        headers=api_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -86,9 +100,7 @@ def refresh_access_token(refresh_token: str) -> dict:
 
 
 def _headers(access_token: str) -> dict:
-    return {"Authorization": f"Bearer {access_token}",
-            "x-api-key": config.ETSY_CLIENT_ID,
-            "Accept": "application/json"}
+    return api_headers(access_token)
 
 
 def fetch_me(access_token: str) -> dict:
@@ -115,6 +127,47 @@ def list_shipping_profiles(access_token: str, shop_id: str) -> list[dict]:
     return [{"id": str(p.get("shipping_profile_id", "")),
              "name": p.get("title") or f"Profile {p.get('shipping_profile_id')}"}
             for p in resp.json().get("results", [])]
+
+
+def list_readiness_states(access_token: str, shop_id: str) -> list[dict]:
+    """[{id, name}] for the processing-time picker.
+
+    Etsy calls these "processing profiles" in Shop Manager and "readiness
+    state definitions" in the API; since mid-2025 every physical listing must
+    name one (createDraftListing refuses without a readiness_state_id). They
+    have no title, so one is written from what the profile says. Creating one
+    is left to Shop Manager: the seller has to decide their own handling
+    time, and a profile this app invented would be a promise to buyers nobody
+    here made.
+    """
+    resp = httpx.get(
+        f"{config.ETSY_API_BASE}/application/shops/{shop_id}/readiness-state-definitions",
+        headers=_headers(access_token), timeout=30)
+    resp.raise_for_status()
+    out = []
+    for p in resp.json().get("results", []):
+        rid = str(p.get("readiness_state_definition_id")
+                  or p.get("readiness_state_id") or "")
+        if not rid:
+            continue
+        out.append({"id": rid, "name": describe_readiness_state(p)})
+    return out
+
+
+def describe_readiness_state(profile: dict) -> str:
+    """A readable name for one processing profile, from its own fields."""
+    title = str(profile.get("title") or "").strip()
+    if title:
+        return title
+    lo, hi = profile.get("min_processing_time"), profile.get("max_processing_time")
+    unit = str(profile.get("processing_time_unit") or "business days")
+    unit = unit.replace("_", " ")
+    state = str(profile.get("readiness_state") or "").replace("_", " ")
+    if lo and hi:
+        span = f"{lo}" if lo == hi else f"{lo}–{hi}"
+        kind = "Made to order" if state == "made to order" else "Ships"
+        return f"{kind} in {span} {unit}"
+    return (state.capitalize() if state else "Processing profile")
 
 
 def list_return_policies(access_token: str, shop_id: str) -> list[dict]:

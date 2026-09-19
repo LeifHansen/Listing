@@ -66,7 +66,7 @@ _SCRUBBED = (
     # Inherited from a developer's shell it would gate (or un-gate) the tests
     # for reasons unrelated to the code.
     "ETSY_COMMERCIAL_ACCESS", "ETSY_ACCESS_TIER", "ETSY_APP_SEATS",
-    "ETSY_OWNER_EMAILS",
+    "ETSY_OWNER_EMAILS", "ETSY_SHARED_SECRET",
     # The launch gate: which marketplaces the app offers at all. Inherited
     # from a developer's shell it would add or remove whole marketplaces from
     # the roster, so the gate's own tests would pass for reasons unrelated to

@@ -5,11 +5,13 @@ image -> PATCH state=active. Etsy has no sandbox, so the provider's dry-run
 mode (no connection) returns the exact payload this module would send.
 
 Transport note: the v3 listing endpoints take x-www-form-urlencoded bodies,
-not JSON (form_body does the conversion). Image upload is the exception —
-that one is genuinely multipart.
+not JSON (form_body does the conversion). Two exceptions: image upload is
+genuinely multipart, and the INVENTORY endpoint (price, stock, SKU — see
+update_listing_inventory) is the one write that takes JSON.
 """
 from __future__ import annotations
 
+import mimetypes
 import threading
 import time
 from typing import Optional
@@ -18,13 +20,15 @@ import httpx
 
 from .. import config
 from ..config import log
+from ..etsy_auth import api_headers
 from ..models import Listing
 
 
 def _headers(access_token: str) -> dict:
-    return {"Authorization": f"Bearer {access_token}",
-            "x-api-key": config.ETSY_CLIENT_ID,
-            "Accept": "application/json"}
+    # One builder for the whole Etsy surface (etsy_auth.api_headers): the
+    # x-api-key it carries changed shape in 2026 and a second copy here is
+    # exactly how one of them would have been missed.
+    return api_headers(access_token)
 
 
 def form_body(payload: dict) -> dict:
@@ -77,6 +81,21 @@ class EtsyError(ValueError):
         self.issues = issues
 
 
+class RateLimited(EtsyError):
+    """Etsy answered 429: nothing was done, and asking again right now only
+    spends more of the allowance. Not a rejection — the listing is fine —
+    and not unknown either: a 429 is Etsy saying it did not act.
+
+    `retry_after` is Etsy's own number when it sent one (seconds), else a
+    guess small enough to wait through; the bulk paths back off by it."""
+
+    outcome_unknown = False
+
+    def __init__(self, message: str, issues: list[dict], retry_after: float):
+        super().__init__(message, issues)
+        self.retry_after = retry_after
+
+
 class UnknownOutcome(EtsyError):
     """The request went out and we never learned what Etsy did with it.
 
@@ -118,10 +137,35 @@ def _unknown(doing: str) -> "UnknownOutcome":
     return UnknownOutcome(_UNKNOWN_ISSUE["fix"], [dict(_UNKNOWN_ISSUE)])
 
 
+# A 429 with a Retry-After this short is waited through once, inside _send,
+# before anyone hears about it; longer waits are the caller's decision.
+RETRY_AFTER_WAIT_MAX = 10.0
+RETRY_AFTER_DEFAULT = 5.0
+
+
+def _retry_after(resp: httpx.Response) -> float:
+    try:
+        value = float(str(resp.headers.get("Retry-After") or "").strip())
+    except (ValueError, AttributeError):
+        return RETRY_AFTER_DEFAULT
+    return value if value > 0 else RETRY_AFTER_DEFAULT
+
+
 def _raise_for_status(resp: httpx.Response, doing: str,
                       changes: bool = True) -> None:
     if resp.status_code < 400:
         return
+    if resp.status_code == 429:
+        wait = _retry_after(resp)
+        log.warning("etsy: rate limited while %s (retry after %ss)", doing, wait)
+        raise RateLimited(
+            f"Etsy asked us to slow down while {doing}.",
+            [{"target": "generic", "level": "error",
+              "title": "Etsy asked us to slow down",
+              "fix": f"Nothing was changed. Wait about {wait:.0f} seconds "
+                     "and try again — Etsy limits how fast an app may talk "
+                     "to it."}],
+            retry_after=wait)
     if changes and resp.status_code >= 500:
         # Something that already had the request in hand failed to answer for
         # it. Not a rejection.
@@ -152,16 +196,27 @@ def _send(doing: str, changes: bool, call, *args, **kwargs) -> httpx.Response:
     """Run one Etsy request, classifying a failure to get an answer.
 
     A write with no answer is an UNKNOWN OUTCOME; a read with no answer is an
-    ordinary failure, because nothing on Etsy moved.
+    ordinary failure, because nothing on Etsy moved. A 429 whose Retry-After
+    is short is waited through once, here, because a 429 is the one refusal
+    that is nobody's mistake and cures itself.
     """
-    try:
-        return call(*args, **kwargs)
-    except _NEVER_SENT as exc:
-        raise _unreachable(doing, exc) from exc
-    except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
-        if changes:
-            raise _unknown(doing) from exc
-        raise _unreachable(doing, exc) from exc
+    for attempt in (1, 2):
+        try:
+            resp = call(*args, **kwargs)
+        except _NEVER_SENT as exc:
+            raise _unreachable(doing, exc) from exc
+        except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
+            if changes:
+                raise _unknown(doing) from exc
+            raise _unreachable(doing, exc) from exc
+        if resp.status_code == 429 and attempt == 1:
+            wait = _retry_after(resp)
+            if wait <= RETRY_AFTER_WAIT_MAX:
+                log.info("etsy: rate limited while %s — waiting %ss once", doing, wait)
+                time.sleep(wait)
+                continue
+        return resp
+    return resp  # pragma: no cover - the loop always returns
 
 
 def create_draft_listing(access_token: str, shop_id: str, payload: dict) -> dict:
@@ -189,6 +244,38 @@ def update_listing(access_token: str, shop_id: str, listing_id: str,
             "url": body.get("url") or "", "state": body.get("state", "")}
 
 
+def get_listing_inventory(access_token: str, listing_id: str) -> dict:
+    """The listing's inventory record: its products, each with the offerings
+    that carry price, quantity and readiness state. Read before every
+    inventory write, because the PUT replaces the whole record."""
+    doing = "reading the Etsy listing's stock"
+    resp = _send(doing, False, httpx.get,
+                 f"{config.ETSY_API_BASE}/application/listings/{listing_id}/inventory",
+                 headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing, changes=False)
+    return resp.json()
+
+
+def update_listing_inventory(access_token: str, listing_id: str,
+                             body: dict) -> dict:
+    """Price and quantity on an EXISTING listing.
+
+    updateListing (the PATCH above) takes neither: they are properties of
+    the inventory's offerings, set once by createDraftListing and from then
+    on only through this endpoint. The PATCH used to carry them anyway, and
+    Etsy ignored them — a price drop here reported "updated" while Etsy went
+    on asking the old price. This is also the one v3 write that takes a JSON
+    body rather than a form (mapping_etsy.build_inventory_body shapes it).
+    """
+    doing = "updating the Etsy listing's price and stock"
+    resp = _send(
+        doing, True, httpx.put,
+        f"{config.ETSY_API_BASE}/application/listings/{listing_id}/inventory",
+        headers=_headers(access_token), json=body, timeout=60)
+    _raise_for_status(resp, doing)
+    return resp.json()
+
+
 def get_listing(access_token: str, listing_id: str) -> dict:
     doing = "reading the Etsy listing"
     resp = _send(doing, False, httpx.get,
@@ -198,6 +285,35 @@ def get_listing(access_token: str, listing_id: str) -> dict:
     return resp.json()
 
 
+def list_listing_images(access_token: str, listing_id: str) -> list[dict]:
+    """[{listing_image_id, rank}] in Etsy's display order — what a revise
+    reconciles the seller's current photo set against."""
+    doing = "reading the Etsy listing's photos"
+    resp = _send(doing, False, httpx.get,
+                 f"{config.ETSY_API_BASE}/application/listings/{listing_id}/images",
+                 headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing, changes=False)
+    out = []
+    for img in resp.json().get("results", []):
+        image_id = str(img.get("listing_image_id") or "")
+        if image_id:
+            out.append({"listing_image_id": image_id,
+                        "rank": int(img.get("rank") or 0)})
+    return sorted(out, key=lambda i: i["rank"])
+
+
+def delete_listing_image(access_token: str, shop_id: str, listing_id: str,
+                         image_id: str) -> None:
+    """Take one photo off the listing. Etsy keeps the file, so a photo taken
+    off by mistake can be put back without a re-upload."""
+    doing = "removing a photo from the Etsy listing"
+    resp = _send(
+        doing, True, httpx.delete,
+        f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}/images/{image_id}",
+        headers=_headers(access_token), timeout=30)
+    _raise_for_status(resp, doing)
+
+
 def upload_listing_image(access_token: str, shop_id: str, listing_id: str,
                          image_bytes: bytes, filename: str, rank: int) -> None:
     doing = f"uploading photo {rank}"
@@ -205,7 +321,8 @@ def upload_listing_image(access_token: str, shop_id: str, listing_id: str,
         doing, True, httpx.post,
         f"{config.ETSY_API_BASE}/application/shops/{shop_id}/listings/{listing_id}/images",
         headers=_headers(access_token),
-        files={"image": (filename, image_bytes, "image/jpeg")},
+        files={"image": (filename, image_bytes,
+                         mimetypes.guess_type(filename)[0] or "image/jpeg")},
         data={"rank": str(rank)},
         timeout=120)
     _raise_for_status(resp, doing)
@@ -227,9 +344,7 @@ def taxonomy_nodes() -> list[dict]:
             return _TAXONOMY_CACHE["nodes"]
         resp = httpx.get(
             f"{config.ETSY_API_BASE}/application/seller-taxonomy/nodes",
-            headers={"x-api-key": config.ETSY_CLIENT_ID,
-                     "Accept": "application/json"},
-            timeout=60)
+            headers=api_headers(), timeout=60)
         resp.raise_for_status()
         nodes = resp.json().get("results", [])
         _TAXONOMY_CACHE.update(at=time.time(), nodes=nodes)
@@ -255,33 +370,92 @@ def taxonomy_paths() -> list[dict]:
     return _flatten_taxonomy(taxonomy_nodes())
 
 
-def suggest_taxonomy(listing: Listing) -> dict:
-    """Pick the best Etsy category for this listing: cheap keyword filter down
-    to a shortlist, then one small Claude call to choose (the same shape as
-    the eBay taxonomy suggestion flow). Returns {taxonomy_id, path}."""
+_INDEX_CACHE: dict = {"at": 0.0, "paths": None}
+
+
+def taxonomy_index() -> list[dict]:
+    """Every leaf path with its words already split out.
+
+    A crosspost scores the whole tree once per listing, and splitting three
+    thousand paths per item is the difference between a batch of two hundred
+    costing a second and costing a minute. Cached beside the tree it is
+    built from, and rebuilt when that is refetched.
+    """
+    if (_INDEX_CACHE["paths"] is not None
+            and _INDEX_CACHE["at"] == _TAXONOMY_CACHE["at"]):
+        return _INDEX_CACHE["paths"]
+    paths = [{**p, "words": set(p["path"].lower().replace(">", " ").split())}
+             for p in taxonomy_paths()]
+    _INDEX_CACHE.update(at=_TAXONOMY_CACHE["at"], paths=paths)
+    return paths
+
+
+def _words_of(*parts: str) -> set:
+    text = " ".join(filter(None, parts)).lower()
+    return {w for w in text.replace("/", " ").replace("-", " ").replace(">", " ").split()
+            if len(w) > 2}
+
+
+_EBAY_PATH_CACHE: dict[str, Optional[dict]] = {}
+
+
+def taxonomy_from_ebay_path(category_suggestion: str) -> Optional[dict]:
+    """The Etsy category an eBay category PATH already names, or None.
+
+    eBay files an item under "Clothing, Shoes & Accessories > Men >
+    Men's Clothing > T-Shirts" and Etsy under "Clothing > Men's Clothing >
+    Shirts & Tees > T-shirts"; the leaf is the same word. Matching on it
+    saves a model call per listing on the items a crosspost is mostly made
+    of, and the ones it cannot match fall through to the shortlist and the
+    AI as before.
+
+    Deliberately strict: every word of eBay's LAST segment has to appear in
+    the Etsy path, so "T-Shirts" matches "T-shirts" and a vague eBay leaf
+    matches nothing rather than something. Ties are broken by the rest of
+    eBay's path, then by the shortest Etsy path — the least specific shelf
+    that still fits, which is the one a seller would not have to correct
+    downwards.
+    """
+    trail = [seg.strip() for seg in (category_suggestion or "").split(">") if seg.strip()]
+    if not trail:
+        return None
+    key = " > ".join(trail).lower()
+    if key in _EBAY_PATH_CACHE:
+        return _EBAY_PATH_CACHE[key]
+    leaf = _words_of(trail[-1])
+    context = _words_of(*trail[:-1])
+    best = None
+    if leaf:
+        for candidate in taxonomy_index():
+            if not leaf <= candidate["words"]:
+                continue
+            rank = (-len(context & candidate["words"]), len(candidate["path"]))
+            if best is None or rank < best[0]:
+                best = (rank, {"id": candidate["id"], "path": candidate["path"]})
+    if len(_EBAY_PATH_CACHE) > 512:
+        _EBAY_PATH_CACHE.clear()
+    _EBAY_PATH_CACHE[key] = best[1] if best else None
+    return _EBAY_PATH_CACHE[key]
+
+
+def shortlist_taxonomy(listing: Listing, limit: int = 30) -> list[dict]:
+    """The `limit` Etsy categories whose paths share the most words with this
+    listing — what the model is asked to choose between."""
+    words = _words_of(listing.title, listing.brand, listing.category_suggestion,
+                      " ".join(s.value for s in listing.item_specifics))
+    scored = sorted(taxonomy_index(),
+                    key=lambda p: len(words & p["words"]), reverse=True)
+    return [{"id": p["id"], "path": p["path"]} for p in scored[:limit]]
+
+
+def pick_taxonomy(listing: Listing, shortlist: list[dict]) -> dict:
+    """One small Claude call: which of these categories is the item's."""
     # Imported here, not at module scope: this is the only function that needs
     # the Anthropic SDK, and hoisting it made the whole Etsy transport layer
     # unimportable wherever that dependency isn't installed (CI's minimal
     # install, which exists to unit-test exactly these pure request bodies).
     from . import claude_ai
 
-    paths = taxonomy_paths()
-    text = " ".join(filter(None, [
-        listing.title, listing.brand, listing.category_suggestion,
-        " ".join(s.value for s in listing.item_specifics)])).lower()
-    words = {w for w in text.replace("/", " ").replace("-", " ").split()
-             if len(w) > 2}
-
-    def score(p: dict) -> int:
-        path_words = set(p["path"].lower().replace(">", " ").split())
-        return len(words & path_words)
-
-    shortlist = sorted(paths, key=score, reverse=True)[:30]
-    if not shortlist:
-        return {"taxonomy_id": 0, "path": ""}
-    if not config.anthropic_ready():
-        best = shortlist[0]
-        return {"taxonomy_id": best["id"], "path": best["path"]}
     client = claude_ai._client()
     options = "\n".join(f"{p['id']}: {p['path']}" for p in shortlist)
     resp = client.messages.create(
@@ -301,3 +475,27 @@ def suggest_taxonomy(listing: Listing) -> dict:
         picked = 0
     match = next((p for p in shortlist if p["id"] == picked), shortlist[0])
     return {"taxonomy_id": match["id"], "path": match["path"]}
+
+
+def suggest_taxonomy(listing: Listing) -> dict:
+    """The best Etsy category for this listing, and where the answer came
+    from: {taxonomy_id, path, source}.
+
+    Three steps, cheapest first. eBay's own category path often names the
+    same shelf Etsy does, and that costs nothing; failing that, a keyword
+    shortlist of thirty and one small model call; failing the model (no key,
+    unparseable answer), the keyword winner. `source` is "ebay_path" | "ai" |
+    "keyword", which is what lets a crosspost tell a seller how many
+    categories it had to guess at.
+    """
+    from_ebay = taxonomy_from_ebay_path(listing.category_suggestion)
+    if from_ebay:
+        return {"taxonomy_id": from_ebay["id"], "path": from_ebay["path"],
+                "source": "ebay_path"}
+    shortlist = shortlist_taxonomy(listing)
+    if not shortlist:
+        return {"taxonomy_id": 0, "path": "", "source": ""}
+    if not config.anthropic_ready():
+        best = shortlist[0]
+        return {"taxonomy_id": best["id"], "path": best["path"], "source": "keyword"}
+    return {**pick_taxonomy(listing, shortlist), "source": "ai"}

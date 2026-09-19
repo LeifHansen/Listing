@@ -10,7 +10,8 @@ def _listing(**kw):
         price=45.0, quantity=1, condition="USED_EXCELLENT",
         images=["a.jpg"],
         etsy={"taxonomy_id": 1234, "who_made": "someone_else",
-              "when_made": "1990s", "shipping_profile_id": "77"},
+              "when_made": "1990s", "shipping_profile_id": "77",
+              "return_policy_id": "5", "readiness_state_id": "3"},
     )
     base.update(kw)
     return Listing(**base)
@@ -102,7 +103,8 @@ def test_preflight_price_floor():
 def test_preflight_missing_etsy_fields_are_targeted():
     lst = _listing(etsy={})
     targets = _errors(mapping_etsy.preflight(lst, {}))
-    assert {"etsy_taxonomy", "etsy_attribution", "etsy_shipping_profile"} <= targets
+    assert {"etsy_taxonomy", "etsy_attribution", "etsy_shipping_profile",
+            "etsy_readiness_state", "etsy_return_policy"} <= targets
 
 
 def test_preflight_shipping_profile_fallback_order():

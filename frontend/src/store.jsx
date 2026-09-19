@@ -196,6 +196,20 @@ export function AppProvider({ children }) {
     setLayout(mode);
     writeLocal("listings-layout", mode);
   }, []);
+  // Where a listing lives — the second cut of the listings pipeline, beside
+  // the lifecycle tab. Remembered like the tab is, per device.
+  const [listingsMarket, setMarket] = useState(() => {
+    try { return readLocal("listings-market") || "all"; } catch (e) { return "all"; }
+  });
+  const setListingsMarket = useCallback((next) => {
+    const id = next || "all";
+    setMarket(id);
+    try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
+  }, []);
+  // The ticks on the LIVE listings (the drafts have draftSelection below):
+  // an id -> true map of what the seller picked for a crosspost. Memory-only,
+  // and held here so opening a listing to fix it keeps the other ticks.
+  const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
@@ -395,6 +409,28 @@ export function AppProvider({ children }) {
   const connectedMarketplaces = useMemo(
     () => marketplaces.filter((m) => m.connected),
     [marketplaces]);
+
+  // The Etsy shop's shipping profiles, return policies and processing
+  // profiles plus the account defaults (GET /api/etsy/settings-options).
+  // Loaded once Etsy is connected and read by everything that judges a
+  // listing "Etsy-ready" — the editor's blockers, the drafts grid, the
+  // crosspost — so the answer is the same on every screen. null until
+  // asked; {error: true} when the shop could not be read.
+  const [etsyShop, setEtsyShop] = useState(null);
+  const loadEtsyOptions = useCallback(async () => {
+    try {
+      setEtsyShop(await api("/api/etsy/settings-options"));
+    } catch (e) {
+      setEtsyShop({ error: true, shipping_profiles: [], return_policies: [],
+        readiness_states: [], selected: {} });
+    }
+  }, []);
+  const etsyConnected = connectedMarketplaces.some((m) => m.key === "etsy");
+  useEffect(() => {
+    if (etsyConnected) loadEtsyOptions();
+  }, [etsyConnected, loadEtsyOptions]);
+  // Gone the moment Etsy is disconnected, whatever was last loaded.
+  const etsyOptions = etsyConnected ? etsyShop : null;
 
   // ---------- notifications (sold alerts) ----------
   // Polled while logged in so "your item sold" reaches the seller without a
@@ -1583,6 +1619,7 @@ export function AppProvider({ children }) {
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     listingsLayout, setListingsLayout,
+    listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     health, loadHealth,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     clearSignedInState,
@@ -1590,6 +1627,7 @@ export function AppProvider({ children }) {
     ebay, loadEbayStatus, canPublishLive,
     easypost, loadEasypostStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
+    etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
     messages, loadMessages, threads, loadThread, sendMessage,
@@ -1612,8 +1650,10 @@ export function AppProvider({ children }) {
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
     isSuperadmin,
     listingsLayout, setListingsLayout,
+    listingsMarket, setListingsMarket, liveSelection,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
+    etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,

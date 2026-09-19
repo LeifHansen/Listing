@@ -215,11 +215,12 @@ Ordered by what it costs a seller.
       `ebay-*` id from every route that creates rows. `backend/main.py` (~2064, ~5415, ~6661).
 - [ ] **Abuse controls when billing is off.** `/api/upload` is anonymous with
       no rate limit and only a per-file cap (40 × 60 MB) on a 1 GB volume;
-      `/api/etsy/suggest-taxonomy` runs a Claude call with no login, no
-      charge, no limit; with `TOKENS_ENABLED` off every AI route is anonymous
-      spend. Require login on the bulk upload unconditionally, add a per-IP
-      limit and a per-request byte cap on `/api/upload`, and charge or gate
-      the Etsy suggestion. `backend/main.py`, `backend/ratelimit.py`.
+      with `TOKENS_ENABLED` off every AI route is anonymous spend. Require
+      login on the bulk upload unconditionally, add a per-IP limit and a
+      per-request byte cap on `/api/upload`. `backend/main.py`,
+      `backend/ratelimit.py`. (Done: `/api/etsy/suggest-taxonomy` needs a
+      login and has a per-user ceiling, `ratelimit.ETSY_SUGGEST_MAX_CALLS`;
+      it is still not charged.)
 - [ ] **R2 client init holds a lock across un-timed network calls** and
       `objstore.probe()` has no caller; give boto3 a `Config` with timeouts
       and probe from the startup thread. No `statement_timeout` /
@@ -310,9 +311,11 @@ Ordered by what it costs a seller.
   and `count_foreign_listings` scan every row today.
 - Etsy and Depop revises send the whole payload (no shadow, no dirty
   tracking per marketplace) — the eBay three-way merge does not exist
-  there. Not a launch gap while both are withheld
-  (`MARKETPLACES_ENABLED`); it becomes one again the day either is
-  switched back on.
+  there. Etsy is now offered, so this is live: an edit made on etsy.com is
+  replaced by this app's copy on the next revise, and the editor, the
+  card chip and the crosspost wizard say so. The fix is an Etsy store sync
+  (a shadow to reconcile against) plus per-marketplace dirty tracking —
+  the roadmap's Phase 4.
 - Trading-side call budgeting: the watchers/offers walks (GetMyeBaySelling
   up to 25 pages, GetBestOffers up to 10) run on every 2-minute cache miss;
   caches keyed on `token[-12:]` churn on each refresh; `RateLimited.retry_after`

@@ -39,11 +39,30 @@ def _ensure_loaded() -> None:
     if _LOADED:
         return
     _LOADED = True
-    # Each provider module self-registers at import. eBay first: it's the
-    # flagship and the default target for legacy single-marketplace publishes.
+    # Each provider module self-registers at import. The ROSTER's order is
+    # settled by _ordered_keys rather than by which of these lands first, so
+    # a provider module imported from somewhere else cannot reorder it.
     from . import ebay_provider  # noqa: F401
     from . import etsy_provider  # noqa: F401
     from . import depop_provider  # noqa: F401
+
+
+def _ordered_keys() -> list[str]:
+    """Registered keys in the order the APP declares (config.MARKETPLACE_KEYS),
+    with anything registered that the config does not name after them, in the
+    order it registered.
+
+    Not registration order, which is what this used to be: providers
+    self-register at module import, so the order was whichever module python
+    happened to import first. `_ensure_loaded` imports eBay first to make
+    that come out right — and any other import of a provider module,
+    anywhere, beat it to the registry and silently reordered the roster.
+    A test file that imported etsy_provider to instantiate the class was
+    enough. The roster is the first thing a seller reads and eBay leads it,
+    so the order is stated rather than inherited.
+    """
+    ranked = {key: i for i, key in enumerate(config.MARKETPLACE_KEYS)}
+    return sorted(_ORDER, key=lambda k: (ranked.get(k, len(ranked)), _ORDER.index(k)))
 
 
 def get(key: str) -> Optional[MarketplaceProvider]:
@@ -64,7 +83,7 @@ def get(key: str) -> Optional[MarketplaceProvider]:
 
 
 def all_providers() -> list[MarketplaceProvider]:
-    """Every provider this deployment offers, in registration order.
+    """Every provider this deployment offers, in MARKETPLACE_KEYS order.
 
     The gate lives here rather than in _ensure_loaded() so a withheld
     marketplace stays imported and constructible: its module still
@@ -73,7 +92,7 @@ def all_providers() -> list[MarketplaceProvider]:
     of un-commented code.
     """
     _ensure_loaded()
-    return [_REGISTRY[k] for k in _ORDER if config.marketplace_enabled(k)]
+    return [_REGISTRY[k] for k in _ordered_keys() if config.marketplace_enabled(k)]
 
 
 def every_provider() -> list[MarketplaceProvider]:
@@ -81,7 +100,7 @@ def every_provider() -> list[MarketplaceProvider]:
     for the test that keeps config.MARKETPLACE_KEYS honest. Not for anything
     seller-facing: that is all_providers()."""
     _ensure_loaded()
-    return [_REGISTRY[k] for k in _ORDER]
+    return [_REGISTRY[k] for k in _ordered_keys()]
 
 
 def available() -> list[MarketplaceProvider]:

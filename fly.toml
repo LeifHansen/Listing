@@ -32,17 +32,22 @@ primary_region = 'sjc'
   # the same commit that gives it a certificate.
   APP_ORIGINS = 'https://app.thryftshop.com,https://listing-lfwjrg.fly.dev'
   DATA_DIR = '/data'
-  # WHICH MARKETPLACES THIS DEPLOY OFFERS. eBay launches to the mobile app on
-  # its own; Etsy and Depop are built and stay in the tree, withheld from
-  # every seller-facing surface until we revisit them. Withheld is also the
-  # code's default, so this line is the honest, reviewable statement of a
-  # launch decision rather than the thing that causes it — deleting it does
-  # not bring Etsy back. Add them here when we do: 'ebay,etsy' or 'all'.
+  # WHICH MARKETPLACES THIS DEPLOY OFFERS. eBay launched to the mobile app on
+  # its own; Etsy joined it once the integration was brought up to Etsy's
+  # 2026 API (the shared-secret header, processing profiles, price changes
+  # through the inventory record) and the eBay → Etsy crosspost landed.
+  # Depop stays built and withheld until its partner credentials arrive.
+  # Withheld is the code's default, so this line is the honest, reviewable
+  # statement of what is offered rather than a switch that could be lost —
+  # deleting it takes Etsy away again. 'all' adds Depop.
   #
-  # The ETSY_* settings below still describe a working, Etsy-approved
-  # integration. They are what comes back when this line grows, and none of
-  # them offers Etsy on their own.
-  MARKETPLACES_ENABLED = 'ebay'
+  # Etsy needs, as `fly secrets`, ETSY_CLIENT_ID, ETSY_SHARED_SECRET (Etsy
+  # refuses every request without it since 2026-02-09), ETSY_REDIRECT_URI
+  # (OAUTH_ORIGIN + /api/etsy/callback, registered on the Etsy app exactly)
+  # and ETSY_OWNER_EMAILS — the beta roster below. Missing any of the first
+  # three, the Etsy card says which; missing the roster, the gate is inert
+  # and every seller is sent to Etsy's own refusal page.
+  MARKETPLACES_ENABLED = 'ebay,etsy'
   # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
   # handful of shops (Etsy documents 4), not the unlimited Commercial Access
   # above it. Not a secret, so it lives here rather than in `fly secrets`:

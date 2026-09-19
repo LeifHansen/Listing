@@ -68,6 +68,7 @@ from .services.experts.art import match as art_match
 from .services.experts.base import NO_MATCH, Reference
 from .services.experts.art import comps as art_comps
 from .services.experts.art import roster as art_roster
+from .services import crosspost, inventory_mirror
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -7734,7 +7735,7 @@ def _settle_interrupted_jobs(records: list[dict]) -> None:
     settled from a mirror. For a batch that is the smaller number anyway, and
     resuming means it usually gets delivered rather than abandoned.
     """
-    resumed = _resume_interrupted_batches(records)
+    resumed = _resume_interrupted_batches(records) | _resume_interrupted_crossposts(records)
     for record in records:
         if record.get("id") in resumed:
             continue  # the work is being finished, so the charge was earned
@@ -10617,7 +10618,8 @@ def relist_listing(listing_id: str, request: Request) -> dict:
 
     data = dict(rec.get("listing") or {})
     data.update(_SALE_ONLY_FIELDS)
-    data["marketplaces"] = {}
+    data["marketplaces"] = marketplace_state.carry_live_others(
+        data.get("marketplaces") or {})
     # The AI's confidence in the ORIGINAL draft, from before the seller
     # reviewed it, published it and sold it. Carried over, "AI: low" would sit
     # on the new draft's card as a verdict on copy that has already sold once.
@@ -10948,6 +10950,131 @@ def _record_publish_verdict(session_id: str, uid: Optional[str],
         log.warning("publish verdict not recorded for %s: %s", session_id, exc)
 
 
+def _publish_targets(session_id: str, listing: Listing, mode: str,
+                     targets: list[str], uid: Optional[str], base_url: str,
+                     prev_rec: dict) -> dict:
+    """Publish one listing to several marketplaces, and record what happened.
+
+    Everything the publish route does past its legacy single-eBay path: the
+    concurrent fan-out, the per-marketplace failure isolation, the fold of
+    every outcome into the record under the row lock, and the refusal
+    verdict. Its own function because the crosspost job publishes through
+    exactly this and must not carry a second copy — a copy would be free to
+    drift on the two rules that cost a seller a duplicate live listing (a
+    deep copy of the listing per provider, and a fold that reads and writes
+    inside one critical section).
+    """
+    def _ctx(key: str) -> PublishContext:
+        # Its own deep copy: concurrent providers each mutate
+        # listing.marketplaces, and the fold below reads outcomes and a fresh
+        # DB record, never these working copies.
+        return PublishContext(
+            session_id=session_id, listing=listing.model_copy(deep=True),
+            mode=mode, base_url=base_url, uid=uid, prev_record=prev_rec)
+
+    def _publish_one(key: str) -> PublishOutcome:
+        provider = marketplaces.get(key)
+        if provider is None:
+            return PublishOutcome(ok=False, message=f"Unknown marketplace '{key}'.")
+        try:
+            return provider.publish(_ctx(key), provider.creds_for(uid))
+        except HTTPException as exc:
+            return PublishOutcome(ok=False, message=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 - isolate marketplace failures
+            log.warning("%s publish crashed: session=%s: %s", key, session_id, exc)
+            return PublishOutcome(
+                ok=False, message=f"{provider.label} publish failed: {exc}")
+
+    # Fan out CONCURRENTLY: each marketplace is its own network pipeline (eBay
+    # ingests photo URLs, Etsy uploads photo bytes), so a multi-marketplace
+    # publish costs the slowest one instead of the sum. Failure isolation is
+    # per-provider inside _publish_one; the same-listing duplicate guard stays
+    # intact (only the eBay provider takes it, per listing, not per thread).
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        outcomes = dict(zip(targets, pool.map(_publish_one, targets)))
+
+    # Fold every outcome into the record under the row lock. The read and the
+    # write have to be one critical section: providers (eBay especially) write
+    # the same row from inside publish, including from a background thread that
+    # can still be running here — a plain re-read-then-upsert loses whichever
+    # side commits first. (Concurrent providers make that race likelier, not
+    # rarer: each one is writing its own marketplace's state at the same time.)
+    top = marketplace_state.derive_top_status(prev_rec.get("status") or "", outcomes)
+
+    def _fold(data: dict) -> dict:
+        for key, outcome in outcomes.items():
+            marketplace_state.merge_state(data, key, outcome)
+        return data
+
+    data = db.mutate_listing_data(session_id, _fold, status=top, user_id=uid)
+    if data is None:
+        # No row yet (or no DB): fall back to creating one from the request.
+        data = _fold(listing.model_dump())
+        db.upsert_listing(session_id, data, status=top, user_id=uid)
+
+    _record_publish_verdict(session_id, uid, list(outcomes.values()), mode)
+    return outcomes
+
+
+def _publish_body(outcomes: dict, mode: str) -> dict:
+    """The multi-marketplace publish response: what went live, what didn't,
+    and one sentence naming both."""
+    live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
+    failed = [k for k, o in outcomes.items() if not o.ok]
+    dry = [k for k, o in outcomes.items() if o.dry_run]
+
+    def _label(key: str) -> str:
+        p = marketplaces.get(key)
+        return p.label if p else key
+
+    def _names(keys: list[str]) -> str:
+        labels = [_label(k) for k in keys]
+        return " and ".join(part for part in
+                            [", ".join(labels[:-1]), labels[-1]] if part)
+
+    if live:
+        message = f"Live on {_names(live)}."
+        if failed:
+            message += f" {_names(failed)} didn't make it — details below."
+    elif failed:
+        message = (f"{_names(failed)} rejected the listing — "
+                   "fix the issues below and try again.")
+    elif mode == "draft":
+        message = "Draft saved."
+    elif dry:
+        message = f"Dry run only — connect {_names(dry)} to post for real."
+    else:
+        message = "Nothing was published."
+
+    return {
+        "multi": True,
+        "mode": mode,
+        "published": bool(live),
+        "message": message,
+        "results": {
+            key: {
+                "ok": o.ok,
+                "published": o.ok and o.status == "published",
+                "dry_run": o.dry_run,
+                "listing_id": o.listing_id,
+                "url": o.url,
+                "message": o.message,
+                "issues": o.issues,
+                # Only when true, like the two below it: a marketplace that
+                # refused the listing says nothing here, and the clients read
+                # its absence as "this outcome is known". What it means when
+                # present is in PublishOutcome — the seller must check that
+                # marketplace before publishing again, not fix a field.
+                **({"outcome_unknown": True} if o.outcome_unknown else {}),
+                **({"promote_status": o.raw["promote_status"]}
+                   if o.raw.get("promote_status") else {}),
+                **({"record_warning": o.raw["record_warning"]}
+                   if o.raw.get("record_warning") else {}),
+            } for key, o in outcomes.items()
+        },
+    }
+
+
 @app.post("/api/publish")
 def publish(req: PublishRequest, request: Request) -> JSONResponse:
     """Publish orchestrator.
@@ -10991,125 +11118,22 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
         if key and key not in targets:
             targets.append(key)
 
-    def _ctx(own_listing: bool = False) -> PublishContext:
-        # own_listing gives the provider its own deep copy: concurrent
-        # providers each mutate listing.marketplaces, and the fold below reads
-        # outcomes + a fresh DB record, never these working copies.
-        listing = req.listing.model_copy(deep=True) if own_listing else req.listing
-        return PublishContext(
-            session_id=req.session_id, listing=listing, mode=req.mode,
-            base_url=_base_url(request), uid=uid, prev_record=prev_rec)
-
     if not targets or targets == ["ebay"]:
         # Legacy path — byte-identical responses; the provider already
         # persisted the record exactly as the old inline code did (including
         # racing rules around the background EPS refresh), so no second
         # upsert here.
         provider = marketplaces.get("ebay")
-        outcome = provider.publish(_ctx(), provider.creds_for(uid))
+        ctx = PublishContext(
+            session_id=req.session_id, listing=req.listing, mode=req.mode,
+            base_url=_base_url(request), uid=uid, prev_record=prev_rec)
+        outcome = provider.publish(ctx, provider.creds_for(uid))
         _record_publish_verdict(req.session_id, uid, [outcome], req.mode)
         return JSONResponse(outcome.raw)
 
-    def _publish_one(key: str) -> PublishOutcome:
-        provider = marketplaces.get(key)
-        if provider is None:
-            return PublishOutcome(ok=False, message=f"Unknown marketplace '{key}'.")
-        try:
-            return provider.publish(_ctx(own_listing=True),
-                                    provider.creds_for(uid))
-        except HTTPException as exc:
-            return PublishOutcome(ok=False, message=str(exc.detail))
-        except Exception as exc:  # noqa: BLE001 - isolate marketplace failures
-            log.warning("%s publish crashed: session=%s: %s",
-                        key, req.session_id, exc)
-            return PublishOutcome(
-                ok=False, message=f"{provider.label} publish failed: {exc}")
-
-    # Fan out CONCURRENTLY: each marketplace is its own network pipeline (eBay
-    # ingests photo URLs, Etsy uploads photo bytes), so a multi-marketplace
-    # publish costs the slowest one instead of the sum. Failure isolation is
-    # per-provider inside _publish_one; the same-listing duplicate guard stays
-    # intact (only the eBay provider takes it, per listing, not per thread).
-    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
-        outcomes = dict(zip(targets, pool.map(_publish_one, targets)))
-
-    # Fold every outcome into the record under the row lock. The read and the
-    # write have to be one critical section: providers (eBay especially) write
-    # the same row from inside publish, including from a background thread that
-    # can still be running here — a plain re-read-then-upsert loses whichever
-    # side commits first. (Concurrent providers make that race likelier, not
-    # rarer: each one is writing its own marketplace's state at the same time.)
-    top = marketplace_state.derive_top_status(
-        prev_rec.get("status") or "", outcomes)
-
-    def _fold(data: dict) -> dict:
-        for key, outcome in outcomes.items():
-            marketplace_state.merge_state(data, key, outcome)
-        return data
-
-    data = db.mutate_listing_data(req.session_id, _fold, status=top, user_id=uid)
-    if data is None:
-        # No row yet (or no DB): fall back to creating one from the request.
-        data = _fold(req.listing.model_dump())
-        db.upsert_listing(req.session_id, data, status=top, user_id=uid)
-
-    _record_publish_verdict(req.session_id, uid, list(outcomes.values()),
-                            req.mode)
-
-    live = [k for k, o in outcomes.items() if o.ok and o.status == "published"]
-    failed = [k for k, o in outcomes.items() if not o.ok]
-    dry = [k for k, o in outcomes.items() if o.dry_run]
-
-    def _label(key: str) -> str:
-        p = marketplaces.get(key)
-        return p.label if p else key
-
-    def _names(keys: list[str]) -> str:
-        labels = [_label(k) for k in keys]
-        return " and ".join(part for part in
-                            [", ".join(labels[:-1]), labels[-1]] if part)
-
-    if live:
-        message = f"Live on {_names(live)}."
-        if failed:
-            message += f" {_names(failed)} didn't make it — details below."
-    elif failed:
-        message = (f"{_names(failed)} rejected the listing — "
-                   "fix the issues below and try again.")
-    elif req.mode == "draft":
-        message = "Draft saved."
-    elif dry:
-        message = f"Dry run only — connect {_names(dry)} to post for real."
-    else:
-        message = "Nothing was published."
-
-    return JSONResponse({
-        "multi": True,
-        "mode": req.mode,
-        "published": bool(live),
-        "message": message,
-        "results": {
-            key: {
-                "ok": o.ok,
-                "published": o.ok and o.status == "published",
-                "dry_run": o.dry_run,
-                "listing_id": o.listing_id,
-                "url": o.url,
-                "message": o.message,
-                "issues": o.issues,
-                # Only when true, like the two below it: a marketplace that
-                # refused the listing says nothing here, and the clients read
-                # its absence as "this outcome is known". What it means when
-                # present is in PublishOutcome — the seller must check that
-                # marketplace before publishing again, not fix a field.
-                **({"outcome_unknown": True} if o.outcome_unknown else {}),
-                **({"promote_status": o.raw["promote_status"]}
-                   if o.raw.get("promote_status") else {}),
-                **({"record_warning": o.raw["record_warning"]}
-                   if o.raw.get("record_warning") else {}),
-            } for key, o in outcomes.items()
-        },
-    })
+    outcomes = _publish_targets(req.session_id, req.listing, req.mode, targets,
+                                uid, _base_url(request), prev_rec)
+    return JSONResponse(_publish_body(outcomes, req.mode))
 
 
 @app.post("/api/ebay/end-listing")
@@ -11199,6 +11223,11 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
             notifications.notify_sold(
                 _uid(request) or rec.get("user_id"), req.session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
+            # Same item, same box: a copy still live on Etsy is taking
+            # orders for stock this seller no longer has.
+            inventory_mirror.on_ebay_finished(
+                _uid(request) or rec.get("user_id"), req.session_id, data,
+                "sold on eBay")
             _purge_session_images_best_effort(req.session_id)
         res = {**res, "status": "sold"}
     elif ended:
@@ -11207,6 +11236,11 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # seller's own listing is filed as ended and swept once its grace
         # period is up. `removed` tells the client whether to drop the card
         # or reload it into Inactive.
+        # Ended on eBay by the seller: the Etsy copy was listed as one of a
+        # pair and is now the only one for sale. Down it comes too.
+        inventory_mirror.on_ebay_finished(
+            _uid(request) or rec.get("user_id"), req.session_id,
+            rec.get("listing") or {}, "ended on eBay")
         try:
             removed = listing_sync.settle_ended(
                 req.session_id, rec.get("listing") or {}, rec,
@@ -12237,6 +12271,7 @@ def marketplace_roster(request: Request) -> dict:
             "access_pending": pending,
             "access_pending_note": pending_note,
             "connected": bool(status.get("connected")),
+            "needs_reconnect": bool(status.get("needs_reconnect")),
             "username": status.get("username", ""),
             "env": status.get("env", "production"),
             "supports": p.supports(),
@@ -12244,9 +12279,18 @@ def marketplace_roster(request: Request) -> dict:
     return {"marketplaces": out}
 
 
-# Etsy-specific: the Settings pickers for the shop's shipping profiles and
-# return policies (Etsy's analog of /api/ebay/policies), and the AI category
-# suggestion. Literal paths, so they must sit above the {marketplace} routes.
+# Etsy-specific: the Settings pickers for the shop's shipping profiles,
+# return policies and processing profiles (Etsy's analog of
+# /api/ebay/policies), and the AI category suggestion. Literal paths, so they
+# must sit above the {marketplace} routes.
+#
+# The per-account Etsy defaults a seller may save: one id per picker. Each is
+# an Etsy numeric id, checked on the way in, because a stray value here used
+# to surface as int() crashing inside the publish rather than as a 400 at the
+# moment the seller could still fix it.
+ETSY_SETTING_KEYS = ("shipping_profile_id", "return_policy_id", "readiness_state_id")
+
+
 @app.get("/api/etsy/settings-options")
 def etsy_settings_options(request: Request) -> dict:
     provider = _marketplace_or_404("etsy")
@@ -12258,18 +12302,21 @@ def etsy_settings_options(request: Request) -> dict:
             creds["access_token"], creds["shop_id"])
         policies = etsy_auth.list_return_policies(
             creds["access_token"], creds["shop_id"])
+        readiness = etsy_auth.list_readiness_states(
+            creds["access_token"], creds["shop_id"])
     except Exception as exc:  # noqa: BLE001
         # `str(exc)` here is httpx's, so it carries the Etsy API base, the
         # path and the seller's own shop_id. Same rule as the eBay lookups.
-        raise _lookup_failed("load your Etsy shop's shipping and return "
-                             "options", exc) from exc
+        raise _lookup_failed("load your Etsy shop's shipping, return and "
+                             "processing options", exc) from exc
     settings = creds.get("settings") or {}
     return {
         "shipping_profiles": profiles,
         "return_policies": policies,
+        "readiness_states": readiness,
+        "currency_code": str(settings.get("currency_code") or ""),
         "selected": {
-            "shipping_profile_id": str(settings.get("shipping_profile_id") or ""),
-            "return_policy_id": str(settings.get("return_policy_id") or ""),
+            key: str(settings.get(key) or "") for key in ETSY_SETTING_KEYS
         },
     }
 
@@ -12280,11 +12327,15 @@ def save_etsy_settings_options(request: Request, payload: dict) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    fields = {k: str(payload.get(k) or "")
-              for k in ("shipping_profile_id", "return_policy_id")
-              if k in payload}
+    fields = {k: str(payload.get(k) or "").strip()
+              for k in ETSY_SETTING_KEYS if k in payload}
     if not fields:
         raise HTTPException(400, "No settings provided.")
+    stray = [k for k, v in fields.items() if v and not v.isdigit()]
+    if stray:
+        raise HTTPException(
+            400, f"{', '.join(stray)} must be an Etsy id (a number) — pick "
+                 "one from the list.")
     # The answer is a claim about a write. P0-06's rule, on a route that kept
     # its own copy of the old behaviour: a save that did not land must not
     # come back as `{"ok": true}`, or the seller closes Settings believing
@@ -12308,6 +12359,15 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
     # does not do Etsy — and neither of them is news about their listing.
     if marketplaces.get("etsy") is None or not config.etsy_oauth_ready():
         raise HTTPException(400, "Etsy isn't configured on the server.")
+    # A login, and a ceiling per login: this is a Claude call, and it used to
+    # be the one AI route anyone could press without signing in.
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in to get an Etsy category suggestion.")
+    if not ratelimit.check(f"etsy-taxonomy:{uid}",
+                           max_attempts=ratelimit.ETSY_SUGGEST_MAX_CALLS):
+        raise HTTPException(
+            429, "Too many category lookups at once. Wait a moment and try again.")
     _assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
     try:
@@ -12315,6 +12375,323 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
     except Exception as exc:  # noqa: BLE001
         raise _lookup_failed("work out an Etsy category for this listing",
                              exc) from exc
+
+
+# --- Crosspost: an eBay store, onto Etsy ------------------------------------
+# The seller ticks live listings in the manager and answers Etsy's three
+# policy questions once for the batch; everything else is filled from what
+# eBay already holds (services/crosspost), shown for review, and then
+# published through the same door /api/publish uses — never a second copy of
+# the fan-out, because the rules that stop a duplicate live listing live
+# there.
+_CROSSPOST_JOBS: dict[str, str] = {}
+_CROSSPOST_LOCK = threading.Lock()
+# How long the worker waits between listings. Etsy's limit is 10 requests a
+# second for the whole app and a publish is a dozen of them, so a batch that
+# went flat out would spend the allowance every seller shares.
+CROSSPOST_PACE_SECONDS = float(os.getenv("CROSSPOST_PACE_SECONDS", "0.5") or 0.5)
+
+
+def _etsy_provider_for(request: Request):
+    """The Etsy provider and this user's credentials, or a 400 saying which
+    part is missing — withheld, not connected, or not yet seated by Etsy."""
+    provider = _marketplace_or_404("etsy")
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    pending, note = marketplaces.access_pending(provider, uid)
+    if pending:
+        raise HTTPException(400, note or "Etsy hasn't opened this app to your shop yet.")
+    creds = provider.creds_for(uid)
+    if not creds:
+        raise HTTPException(400, "Connect your Etsy shop in Settings first.")
+    return provider, uid, creds
+
+
+def _crosspost_candidates(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(can go, left out) among the records the seller ticked.
+
+    The same three refusals the browser shows before the wizard opens, made
+    again here because the browser's copy is a convenience and this one is
+    the rule: a listing already on Etsy would be duplicated, an auction is
+    something Etsy does not do, and a listing with variations is one this app
+    cannot represent as a single price and stock count.
+    """
+    ready, skipped = [], []
+    for rec in records:
+        listing = rec.get("listing") or {}
+        state = (listing.get("marketplaces") or {}).get("etsy") or {}
+        if state.get("status") in ("published", "draft"):
+            why = "Already on Etsy."
+        elif (rec.get("status") or "") not in ("published", "live"):
+            why = "Not live on eBay."
+        elif str(listing.get("listing_format") or "FIXED_PRICE").upper() != "FIXED_PRICE":
+            why = "An auction — Etsy only does Buy It Now."
+        elif listing.get("has_variations"):
+            why = "Has variations, which Etsy gets as one price and one stock count."
+        else:
+            ready.append(rec)
+            continue
+        skipped.append({"id": rec.get("id"),
+                        "title": listing.get("title") or "",
+                        "why": why})
+    return ready, skipped
+
+
+@app.post("/api/crosspost/etsy/review")
+def crosspost_etsy_review(request: Request, payload: dict) -> dict:
+    """What the crosspost would send, per listing, before anything is sent.
+
+    One row each: the tidied title Etsy will get, the category and where it
+    was found, the attribution after the batch answers are applied, the tags
+    and materials read off the item's own details, and what Etsy would still
+    refuse it over.
+    """
+    _, uid, creds = _etsy_provider_for(request)
+    ids = [str(i) for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    if not ids:
+        raise HTTPException(400, "No listings selected.")
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's {len(ids)} listings — crosspost up to {BULK_SELECT_CAP} "
+                 "at a time and run it again for the rest.")
+    # One model call per listing at worst, so it is metered like the single
+    # suggestion it is made of.
+    if not ratelimit.check(f"crosspost-review:{uid}",
+                           max_attempts=ratelimit.ETSY_SUGGEST_MAX_CALLS):
+        raise HTTPException(
+            429, "Too many crosspost reviews at once. Wait a moment and try again.")
+    mode = "live" if payload.get("mode") == "live" else "draft"
+    batch = payload.get("defaults") or {}
+    settings = creds.get("settings") or {}
+    ready, skipped = _crosspost_candidates(db.get_listings(ids, uid))
+    rows, ai_calls = [], 0
+    for rec in ready:
+        listing = Listing(**(rec.get("listing") or {}))
+        row = crosspost.review_row(listing, settings, batch, mode,
+                                   suggest=etsy_service.suggest_taxonomy)
+        row["id"] = rec.get("id")
+        if row["taxonomy"].get("source") == "ai":
+            ai_calls += 1
+        rows.append(row)
+    return {"rows": rows, "skipped": skipped, "ai_calls": ai_calls, "mode": mode}
+
+
+@app.post("/api/crosspost/etsy/start")
+def crosspost_etsy_start(request: Request, payload: dict) -> dict:
+    """Run the crosspost the seller reviewed, as a job they can watch and stop."""
+    _, uid, _creds = _etsy_provider_for(request)
+    items = [i for i in (payload.get("items") or []) if isinstance(i, dict)
+             and str(i.get("id") or "").strip()]
+    if not items:
+        raise HTTPException(400, "Nothing to crosspost.")
+    if len(items) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's {len(items)} listings — crosspost up to "
+                 f"{BULK_SELECT_CAP} at a time.")
+    mode = "live" if payload.get("mode") == "live" else "draft"
+
+    # Check AND reserve in one critical section, like the enrich route: a
+    # double tap that passed the check twice would put every listing on Etsy
+    # twice, which is the one mistake this whole feature must not make.
+    job_id = storage.new_session_id()
+    with _CROSSPOST_LOCK:
+        running = _CROSSPOST_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True, "joined": True}
+        _CROSSPOST_JOBS[uid] = job_id
+    try:
+        records = {r.get("id"): r for r in db.get_listings(
+            [str(i["id"]) for i in items], uid)}
+        queued = [i for i in items if records.get(str(i["id"]))]
+        if not queued:
+            raise HTTPException(404, "None of those listings are here anymore.")
+        base_url = _base_url(request)
+    except BaseException:
+        with _CROSSPOST_LOCK:
+            if _CROSSPOST_JOBS.get(uid) == job_id:
+                _CROSSPOST_JOBS.pop(uid, None)
+        raise
+
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "crosspost-etsy", "phase": "publishing",
+        "done": False, "error": None, "current": 0, "total_items": len(queued),
+        "items": [{"id": str(i["id"]),
+                   "title": (records[str(i["id"])].get("listing") or {}).get("title") or "",
+                   "status": "queued"} for i in queued],
+        "_ids": [str(i["id"]) for i in queued], "_mode": mode,
+        "_done": [], "_inflight": [],
+    }, uid=uid)
+    threading.Thread(target=_run_crosspost_job,
+                     args=(job_id, uid, queued, mode, base_url),
+                     daemon=True).start()
+    log.info("crosspost %s: started for user=%s listings=%d mode=%s",
+             job_id, uid, len(queued), mode)
+    return {"job_id": job_id, "running": True, "total": len(queued)}
+
+
+def _crosspost_one(job_id: str, uid: str, item: dict, mode: str,
+                   base_url: str) -> dict:
+    """One listing onto Etsy: write the Etsy fields the seller reviewed, then
+    publish through the shared fan-out. Returns the row the job reports."""
+    listing_id = str(item["id"])
+    rec = db.get_listing(listing_id) or {}
+    if not rec or (rec.get("user_id") and rec["user_id"] != uid):
+        return {"status": "skipped", "message": "That listing isn't here any more."}
+    ready, skipped = _crosspost_candidates([rec])
+    if skipped:
+        return {"status": "skipped", "message": skipped[0]["why"]}
+
+    # An imported listing's photos live on eBay until something adopts them,
+    # and Etsy uploads BYTES — the same call "Edit" makes, so the crosspost
+    # sends the seller's own photos rather than re-fetching eBay's per item.
+    try:
+        _adopt_imported_images(listing_id, rec)
+        rec = db.get_listing(listing_id) or rec
+    except Exception as exc:  # noqa: BLE001 - the publish can still fetch them
+        log.warning("crosspost %s: photo adoption failed for %s: %s",
+                    job_id, listing_id, exc)
+
+    fields = dict(item.get("etsy") or {})
+    title = str(item.get("title_override") or "").strip()
+
+    def _apply(data: dict) -> dict:
+        data["etsy"] = {**(data.get("etsy") or {}), **fields}
+        if title:
+            data["title"] = title
+        return data
+
+    data = db.mutate_listing_data(listing_id, _apply, user_id=uid)
+    if data is None:
+        data = _apply(dict(rec.get("listing") or {}))
+    listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
+    outcomes = _publish_targets(listing_id, listing, mode, ["etsy"], uid,
+                                base_url, rec)
+    outcome = outcomes["etsy"]
+    if outcome.ok:
+        status = "published" if outcome.status == "published" else "draft"
+    elif outcome.outcome_unknown:
+        status = "unknown"
+    else:
+        status = "refused"
+    return {"status": status, "listing_id": outcome.listing_id,
+            "url": outcome.url, "message": outcome.message,
+            "issues": outcome.issues}
+
+
+def _run_crosspost_job(job_id: str, uid: str, items: list[dict], mode: str,
+                       base_url: str, done_ids: Optional[list] = None) -> None:
+    """Publish each reviewed listing to Etsy, one at a time.
+
+    Sequential and paced on purpose: Etsy's rate limit is the whole app's,
+    a publish is a dozen calls, and a seller watching a progress bar is
+    better served by a run that finishes than by one Etsy starts refusing
+    half way through. Cancellation is checked between listings — never
+    inside one, where stopping would leave a listing created and no photos
+    on it.
+    """
+    done = list(done_ids or [])
+    try:
+        for index, item in enumerate(items):
+            listing_id = str(item["id"])
+            if listing_id in done:
+                continue
+            if jobstore.cancel_requested(job_id):
+                log.info("crosspost %s: stopped by the seller at %d of %d",
+                         job_id, len(done), len(items))
+                break
+            jobstore.update(job_id, _inflight=[listing_id])
+            try:
+                result = _crosspost_one(job_id, uid, item, mode, base_url)
+            except etsy_service.RateLimited as exc:
+                # Etsy's own "slow down". One wait, then one retry: it is the
+                # only refusal that is nobody's mistake and cures itself.
+                time.sleep(min(float(getattr(exc, "retry_after", 5.0)), 30.0))
+                try:
+                    result = _crosspost_one(job_id, uid, item, mode, base_url)
+                except Exception as retry_exc:  # noqa: BLE001 - one row, not the run
+                    result = {"status": "refused", "message": str(retry_exc)}
+            except Exception as exc:  # noqa: BLE001 - one listing must not stop the rest
+                log.warning("crosspost %s: %s failed: %s", job_id, listing_id, exc)
+                result = {"status": "refused", "message": str(exc)}
+            done.append(listing_id)
+            snapshot = jobstore.snapshot(job_id, uid) or {}
+            reported = list(snapshot.get("items") or [])
+            for row in reported:
+                if row.get("id") == listing_id:
+                    row.update(result)
+            jobstore.update(job_id, items=reported, current=len(done),
+                            _done=list(done), _inflight=[])
+            if index + 1 < len(items):
+                time.sleep(CROSSPOST_PACE_SECONDS)
+        if not jobstore.cancel_requested(job_id):
+            jobstore.update(job_id, done=True, phase="done", _inflight=[])
+    except Exception as exc:  # noqa: BLE001 - the job must always settle
+        log.exception("crosspost %s: run failed", job_id)
+        jobstore.update(job_id, done=True, phase="failed", error=str(exc))
+    finally:
+        with _CROSSPOST_LOCK:
+            if _CROSSPOST_JOBS.get(uid) == job_id:
+                _CROSSPOST_JOBS.pop(uid, None)
+
+
+def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
+    """Pick a crosspost back up where the restart left it.
+
+    What matters here is the listing that was IN FLIGHT: Etsy may have
+    created it before the process went away, so re-running it blind is how
+    one listing becomes two in the seller's shop. It is recorded as unknown
+    — the same answer a lost reply gets everywhere else in this app — and
+    the run carries on with the rest.
+    """
+    resumed: set[str] = set()
+    for record in records:
+        job_id, uid = record.get("id"), record.get("_uid")
+        if record.get("kind") != "crosspost-etsy" or not job_id or not uid:
+            continue
+        if record.get("_cancel") or record.get("done"):
+            continue
+        ids = [str(i) for i in (record.get("_ids") or [])]
+        done = [str(i) for i in (record.get("_done") or [])]
+        inflight = [str(i) for i in (record.get("_inflight") or []) if str(i) not in done]
+        left = [i for i in ids if i not in done and i not in inflight]
+        if not ids:
+            continue
+        mode = str(record.get("_mode") or "draft")
+        try:
+            owned = {r.get("id"): r for r in db.get_listings(ids, uid)}
+        except Exception as exc:  # noqa: BLE001 - nothing to resume from
+            log.warning("crosspost %s: could not re-read its listings: %s", job_id, exc)
+            continue
+        items = [{"id": i, "title": (owned[i].get("listing") or {}).get("title") or "",
+                  "status": "queued"} for i in ids if i in owned]
+        for row in items:
+            if row["id"] in done:
+                row["status"] = "done"
+            elif row["id"] in inflight:
+                row.update(status="unknown", message=(
+                    "The server restarted while this one was being sent, so we "
+                    "can't tell whether Etsy created it. Check your Etsy shop's "
+                    "drafts before running it again."))
+        jobstore.register(job_id, {
+            "id": job_id, "kind": "crosspost-etsy", "phase": "publishing",
+            "done": False, "error": None, "current": len(done) + len(inflight),
+            "total_items": len(items), "items": items,
+            "_ids": ids, "_mode": mode, "_done": done + inflight, "_inflight": [],
+        }, uid=uid)
+        with _CROSSPOST_LOCK:
+            _CROSSPOST_JOBS[uid] = job_id
+        queue = [{"id": i} for i in ids if i in owned]
+        threading.Thread(
+            target=_run_crosspost_job,
+            args=(job_id, uid, queue, mode, "", done + inflight),
+            daemon=True).start()
+        log.info("crosspost %s: resumed with %d left (%d in flight when it died)",
+                 job_id, len(left), len(inflight))
+        resumed.add(job_id)
+    return resumed
 
 
 def _flow_cookie(marketplace: str) -> str:

@@ -10,7 +10,7 @@ import {
 import {
   publishListing, usePublishTargets, blockedReason, fixTargetFor,
 } from "./publishShared";
-import { ebayBlockers, weightOz } from "./blockers";
+import { blockersFor, weightOz } from "./blockers";
 import {
   confirmSpecificRows, specificRowIndex, specificValues,
   toggleSpecificValue as toggleValue,
@@ -48,6 +48,7 @@ const EMPTY = {
   etsy: {
     taxonomy_id: 0, who_made: "", when_made: "", is_supply: false,
     materials: [], tags: [], shipping_profile_id: "", return_policy_id: "",
+    readiness_state_id: "",
   },
   depop: { category: "", size: "" },
   marketplaces: {},
@@ -1156,14 +1157,20 @@ export function useListingForm() {
   // for a draft or a relist. Editing a live listing was being held to the
   // create contract, so a seller could be locked out of fixing a typo by a
   // package weight eBay never asked them for.
+  // And against every marketplace the publish is going to: with Etsy among
+  // the chips, Etsy's own rules (its category, who/when made, its three
+  // profiles) join the list, judged against the shop's settings the store
+  // holds — so "Ready to publish" means ready for all of them.
+  const { etsyOptions } = useApp();
   const blockers = useMemo(
-    () => ebayBlockers(collect(), {
-      targets: chipTargets,
+    () => blockersFor(collect(), chipTargets, {
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
       conditions: categoryMeta.conditions.length ? categoryMeta.conditions : null,
       mode: isLive ? "revise" : "live",
+      etsySettings: etsyOptions && !etsyOptions.error ? etsyOptions : null,
     }),
-    [collect, categoryMeta.aspects, categoryMeta.conditions, chipTargets, isLive]);
+    [collect, categoryMeta.aspects, categoryMeta.conditions, chipTargets, isLive,
+      etsyOptions]);
 
   // Which fields are keeping this listing off eBay right now, and how sure we
   // are. Two levels, the same pair the item-specifics grid has always drawn:

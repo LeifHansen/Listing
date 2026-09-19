@@ -24,7 +24,7 @@ pytest.importorskip("pydantic")
 from backend import marketplaces  # noqa: E402
 from backend.marketplaces import etsy_provider  # noqa: E402
 
-ETSY_CREDS = {"ETSY_CLIENT_ID": "key123",
+ETSY_CREDS = {"ETSY_CLIENT_ID": "key123", "ETSY_SHARED_SECRET": "s3cret",
               "ETSY_REDIRECT_URI": "https://app.example/api/etsy/callback"}
 
 

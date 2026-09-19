@@ -36,6 +36,7 @@ def test_scalars_survive_round_trip():
     assert body["quantity"] == "2"
     assert body["taxonomy_id"] == "1234"
     assert body["shipping_profile_id"] == "77"
+    assert body["type"] == "physical"
 
 
 def test_list_fields_are_comma_joined():

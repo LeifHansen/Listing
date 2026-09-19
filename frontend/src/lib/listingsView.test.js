@@ -414,3 +414,40 @@ describe("a listing a buyer has acted on", () => {
     expect(items.map((i) => i.id)).toEqual(["a", "b"]);
   });
 });
+
+// ---- where a listing lives -------------------------------------------------
+import { inMarketFilter, MARKET_FILTERS, onMarket } from "./listingsView.js";
+
+const onBoth = { id: "a", status: "published", listing: {
+  marketplaces: { ebay: { status: "published" }, etsy: { status: "published" } } } };
+const ebayOnly = { id: "b", status: "published", listing: {
+  marketplaces: { ebay: { status: "published" } } } };
+const legacyEbay = { id: "c", status: "published", listing: { ebay_listing_id: "123" } };
+const etsyDraft = { id: "d", status: "draft", listing: {
+  marketplaces: { etsy: { status: "draft", listing_id: "7" } } } };
+const etsyEnded = { id: "e", status: "published", listing: {
+  marketplaces: { ebay: { status: "published" }, etsy: { status: "ended" } } } };
+
+describe("where a listing lives", () => {
+  it("reads eBay off the marketplace map, or off the legacy item id", () => {
+    expect(onMarket(onBoth, "ebay")).toBe(true);
+    expect(onMarket(legacyEbay, "ebay")).toBe(true);
+    expect(onMarket({ ...legacyEbay, status: "sold" }, "ebay")).toBe(false);
+    expect(onMarket(etsyDraft, "ebay")).toBe(false);
+  });
+
+  it("counts an Etsy draft as on Etsy, and an ended Etsy entry as not", () => {
+    expect(onMarket(etsyDraft, "etsy")).toBe(true);
+    expect(onMarket(etsyEnded, "etsy")).toBe(false);
+  });
+
+  it("cuts 'eBay only, not on Etsy' as the crosspost's shopping list", () => {
+    const all = [onBoth, ebayOnly, legacyEbay, etsyDraft, etsyEnded];
+    const ids = (f) => all.filter((i) => inMarketFilter(f, i)).map((i) => i.id);
+    expect(ids("all")).toEqual(["a", "b", "c", "d", "e"]);
+    expect(ids("ebay")).toEqual(["a", "b", "c", "e"]);
+    expect(ids("etsy")).toEqual(["a", "d"]);
+    expect(ids("ebay-only")).toEqual(["b", "c", "e"]);
+    expect(MARKET_FILTERS.map((f) => f.id)).toEqual(["all", "ebay", "etsy", "ebay-only"]);
+  });
+});

@@ -55,7 +55,7 @@ def app(monkeypatch, every_marketplace):
 def test_a_failed_settings_write_is_not_reported_as_saved(app):
     api, calls = app(landed=False)
     resp = api.post("/api/etsy/settings-options",
-                    json={"shipping_profile_id": "sp-1"})
+                    json={"shipping_profile_id": "101"})
 
     assert calls, "it should still have tried"
     assert resp.status_code != 200, "a write that did not land answered ok"
@@ -67,11 +67,11 @@ def test_a_failed_settings_write_is_not_reported_as_saved(app):
 def test_a_settings_write_that_landed_still_says_so(app):
     api, _ = app(landed=True)
     resp = api.post("/api/etsy/settings-options",
-                    json={"shipping_profile_id": "sp-1"})
+                    json={"shipping_profile_id": "101"})
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
-    assert resp.json()["selected"] == {"shipping_profile_id": "sp-1"}
+    assert resp.json()["selected"] == {"shipping_profile_id": "101"}
 
 
 # ------------------------------------------------- Depop's rotating token
@@ -121,3 +121,15 @@ def test_no_database_reports_a_failed_write_rather_than_nothing():
         assert db.save_marketplace_account("u1", "etsy", external_id="x") is False
     finally:
         config.DATABASE_URL = saved
+
+
+def test_a_settings_id_that_is_not_a_number_is_refused_before_the_write(app):
+    """Etsy ids are numbers. A stray value used to be stored as typed and
+    then crash the publish with int()'s own sentence; now it is a 400 at
+    the moment the seller can still pick from the list."""
+    api, calls = app(landed=True)
+    resp = api.post("/api/etsy/settings-options",
+                    json={"readiness_state_id": "fast"})
+    assert resp.status_code == 400
+    assert "readiness_state_id" in resp.json()["detail"]
+    assert not calls, "nothing should have been written"
