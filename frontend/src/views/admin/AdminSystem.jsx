@@ -96,7 +96,17 @@ export function AdminSystem() {
       <Card>
         <SectionHeader icon={ServerCog} title="Integrations" />
         <ul className="grid sm:grid-cols-2 gap-x-6">
-          <Ready label="Anthropic (AI drafts)" ok={d.anthropic_configured} />
+          <Ready label="Anthropic (refine, specifics)" ok={d.anthropic_configured} />
+          <Ready label="Google AI (Gemini)" ok={d.google_ai_configured} />
+          {/* Which backend a bad draft actually came from. With two of them
+              configured, "the AI is configured" stopped being one bit. */}
+          <li className="flex items-center gap-2 py-1.5">
+            <ServerCog size={15} className="text-ink-faint shrink-0" aria-hidden />
+            <span className="text-[13px] font-semibold text-ink">Identifier</span>
+            <span className="text-xs text-ink-faint">
+              {d.identify_provider === "google" ? "Gemini" : "Claude"}
+            </span>
+          </li>
           <Ready label="eBay API" ok={d.ebay_configured} missing={d.ebay_missing} />
           <Ready label="eBay OAuth" ok={d.ebay_oauth_ready} />
           <Ready label="eBay deletion endpoint" ok={d.ebay_deletion_endpoint_ready} />
