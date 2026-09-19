@@ -46,7 +46,7 @@ from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
-                     ImageOrderRequest, ItemSpecific, Listing,
+                     ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
                      MarketplaceState, PublishRequest, RefineRequest,
                      SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
@@ -859,6 +859,12 @@ def health() -> dict:
         # Read by the UI: App.jsx's setup banner, useListingForm's category
         # lookups, ShopMode. Capability, not configuration.
         "anthropic_configured": config.anthropic_ready(),
+        "google_ai_configured": config.google_ai_ready(),
+        # Which backend actually drafts a listing. Capability, not a secret:
+        # "the AI is configured" stopped being one bit the moment there were
+        # two of them, and a seller reporting a bad draft is reporting it
+        # about whichever model this names.
+        "identify_provider": config.identify_provider(),
         "ebay_configured": config.ebay_ready(),
         "taxonomy_configured": config.taxonomy_ready(),
         # How long a listing of the seller's own is kept after it ends
@@ -882,6 +888,8 @@ def _diagnostics() -> dict:
         # diff response shapes against git history and guess.
         "build": config.BUILD_SHA or "unknown",
         "anthropic_configured": config.anthropic_ready(),
+        "google_ai_configured": config.google_ai_ready(),
+        "identify_provider": config.identify_provider(),
         "ebay_configured": config.ebay_ready(),
         "ebay_missing": config.ebay_status()["missing"],
         "taxonomy_configured": config.taxonomy_ready(),
@@ -3886,12 +3894,69 @@ def refresh_expert_knowledge(request: Request, record_id: str) -> dict:
     return {"ok": True, "status": "fetching"}
 
 
-def _distill_reference_row(record_id: str) -> None:
+# How long to wait before reading a page again when the site said "not now".
+# Two goes and then it waits for the seller: a site still rate limiting us ten
+# minutes later will not be talked round by a third attempt a minute after
+# that, and the Try again button in Settings is right next to the message.
+REFERENCE_RETRY_DELAYS = (90, 600)
+
+
+def _minutes_in_words(seconds: float) -> str:
+    minutes = max(1, round(float(seconds) / 60))
+    return "a minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def _read_reference_again(record_id: str, attempt: int, delay: float) -> None:
+    """Read a reference again once `delay` has passed.
+
+    Its own background thread, and a daemon one, so a pending retry never
+    holds a deploy open. A retry lost to a restart is a reference the seller
+    can refresh by hand -- which is the worse half of a trade against keeping
+    a schedule in the database for a wait measured in minutes.
+    """
+    time.sleep(delay)
+    _distill_reference_row(record_id, attempt)
+
+
+def _reference_not_now(record_id: str, attempt: int,
+                       now: datetime, what: str) -> None:
+    """Record a failure that is about the MOMENT, not about the page.
+
+    `enabled` is deliberately not touched and any distillate already saved is
+    left where it is: nobody has read the page this time round, so nothing has
+    been learned that would justify turning the seller's reference off or
+    throwing away what it taught us last time.
+    """
+    if attempt < len(REFERENCE_RETRY_DELAYS):
+        delay = REFERENCE_RETRY_DELAYS[attempt]
+        db.expert_knowledge_update(
+            record_id, last_fetched=now,
+            fetch_error=(f"{what} — trying again in "
+                         f"{_minutes_in_words(delay)}")[:500])
+        run_in_background(_read_reference_again, record_id, attempt + 1, delay,
+                          what="reference retry")
+        return
+    db.expert_knowledge_update(
+        record_id, last_fetched=now,
+        fetch_error=f"{what} — press Try again whenever you like"[:500])
+
+
+def _distill_reference_row(record_id: str, attempt: int = 0) -> None:
     """Fetch a saved reference and write down what it establishes.
 
     Off the request thread, always. Never raises: a reference that cannot be
     read is recorded as one -- `fetch_error` is shown in the settings screen,
     because a reference that silently stopped working is worse than none.
+
+    WHAT IS RECORDED HAS TO BE TRUE. Every failure below used to land in one
+    of two places: a bare "HTTP 429", or the sentence "that page had nothing
+    usable on it — a login wall, a paywall, or a page about something else",
+    which also turned the reference off. Most of the time neither was what had
+    happened. A rate limit, a site that refused this reader, a consent prompt,
+    a bot check and our own summariser being unavailable are all "we have not
+    seen the page", not "the page is no good" -- so they say which one it was,
+    they leave the reference on, and the ones that time can fix are tried
+    again. Only a page we actually read and found nothing in is a verdict.
     """
     row = db.expert_knowledge_get(record_id)
     if not row:
@@ -3900,24 +3965,56 @@ def _distill_reference_row(record_id: str) -> None:
     try:
         page = reference_fetch.fetch(row["url"])
         text = reference_fetch.readable_text(page)
-        result = claude_ai.distill_reference(
-            text, note=row.get("note", ""), subject=row.get("expert", ""))
+    except reference_fetch.TemporaryFailure as exc:
+        _reference_not_now(record_id, attempt, now, str(exc)[:300])
+        return
+    except reference_fetch.Blocked as exc:
+        # The site refused this reader. Nobody has seen the page, so nothing
+        # is claimed about it -- and no retry, because ninety seconds will not
+        # change a 403.
+        db.expert_knowledge_update(record_id, last_fetched=now,
+                                   fetch_error=str(exc)[:500])
+        return
     except (reference_fetch.UnsafeURL, ValueError) as exc:
+        # The link itself is wrong -- not https, unresolvable, a PDF, too big.
+        # That IS about the reference, and it is the seller's to fix.
         db.expert_knowledge_update(record_id, last_fetched=now,
                                    fetch_error=str(exc)[:500], enabled=False)
         return
     except Exception as exc:  # noqa: BLE001 - a reference is optional
-        log.info("reference distill failed for %s: %s", record_id,
+        log.info("reference fetch failed for %s: %s", record_id,
                  type(exc).__name__)
-        db.expert_knowledge_update(
-            record_id, last_fetched=now,
-            fetch_error=f"could not read the page ({type(exc).__name__})")
+        _reference_not_now(record_id, attempt, now,
+                           f"could not read the page ({type(exc).__name__})")
         return
-    if not result or not result.get("usable"):
+
+    wall = reference_fetch.unreadable_reason(page, text)
+    if reference_fetch.too_thin(text):
+        # Nothing came back worth summarising. Say WHICH wall it was, rather
+        # than spending a model call on a consent banner and then reporting
+        # the model's shrug as a fact about the page.
+        _reference_not_now(record_id, attempt, now,
+                           wall or "there was almost no text on the page")
+        return
+
+    result = claude_ai.distill_reference(
+        text, note=row.get("note", ""), subject=row.get("expert", ""))
+    if result is None:
+        # The summariser did not run: no key, an overloaded model, a reply we
+        # could not parse. Ours to own, and it used to be reported to the
+        # seller as a paywall on their page.
+        _reference_not_now(record_id, attempt, now,
+                           "we couldn’t summarise the page just now")
+        return
+    if not result.get("usable"):
+        # The one real verdict: we read the page and there was nothing on it
+        # to learn from. Off, with the reason the model actually gave.
+        because = result.get("reason") or wall
         db.expert_knowledge_update(
             record_id, last_fetched=now, distillate="", enabled=False,
-            fetch_error="that page had nothing usable on it — a login wall, "
-                        "a paywall, or a page about something else")
+            fetch_error=("we read the page, but there was no reference "
+                         "material on it to learn from"
+                         + (f" — {because}" if because else ""))[:500])
         return
     db.expert_knowledge_update(record_id, last_fetched=now, distilled_at=now,
                                distillate=result["summary"], fetch_error="")
@@ -4143,15 +4240,28 @@ RETAIL_FLOOR_RATIO = float(os.getenv("RETAIL_FLOOR_RATIO", "0.45") or 0.45)
 # It may never downgrade an item, lower a price, or overwrite something the
 # seller can already see is right.
 #
-# OFF unless asked for. The lookup is a second vision call with up to
-# RESEARCH_MAX_SEARCHES web searches inside it, and it runs INSIDE the
-# identify request — the seller (or the whole bulk batch) waits on it. The
-# gate below catches most of a thrift store ("edition", "rare", "book",
+# OFF unless asked for, ON THE CLAUDE BACKEND. There, the lookup is a second
+# vision call with up to RESEARCH_MAX_SEARCHES web searches inside it, run as
+# a server-tool loop that pauses and resumes — sequentially, INSIDE the
+# identify request, with the seller (or the whole bulk batch) waiting on it.
+# The gate below catches most of a thrift store ("edition", "rare", "book",
 # "record", "glass"...), so the morning it shipped on "auto" every identify
-# went from seconds to a minute or more and the app read as broken. Set
-# RESEARCH_PASS=auto (or always) to turn it on; the fix that lets it run
-# without holding the draft hostage is the one that earns "auto" back.
-RESEARCH_PASS = os.getenv("RESEARCH_PASS", "off").strip().lower() or "off"
+# went from seconds to a minute or more and the app read as broken.
+#
+# The Google backend is where that cost stops being the deciding factor: the
+# grounded lookup is ONE generateContent call that searches server-side and
+# comes back with the pages it read attached. That is the "fix that lets it
+# run without holding the draft hostage" this note has been waiting for, so
+# the resolved default follows the backend — see research_pass(). An explicit
+# RESEARCH_PASS still wins over both, in either direction.
+RESEARCH_PASS = os.getenv("RESEARCH_PASS", "").strip().lower()
+
+
+def research_pass() -> str:
+    """off | auto | always — the setting, or the backend's own default."""
+    if RESEARCH_PASS:
+        return RESEARCH_PASS
+    return "auto" if config.identify_provider() == "google" else "off"
 
 # Words in a draft that mean an identification decides the price. Any of them
 # and the item gets looked up: this is the "is this the expensive one?" list.
@@ -4781,9 +4891,10 @@ def _research_reason(listing: Listing, observations: str = "") -> str:
     what this is worth", which is a property of the item and of how sure the
     draft sounds, never of the number on it.
     """
-    if RESEARCH_PASS == "off":
+    setting = research_pass()
+    if setting == "off":
         return ""
-    if RESEARCH_PASS == "always":
+    if setting == "always":
         return "always"
     haystack = " ".join([
         listing.title or "", listing.brand or "", listing.description or "",
@@ -4825,7 +4936,7 @@ def _research_draft(listing: Listing, image_paths: list,
     reason = _research_reason(listing, observations)
     if not reason:
         return None
-    if not config.anthropic_ready():
+    if not config.vision_ready():
         return None
     # A first pass that was SURE and hedged nothing has earned its answer;
     # research still runs on everything else, including "high" confidence on a
@@ -5474,6 +5585,12 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
 # Caps raised on request. A high bound stays so a pathological huge upload
 # can't OOM the box; per-image dimension downscale (MAX_WORK_SIDE) bounds pixel
 # memory regardless.
+# What a seller is told when no vision backend is configured at all. Names
+# BOTH keys: either one is enough to identify photos, and a message naming
+# only Anthropic sent an operator with a Google key to buy a second one.
+NO_VISION_BACKEND = ("No vision backend is configured (set GOOGLE_API_KEY or "
+                     "ANTHROPIC_API_KEY); cannot identify images.")
+
 MAX_UPLOAD_FILES = 40   # per single listing (eBay itself accepts up to 24 live)
 MAX_BULK_FILES = 250    # per bulk batch (many items) — the supported batch size
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
@@ -5517,9 +5634,8 @@ async def upload(
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
     run_pipeline = str(pipeline).lower() in ("true", "1", "yes", "on")
-    if run_pipeline and not config.anthropic_ready():
-        raise HTTPException(
-            400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if run_pipeline and not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
@@ -5581,6 +5697,11 @@ async def upload(
             # in the ledger by its amount, so settling one from a mirror after
             # the process died holding the running total can pay twice.
             "_refunds": tokens.receipts(identify_spent),
+            # Which session this job's photos belong to. The job pauses for
+            # the seller's notes and its worker returns, so the request that
+            # brings the answer back has only the job id to go on -- and the
+            # answer has to be saved with the session, not the job.
+            "_session_id": session_id,
         }, uid=uid)
         threading.Thread(
             target=_run_pipeline_job,
@@ -6192,11 +6313,13 @@ async def image_smart_crop(
 
 @app.post("/api/identify/{session_id}")
 def identify(session_id: str, request: Request) -> dict:
-    """Run Claude vision over the optimized images and draft a listing."""
-    if not config.anthropic_ready():
-        raise HTTPException(
-            400, "ANTHROPIC_API_KEY not configured; cannot identify images."
-        )
+    """Run vision over the optimized images and draft a listing.
+
+    Which model looks at the photos is config.identify_provider()'s call —
+    Gemini where a Google key is set, Claude otherwise. Either way the draft
+    that comes back has the same shape, so nothing below this line changes."""
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     _assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
@@ -6207,7 +6330,8 @@ def identify(session_id: str, request: Request) -> dict:
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(_uid(request)),
-                                    notes=storage.load_notes(session_id))
+                                    notes=storage.load_notes(session_id),
+                                    item_notes=storage.load_item_notes(session_id))
     except errors.StorageUnavailable:
         # Refund first, then let it keep its own name: an AI error message
         # sends the seller to retry the model or re-shoot their photos, and
@@ -6248,7 +6372,16 @@ def identify(session_id: str, request: Request) -> dict:
     # silent. Capped by what that same market said it is worth.
     _price_against_retail(result.listing, market)
     storage.save_listing(session_id, result.listing)
-    db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=_uid(request))
+    # A SCAN, not a draft. This route is Shop Mode's alone (the pipeline
+    # drafts through /api/identify-async), and the seller who triggered it is
+    # standing in a shop deciding whether to buy the thing in their hand --
+    # they have not asked for a listing, and eight of every ten scans on a
+    # thrift run end in putting the item back. The row is still written, so
+    # the session id is bound to its owner before any media URL carrying it
+    # exists; "Buy" promotes it to "unlisted" (/api/inventory/add) and that is
+    # the first point the seller has asked for anything. See db.SCANNED.
+    db.upsert_listing(session_id, result.listing.model_dump(),
+                      status=db.SCANNED, user_id=_uid(request))
     return result.model_dump()
 
 
@@ -7360,6 +7493,47 @@ BULK_MAX_RESUMES = int(os.getenv("BULK_MAX_RESUMES", "2") or 2)
 # grouping to continue from — keeps the honest "run the rest again" message.
 _RESUMABLE_PHASES = ("uploading", "optimizing", "grouping")
 _DRAFTING_PHASE = "identifying"
+# The guidance step. The photos are optimized and (in a batch) split, and
+# nothing has been drafted or charged for a draft yet -- so this is the last
+# moment the seller's own knowledge is free to act on, and the first moment
+# the app can ask a question specific enough to be worth answering: this item,
+# these photos, what is it?
+#
+# The worker RETURNS here rather than blocking on the answer. A batch can wait
+# on a person for as long as a person takes, and holding a thread (and the
+# whole job in one process's memory) for that is how a deploy turns "I'll
+# finish this after lunch" into a lost pile. What it leaves behind -- the
+# grouping and the photo order, already mirrored for the drafting resume -- is
+# everything the continuation needs, so answering the question starts a fresh
+# worker from the plan on disk. See _run_bulk_job and bulk_notes.
+# Defined in jobstore, which serves the status this phase appears on and
+# writes the restart message that has to read it as "waiting on a person".
+_AWAITING_NOTES = jobstore.AWAITING_NOTES
+# Photo URLs per item on the paused status. Enough to recognise the thing
+# without scrolling; a 250-photo batch's status is polled every 1.5s and is
+# already the biggest body this app serves.
+_PENDING_PHOTOS_PER_ITEM = 8
+
+
+def _pending_items(session_id: str, names: list[str],
+                   groups: list[dict]) -> list[dict]:
+    """The items the guidance step asks about: one row per group, with the
+    photos that made it and the name the grouping pass gave it.
+
+    The photos come from the STAGING session for a batch (the pile is still on
+    the volume -- the pause is what stops it being purged) and from the
+    listing's own session for a single upload, which is why the id is passed
+    in rather than looked up.
+    """
+    rows: list[dict] = []
+    for gi, group in enumerate(groups):
+        photos = [f"/media/{session_id}/optimized/{names[i]}"
+                  for i in (group.get("indices") or [])
+                  if 0 <= i < len(names)]
+        rows.append({"gi": gi, "name": group.get("name") or "",
+                     "photos": photos[:_PENDING_PHOTOS_PER_ITEM],
+                     "photo_count": len(photos)})
+    return rows
 
 
 def _compact_item(item: dict, gi: int) -> dict:
@@ -7464,6 +7638,24 @@ def _mirrored_inflight(record: dict, done: list[dict]) -> list[dict]:
         if (isinstance(entry, dict) and entry.get("session_id")
                 and isinstance(entry.get("gi"), int)):
             out.append({"gi": entry["gi"], "session_id": entry["session_id"]})
+    return out
+
+
+def _mirrored_item_notes(record: dict) -> dict:
+    """The guidance step's answers off a mirror, back to integer keys.
+
+    JSON has no integer keys, so the mirror holds them as strings. A record
+    from before the step existed simply has none, which reads as every box
+    left blank -- the same thing to the prompt as no step at all.
+    """
+    out: dict[int, str] = {}
+    for key, value in (record.get("_item_notes") or {}).items():
+        try:
+            gi = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, str) and value:
+            out[gi] = value
     return out
 
 
@@ -7574,7 +7766,8 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
             continue
         phase = record.get("phase")
         drafting = phase == _DRAFTING_PHASE
-        if phase not in _RESUMABLE_PHASES and not drafting:
+        waiting = phase == _AWAITING_NOTES
+        if phase not in _RESUMABLE_PHASES and not drafting and not waiting:
             continue
         if record.get("_cancel"):
             # Stopped on purpose. The restart is not a second chance to run
@@ -7587,6 +7780,37 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
             continue
         uid = record.get("_uid")
         strip_bg = bool(record.get("_strip_bg"))
+        if waiting:
+            # Paused at the guidance step. Nothing to run and nothing to
+            # charge -- the seller is mid-answer, and the only thing the boot
+            # owes them is to put the question back exactly as they left it.
+            # So the job is re-registered in the pause with no thread started,
+            # and `pending_items` is rebuilt from the grouping rather than
+            # mirrored, because it is derived from it.
+            names = [n for n in (record.get("_names") or []) if isinstance(n, str)]
+            groups = [g for g in (record.get("_groups") or [])
+                      if isinstance(g, dict) and isinstance(g.get("indices"), list)]
+            if not names or not groups or not storage.list_optimized(staging):
+                # The pile is gone, so there is nothing to draft from even if
+                # they answer. Leave it to the honest interrupted message.
+                continue
+            _register_bulk_job(job_id, {
+                "id": job_id, "phase": _AWAITING_NOTES, "done": False,
+                "error": None, "items": [], "total_items": len(groups),
+                "current": 0, "total_photos": len(names),
+                "resumed": True, "remove_bg": strip_bg,
+                "pending_items": _pending_items(staging, names, groups),
+                "_staging_id": staging, "_strip_bg": strip_bg,
+                # NOT incremented: nothing failed here, and a seller who
+                # waits out three deploys should still be asked their
+                # question rather than have the batch give up on them.
+                "_resumes": resumes,
+                "_names": names, "_groups": groups, "_done": [], "_inflight": [],
+            }, uid=uid)
+            resumed.add(job_id)
+            log.info("bulk %s: still waiting on the seller's notes for %d "
+                     "item(s) after a restart", job_id, len(groups))
+            continue
         if drafting:
             plan = _drafting_plan(record, staging)
             if plan is None:
@@ -7607,10 +7831,17 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 # ones the dead process held are in plan["precharged"], which
                 # the worker re-registers as it starts each of them.
                 "_done": plan["done"], "_inflight": [],
+                # What the seller typed at the guidance step, carried forward
+                # so the items this run drafts are drafted with it. Dropping
+                # it here would finish the batch without the one thing they
+                # stopped it to say.
+                "_item_notes": record.get("_item_notes") or {},
             }, uid=uid)
             threading.Thread(
                 target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
-                kwargs={"resumed": True, "resume_from": plan}, daemon=True,
+                kwargs={"resumed": True, "resume_from": plan,
+                        "item_notes": _mirrored_item_notes(record)},
+                daemon=True,
             ).start()
             resumed.add(job_id)
             log.info("bulk %s: resuming drafting after a restart (attempt %d, "
@@ -7697,6 +7928,11 @@ class _BulkContext:
     # for and never delivered. Finished in the session that already holds
     # their photos, without a second charge. See _drafting_plan.
     precharged: dict = field(default_factory=dict)
+    # {group index: what the seller typed about THAT item} at the guidance
+    # step. Empty for a batch drafted without the step (a resume from a mirror
+    # written before it existed), and missing keys are simply items the seller
+    # left blank -- both mean the same thing to the prompt as no step at all.
+    item_notes: dict = field(default_factory=dict)
 
 
 class _BulkProgress:
@@ -7781,6 +8017,11 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     """
     sid = ctx.precharged.get(gi)
     if sid:
+        # Written again rather than assumed: the guidance can have arrived
+        # AFTER the attempt that made this session (a restart between the two
+        # is exactly what precharged means), so the item would otherwise be
+        # finished without the one thing the seller stopped to type.
+        storage.save_item_notes(sid, ctx.item_notes.get(gi, ""))
         return sid, storage.list_optimized(sid), True
     sid = storage.new_session_id()
     item_dir = storage.optimized_dir(sid)
@@ -7796,6 +8037,12 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     # ends, so without the copy a "Start over" on any of these drafts loses
     # them.
     storage.save_notes(sid, ctx.notes)
+    # ...and the line the seller typed about THIS item at the guidance step,
+    # which is the opposite claim and kept apart for it: the pile's notes may
+    # be about something else entirely, this one cannot be. Saved for the same
+    # reason as the pile's -- a "Start over" months from now must not forget
+    # the one thing the seller stopped the batch to say.
+    storage.save_item_notes(sid, ctx.item_notes.get(gi, ""))
     return sid, item_names, False
 
 
@@ -7851,7 +8098,8 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
     paths = [item_dir / n for n in item_names]
     try:
         result = claude_ai.identify(paths, item_names, strategy=ctx.strategy,
-                                    notes=ctx.notes)
+                                    notes=ctx.notes,
+                                    item_notes=ctx.item_notes.get(gi, ""))
         # Each item's confidence onto its own draft: the queue card
         # is where a seller decides which of forty to open first.
         result.listing.ai_confidence = result.confidence
@@ -7972,9 +8220,17 @@ def _draft_bulk_items(job_id: str, remaining: list, ctx: _BulkContext,
 
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                   uid: Optional[str], resumed: bool = False,
-                  resume_from: Optional[dict] = None) -> None:
-    """Background worker: optimize -> group -> per-item identify. Every item
-    lands as a draft for review; publishing is always an explicit choice.
+                  resume_from: Optional[dict] = None,
+                  item_notes: Optional[dict] = None) -> None:
+    """Background worker: optimize -> group -> ask -> per-item identify. Every
+    item lands as a draft for review; publishing is always an explicit choice.
+
+    `item_notes` is what the seller typed at the guidance step, keyed by group
+    index, and its being None vs. {} is the whole difference between the two
+    halves of a batch. None means nobody has been asked yet, so this run stops
+    at _AWAITING_NOTES once the pile is split and returns. A dict -- even an
+    empty one, from a seller who skipped every box -- means the question has
+    been put and answered, so this run drafts. See bulk_notes for the hand-off.
 
     `resumed` marks a batch being picked back up after the machine went away
     mid-run (see _resume_interrupted_batches). The only thing it changes is
@@ -8013,6 +8269,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_refunded = 0
     n_photos = 0
     delivered = False
+    # Stopped at the guidance step rather than finished. It guards the staging
+    # purge below: the pile is what the continuation run copies each item's
+    # photos out of, so dropping it here would take the batch with it.
+    paused = False
     # The drafting status, and the one thing several workers share. Declared
     # out here so a batch the seller stops can still report the items it had
     # drafted by then — they are saved listings, not a partial result.
@@ -8136,10 +8396,32 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                       _done=[], _inflight=[])
             remaining = list(range(len(groups)))
 
+            if item_notes is None:
+                # The guidance step. Everything the draft is about to guess at
+                # is already known to the person who owns these things, and
+                # this is the last moment before it starts guessing -- so the
+                # batch stops and asks, once, per item.
+                #
+                # It RETURNS rather than waiting; see _AWAITING_NOTES. The two
+                # flags are what make that safe. `paused` keeps the staging
+                # pile, which the continuation copies each item's photos out
+                # of. `delivered` keeps the background-removal charge, and
+                # that is a deliberate call: those cutouts exist and the
+                # seller is about to be looking at them, so they were bought,
+                # unlike the abort-mid-photo-pass case the refund is for.
+                paused = True
+                delivered = True
+                _bulk_set(job_id, phase=_AWAITING_NOTES, current=0,
+                          pending_items=_pending_items(staging_id, names, groups))
+                log.info("bulk %s: %d photo(s) -> %d item(s); waiting on the "
+                         "seller's notes", job_id, len(names), len(groups))
+                return
+
         ctx = _BulkContext(uid=uid, prefs=prefs, strategy=strategy,
                            auto_promote=auto_promote, billing=billing,
                            notes=notes, names=names, groups=groups,
-                           opt_dir=opt_dir, precharged=precharged)
+                           opt_dir=opt_dir, precharged=precharged,
+                           item_notes=item_notes or {})
         _bulk_set(job_id, phase="identifying")
         _draft_bulk_items(job_id, remaining, ctx, progress)
 
@@ -8195,7 +8477,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                          job_id, owed)
         # Staging photos were only needed to optimize + split into per-item
         # sessions; drop them so the volume doesn't grow with every batch.
-        storage.purge_session(staging_id)
+        # Not at the guidance step, though: the pile is what the continuation
+        # run copies each item's photos out of, and the seller may be away for
+        # hours. A pause nobody ever comes back to is swept with every other
+        # orphan (storage.sweep_orphan_sessions).
+        if not paused:
+            storage.purge_session(staging_id)
 
 
 @app.post("/api/bulk/upload")
@@ -8212,8 +8499,8 @@ async def bulk_upload(
     notes: the seller's comma-separated inventory of the pile. Saved with the
     staging session, which is also what makes it survive a restart — a resumed
     batch re-reads it from disk exactly like the first run did."""
-    if not config.anthropic_ready():
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     # The worker thread can't return a 401, so the login requirement (billing
     # is per-account) is enforced before the upload is accepted.
     if tokens.enabled() and await run_in_threadpool(_uid, request) is None:
@@ -8316,13 +8603,148 @@ def bulk_cancel(job_id: str, request: Request) -> dict:
     listing and stays in Drafts. 404 covers both an unknown id and someone
     else's, exactly as the status endpoints do.
     """
-    outcome = jobstore.request_cancel(job_id, _uid(request))
+    uid = _uid(request)
+    # Read BEFORE the cancel, which is what marks the job finished. A batch
+    # paused at the guidance step has no worker to stand down, so nothing else
+    # is ever going to drop its photo pile -- the purge that normally happens
+    # in _run_bulk_job's finally has to happen here instead. Keyed on
+    # _staging_id, which only a photo batch has: a paused single upload's
+    # session holds the seller's own photos and is not this route's to delete.
+    was = jobstore.internal(job_id, uid)
+    outcome = jobstore.request_cancel(job_id, uid)
     if outcome is None:
         raise HTTPException(404, "Unknown bulk job.")
+    if was and was.get("phase") == _AWAITING_NOTES and was.get("_staging_id"):
+        storage.purge_session(str(was["_staging_id"]))
     # "It had already finished" is not a failure — the seller asked for it to
     # be over, and it is. Say which happened so the UI can word it honestly.
     return {"ok": True, "stopped": outcome == "stopping",
             "already_finished": outcome == "finished"}
+
+
+def _photos_gone(job_id: str, verb: str, reason: str) -> HTTPException:
+    """Finish a claimed job whose photos are gone, and hand back its 409.
+
+    By the time this can be known the job has already been taken out of the
+    pause, so it cannot be left where it was: a job in "identifying" with no
+    worker behind it is a progress bar that never moves again. It is finished
+    with the reason instead — which is what the client is polling for — and
+    the caller raises what comes back.
+    """
+    _bulk_set(job_id, done=True, error=reason)
+    log.warning("job %s: answered after its photos were gone", job_id)
+    return HTTPException(409, f"Those photos are no longer on the server — "
+                              f"please {verb}.")
+
+
+@app.post("/api/bulk/notes/{job_id}")
+def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
+    """Answer the guidance step, and let the job get on with it.
+
+    The job is paused at _AWAITING_NOTES with no worker of its own -- the
+    photos are optimized, a batch is split, and nothing has been drafted or
+    charged for a draft. This takes what the seller typed (one line per item,
+    every one of them optional) and starts the run that drafts.
+
+    Serves both flows, because from here they differ only in what the answer
+    is saved to. A single upload has one item and one session, so the line
+    goes on that session and the identify chain starts. A batch has the pile
+    still on the volume and its grouping written down, so this is the exact
+    hand-off a restart already does (see _drafting_plan): the continuation run
+    copies each item's photos out of the pile, saves that item's line beside
+    them, and drafts from the first group on.
+
+    Every box left blank is the same request as pressing Skip, and lands on
+    the same drafts a run without the step at all would have produced.
+    """
+    uid = _uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    # The seller's text, per item, scrubbed and clamped before it goes near a
+    # prompt or the volume. An index this job has no item for is dropped: the
+    # client builds its boxes from `pending_items`, so anything else is a
+    # stale tab, and guessing which item it meant is worse than ignoring it.
+    total = len(seen.get("_groups") or [{}])
+    cleaned: dict[int, str] = {}
+    for key, value in (req.notes or {}).items():
+        try:
+            gi = int(key)
+        except (TypeError, ValueError):
+            continue
+        text = listing_prompt.clean_item_notes(value)
+        if text and 0 <= gi < total:
+            cleaned[gi] = text
+    pipeline = seen.get("kind") == "pipeline"
+
+    # Take the job out of the pause, and only then start anything. Read and
+    # write happen under one lock (jobstore.claim) because check-then-act is a
+    # race that costs real money here: two answers arriving together — a
+    # double tap, a retry beside the original — would both start a drafting
+    # run over the same pile and charge for every item twice.
+    #
+    # It also settles the harmless cases in one place: a tab left open on a
+    # batch that has finished, an answer that crossed with a Stop. Nothing the
+    # seller did wrong, and "too late" is the honest answer to all of them.
+    job = jobstore.claim(
+        job_id, _AWAITING_NOTES, uid,
+        phase=_DRAFTING_PHASE, pending_items=None,
+        **({"beat": time.time()} if pipeline
+           # Mirrored so a deploy between here and the last item still drafts
+           # with what the seller typed; string keys, because JSON has no
+           # other kind.
+           else {"_item_notes": {str(gi): t for gi, t in cleaned.items()}}))
+    if job is None:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+
+    if pipeline:
+        # One item, one session. The up-front identify charge is still held on
+        # the job; hand its receipt to the chain so a failure refunds it the
+        # way it always has (tokens.receipts carries exactly the fields
+        # tokens.refund reads).
+        session_id = str(job.get("_session_id") or "")
+        if not session_id or not storage.list_optimized(session_id):
+            raise _photos_gone(
+                job_id, "upload them again",
+                "Those photos are no longer on the server — they were "
+                "cleared while this waited for your notes. Please upload "
+                "them again.")
+        storage.save_item_notes(session_id, cleaned.get(0, ""))
+        receipts = job.get("_refunds") or []
+        threading.Thread(
+            target=_run_identify_job,
+            args=(job_id, session_id, uid, receipts[0] if receipts else None),
+            daemon=True,
+        ).start()
+        log.info("pipeline %s: notes in (%d char(s)); drafting",
+                 job_id, len(cleaned.get(0, "")))
+        return {"ok": True, "items": 1}
+
+    staging_id = str(job.get("_staging_id") or "")
+    plan = _drafting_plan(job, staging_id) if staging_id else None
+    if plan is None:
+        # The pile went away while the seller was deciding — swept, or a
+        # volume that did not come back. Nothing left to draft from, and no AI
+        # was ever charged for this batch, so it ends here rather than
+        # pretending.
+        raise _photos_gone(
+            job_id, "run it again",
+            "This batch's photos are no longer on the server — they were "
+            "cleared while it waited for your notes. Please run the batch "
+            "again.")
+    threading.Thread(
+        target=_run_bulk_job,
+        args=(job_id, staging_id, bool(job.get("_strip_bg")), uid),
+        # resumed: the background-removal tokens were taken by the run that
+        # optimized the pile, and must not be taken again here.
+        kwargs={"resumed": True, "resume_from": plan, "item_notes": cleaned},
+        daemon=True,
+    ).start()
+    log.info("bulk %s: notes in for %d of %d item(s); drafting",
+             job_id, len(cleaned), len(plan["groups"]))
+    return {"ok": True, "items": len(plan["groups"])}
 
 
 @app.get("/api/bulk/status/{job_id}/brief")
@@ -8364,14 +8786,16 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
 
         prefs = _load_prefs(uid)  # once — strategy and defaults both read it
         _beat("identifying")
-        # The seller's hints were saved with the session at upload time, so
-        # they are read here rather than passed in: this worker also runs
-        # "Start over", which re-drafts months later with no request to carry
-        # them — and a re-run that has forgotten what the seller told it makes
-        # exactly the mistake they typed the note to prevent.
+        # The seller's hints were saved with the session -- the pile's at
+        # upload time, this item's at the guidance step -- so they are read
+        # here rather than passed in: this worker also runs "Start over",
+        # which re-drafts months later with no request to carry them, and a
+        # re-run that has forgotten what the seller told it makes exactly the
+        # mistake they typed the note to prevent.
         result = claude_ai.identify([opt_dir / n for n in names], names,
                                     strategy=_pricing_strategy(uid, prefs),
-                                    notes=storage.load_notes(session_id))
+                                    notes=storage.load_notes(session_id),
+                                    item_notes=storage.load_item_notes(session_id))
         # Onto the draft itself, not only the job's answer: the editor reads
         # the job, the cards read the record (see Listing.ai_confidence).
         result.listing.ai_confidence = result.confidence
@@ -8501,9 +8925,21 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
         _bulk_set(job_id, done=True,
                   error=_try_again("process those photos", reference))
         return
-    # Photos are ready — hand off to the identify chain (it owns the
-    # identify-charge refund on failure, stub-draft rescue, and done/result).
-    _run_identify_job(job_id, session_id, uid, identify_spent)
+    # Photos are ready, and nothing has been drafted yet -- so before the
+    # identify chain runs, the guidance step. One item here, so one question,
+    # with the optimized photos beside it: the seller sees what the AI is
+    # about to read and says what it is.
+    #
+    # It RETURNS rather than waiting; see _AWAITING_NOTES. The up-front
+    # identify charge stays held rather than being refunded: bulk_notes spends
+    # it on the chain the moment the answer lands, and a restart that finds
+    # this job still waiting gives it back in full (_settle_interrupted_jobs),
+    # because a pipeline job is not one of the kinds a boot picks back up.
+    _bulk_set(job_id, phase=_AWAITING_NOTES, beat=time.time(),
+              pending_items=_pending_items(
+                  session_id, optimized,
+                  [{"name": "", "indices": list(range(len(optimized)))}]))
+    log.info("pipeline %s: photos ready; waiting on the seller's notes", job_id)
 
 
 @app.post("/api/identify-async/{session_id}")
@@ -8511,8 +8947,8 @@ def identify_async(session_id: str, request: Request) -> dict:
     """Start a background identify; poll /api/bulk/status/{job_id} for the
     result. Same outcome as POST /api/identify, but it never holds a long
     synchronous request open, so slow vision calls can't time out the browser."""
-    if not config.anthropic_ready():
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured; cannot identify images.")
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
     _assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
@@ -8566,7 +9002,12 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
 def inventory_add(req: PublishRequest, request: Request) -> dict:
     """Shop Mode 'Buy': save a scanned item to the user's unlisted inventory
     (status='unlisted'), so it shows up in the Sell dashboard to finish + list
-    later. Reuses the listing record; mode is ignored."""
+    later. Reuses the listing record; mode is ignored.
+
+    This is the PROMOTION of the row /api/identify wrote at scan time (see
+    db.SCANNED): the scan is invisible to every seller-facing read, and this
+    is the first point the seller has asked for the item to become a listing.
+    Writing the same id is what carries the scan's photos and draft across."""
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")

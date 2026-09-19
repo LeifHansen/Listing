@@ -20,7 +20,7 @@ import httpx
 
 from .. import config
 from ..config import log
-from ..money import charm_price
+from ..money import MIN_CHARM_PRICE, charm_price, money
 from .taxonomy import _app_token
 
 # Inventory-API condition enums that count as "new" for comp matching;
@@ -261,6 +261,143 @@ def parse_sold(data, query: str, gtin: Optional[str] = None) -> Optional[dict]:
 _SOURCES = (sold_comps, active_comps)  # preferred first
 
 
+# ---------------------------------------------------------------------------
+# WHERE AN AUCTION OPENS
+#
+# An auction is not priced, it is STARTED, and the two are different numbers.
+# A Buy It Now price is what the seller wants for the item; an opening bid is
+# the floor under a sale whose price the bidders decide -- and on eBay a
+# no-reserve auction that draws exactly one bidder ends AT that floor. So the
+# opener has to answer two questions that pull against each other:
+#
+#   * open LOW and the listing collects early bids, which is what eBay's
+#     search surfaces and what other buyers follow -- the bidding war that
+#     makes an auction beat a fixed price in the first place;
+#   * open low on an item nobody is hunting for and it sells for the opener,
+#     because nobody arrives to bid it up.
+#
+# Which of those an item is in is exactly what the comps already measure.
+# `count` is how many comparable items eBay is carrying right now -- or sold,
+# where Marketplace Insights is approved -- and it is the best proxy this app
+# has for "will bidders show up". So the opener is a fraction of the market
+# estimate, and how far below the market it sits is decided by how deep the
+# market is. Nothing here is a second opinion about what the item is worth:
+# the estimate, the range and the count are the ones `suggest` already
+# measured, read a second way.
+
+# How many comparable items it takes before a low opener is a bidding war
+# rather than a giveaway. Above the four that active_comps/parse_sold need
+# before they can quote a quartile range at all: under that, the "market" is
+# a handful of listings and there is no distribution beneath it.
+DEEP_MARKET = 12
+
+# The fraction of the market estimate an opening bid lands on, as
+# (deep market, thin market). The account's pricing strategy decides how much
+# of the item's value the seller will put at risk to attract bidding -- the
+# same question it already answers for a Buy It Now in _STRATEGY_PICK, asked
+# about the other end of the sale.
+_AUCTION_OPENER = {
+    "quick_flip": (0.25, 0.50),
+    "median": (0.40, 0.65),
+    "long_sale": (0.55, 0.85),
+}
+
+_OPENER_STRATEGY_NOTE = {
+    "quick_flip": "Quick Flip — opens low to pull bidders in early",
+    "median": "Median — a standard opener for this market",
+    "long_sale": "Long Sale — opens high to protect the value, patient sale",
+}
+
+
+def _charm_floor(amount) -> Optional[float]:
+    """The nearest price ending in .99 that is NOT above `amount`.
+
+    `money.charm_price` rounds to the NEAREST charm point, which is right for
+    a price (the app's rule is never to shave a number "to be safe") and
+    wrong for a starting bid: rounding $30.00 up to $30.99 raises the floor
+    under an auction the seller asked to open below the market. Same integer
+    arithmetic, one direction only, and the same $0.99 floor -- eBay will not
+    take an auction that starts under it.
+    """
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return None
+    cents = int(round(value * 100))
+    # A value that is already a charm point stays where it is.
+    at = cents if cents % 100 == 99 else (cents // 100) * 100 - 1
+    return round(max(at, int(MIN_CHARM_PRICE * 100)) / 100, 2)
+
+
+def auction_start(comps: Optional[dict], strategy: str = "") -> Optional[dict]:
+    """Where to open the bidding, worked out from one comp block.
+
+    None when there is nothing to work from -- the same answer `suggest`
+    gives for a market it could not measure, so a caller never has to tell a
+    missing recommendation apart from a confident one.
+
+    What holds of the number that comes back:
+
+      * it sits BELOW the market estimate for anything the market values
+        above eBay's $0.99 minimum -- an opener at the market price is a Buy
+        It Now with extra steps and no bids -- and lands exactly on that
+        minimum for anything the market values under it, because eBay will
+        not take a lower opening bid;
+      * a deeper market opens lower than a thin one, for the same item and
+        the same strategy (DEEP_MARKET);
+      * Quick Flip opens at or below Median, which opens at or below Long
+        Sale (_AUCTION_OPENER);
+      * it lands on a charm point at or below where the fraction put it
+        (_charm_floor), and never under $0.99.
+    """
+    if not comps:
+        return None
+    try:
+        market = float(comps.get("estimate"))
+    except (TypeError, ValueError):
+        return None
+    if market <= 0:
+        return None
+
+    count = int(comps.get("count") or 0)
+    deep = count >= DEEP_MARKET
+    key = strategy if strategy in _AUCTION_OPENER else "median"
+    fraction = _AUCTION_OPENER[key][0 if deep else 1]
+    start = _charm_floor(market * fraction)
+    if start is None:
+        return None
+
+    sold = bool(comps.get("sold_data"))
+    one = count == 1
+    # "1 comparable item ARE listed at" is the sentence a seller is being
+    # asked to trust a number on; it agrees with its subject.
+    went = "sold for" if sold else ("is listed at" if one else "are listed at")
+    if deep:
+        why = (f"{count} comparable items {went} around {money(market)} — "
+               f"deep enough that bidders find it and price it, so it opens "
+               f"well under the market.")
+    else:
+        why = (f"only {count} comparable item{'' if one else 's'} {went} "
+               f"around {money(market)} — too thin to count on a bidding "
+               f"war, so it opens close to the market.")
+    return {
+        "start_price": start,
+        # The measurements this was derived from, exactly as measured: the
+        # seller is being asked to trust a number, and a number whose basis
+        # is on screen beside it is one they can overrule on purpose.
+        "market": round(market, 2),
+        "low": comps.get("low"),
+        "high": comps.get("high"),
+        "count": count,
+        "sold_data": sold,
+        "deep_market": deep,
+        "strategy": key,
+        "label": ("Opening bid, from what comparable items sold for" if sold
+                  else "Opening bid, from what comparable items are asking"),
+        "basis": f"{why} {_OPENER_STRATEGY_NOTE[key]}.",
+    }
+
+
 # Account pricing strategy → which end of the comp range the headline
 # suggestion lands on. "estimate" is the median; low/high are the quartiles.
 _STRATEGY_PICK = {
@@ -279,7 +416,14 @@ def suggest(query: str, category_id: Optional[str] = None,
     headline suggestion uses; the full low/median/high always rides along.
     `gtin` is a verified UPC off the item's own barcode — when there is one,
     every source is asked about that PRODUCT rather than about the words in
-    the title."""
+    the title.
+
+    The answer carries TWO recommendations off the same measurement, because
+    eBay sells an item two ways: `suggestion` is a price to list at, and
+    `auction` is where to open the bidding if the seller runs it as an
+    auction instead (see auction_start — the two are different numbers, and
+    quoting the Buy It Now figure as a starting bid opens a $120 jacket at
+    $120). Both are null together when nothing could be measured."""
     sources, failed = [], []
     for src in _SOURCES:
         try:
@@ -304,6 +448,12 @@ def suggest(query: str, category_id: Optional[str] = None,
             log.warning("pricing: %s failed for %r: %s", src.__name__, query, exc)
     best = sources[0] if sources else None
     pick, strategy_label = _STRATEGY_PICK.get(strategy, (None, None))
+    # Derived from the comps already in hand, so it costs no extra eBay call
+    # and is there whether or not this listing is an auction today — the
+    # format is one tap away on every draft card, and a recommendation that
+    # needed a second round trip after the tap would arrive after the seller
+    # had already typed a number.
+    opening = auction_start(best, strategy)
     return {
         "query": query,
         # What was actually searched for, when it was not the query: the
@@ -336,4 +486,8 @@ def suggest(query: str, category_id: Optional[str] = None,
                       else best["label"]),
             "sold_data": best["sold_data"],
         },
+        # Where to OPEN an auction on the same item. Not a second opinion
+        # about its value: it reads the very measurement above from the other
+        # end of the sale.
+        "auction": opening,
     }

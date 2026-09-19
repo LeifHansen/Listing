@@ -770,6 +770,19 @@ class ImageOrderRequest(BaseModel):
     images: list[str]
 
 
+class ItemNotesRequest(BaseModel):
+    """The guidance step's answer — see POST /api/bulk/notes/{job_id}.
+
+    Keyed by the item's index in the paused job's `pending_items`, as a STRING
+    because that is what JSON object keys are. A map rather than a list for
+    two reasons: a seller who fills in two boxes out of forty sends two
+    entries, and an index the batch no longer has can be dropped on its own
+    instead of shifting every line after it onto the wrong item.
+    """
+
+    notes: dict[str, str] = Field(default_factory=dict)
+
+
 class PublishRequest(BaseModel):
     session_id: SessionId
     listing: Listing

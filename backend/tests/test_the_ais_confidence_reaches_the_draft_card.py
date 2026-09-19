@@ -104,7 +104,7 @@ def ai(app, monkeypatch):
     def _install(*levels):
         queue = list(levels)
 
-        def identify(paths, names, strategy="", notes=""):
+        def identify(paths, names, strategy="", notes="", item_notes=""):
             return IdentifyResult(
                 listing=Listing(title="A polo", images=list(names)),
                 confidence=queue.pop(0), raw_observations="")
@@ -182,7 +182,10 @@ def test_every_bulk_draft_carries_its_own(app, ai, monkeypatch):
     app._register_bulk_job(job_id, {"id": job_id, "done": False,
                                     "error": None, "items": []})
 
-    app._run_bulk_job(job_id, staging, False, None)
+    # item_notes={}: the guidance step answered with every box left blank,
+    # which is what a batch drafted without it looks like. What each draft's
+    # confidence is does not depend on the step either way.
+    app._run_bulk_job(job_id, staging, False, None, item_notes={})
 
     job = app.jobstore.snapshot(job_id)
     assert not job.get("error"), job["error"]

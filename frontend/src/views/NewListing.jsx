@@ -572,6 +572,7 @@ export function NewListing({ search = "" }) {
         {activeBulk && (
           <BulkBanner
             done={!!activeBulk.done}
+            awaiting={!!activeBulk.awaiting}
             onReview={() => setShowBulk(true)}
             onDismiss={clearBulk}
           />

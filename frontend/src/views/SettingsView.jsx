@@ -1114,6 +1114,7 @@ function ExpertKnowledge() {
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [retrying, setRetrying] = useState("");   // the id being re-read
 
   const load = useCallback(() => {
     api("/api/expert-knowledge")
@@ -1155,6 +1156,26 @@ function ExpertKnowledge() {
       await api(`/api/expert-knowledge/${row.id}`, { method: "DELETE" });
       load();
     } catch (e) { toast(`Couldn't remove that: ${e.message}`, { kind: "error" }); }
+  };
+
+  // Reading a page again. Most of the reasons a reference fails are about the
+  // moment rather than the page — the site was busy, it asked for consent, our
+  // summariser was down — and the server retries those twice on its own. This
+  // is what a seller has after that, and without it the only way to re-read a
+  // page was to delete the reference and type it in again.
+  const retry = async (row) => {
+    setRetrying(row.id);
+    try {
+      await postJson(`/api/expert-knowledge/${row.id}/refresh`, {});
+      toast("Reading the page again…", { kind: "success" });
+      // The read happens off the request, so the row is still showing the old
+      // error for a moment. Come back for it rather than claiming it's fixed.
+      setTimeout(load, 4000);
+    } catch (e) {
+      toast(`Couldn't try again: ${e.message}`, { kind: "error" });
+    } finally {
+      setRetrying("");
+    }
   };
 
   if (!state) return <div className="ai-shimmer h-16 rounded-tile mt-4" aria-hidden />;
@@ -1246,10 +1267,20 @@ function ExpertKnowledge() {
                   stopped working is worse than none, so the error shows in the
                   same place. */}
               {row.fetch_error ? (
-                <p className="text-[12px] text-amber-700 flex items-start gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                  <span>{row.fetch_error}</span>
-                </p>
+                <div className="flex flex-col gap-1.5 items-start">
+                  <p className="text-[12px] text-amber-700 flex items-start gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <span>{row.fetch_error}</span>
+                  </p>
+                  {row.editable ? (
+                    <Button variant="ghost" className="text-[12px]"
+                            disabled={retrying === row.id}
+                            onClick={() => retry(row)}>
+                      <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                      {retrying === row.id ? "Reading…" : "Try again"}
+                    </Button>
+                  ) : null}
+                </div>
               ) : row.distillate ? (
                 <details className="text-[12px] text-ink-secondary">
                   <summary className="cursor-pointer">

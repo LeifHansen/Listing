@@ -14,6 +14,7 @@ import { MergeListingsDialog } from "@/components/MergeListingsDialog";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { DraftFormatEdit } from "./FormatQuickPick";
+import { DraftPriceEdit } from "./PriceQuickEdit";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
@@ -693,6 +694,16 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                       at the item — and it was the one of the three that could
                       only be made inside the editor, one draft at a time. */}
                   <DraftFormatEdit item={item}
+                    className={cn(list ? "min-w-0 w-full sm:w-64" : "mt-1.5")} />
+                  {/* And what it asks for. The number the AI chose is the
+                      one a review pass most often changes, and it was the
+                      last thing on this card that cost a trip into the
+                      editor and back. It follows the format beside it, so a
+                      draft switched to an auction asks for its starting bid
+                      right here — next to the pick that created the gap, and
+                      next to the amber line naming it as the reason Publish
+                      is off. */}
+                  <DraftPriceEdit item={item}
                     className={cn(list ? "min-w-0 w-full sm:w-64" : "mt-1.5")} />
                   <DraftShipping item={item} className={cn(list ? "min-w-0" : undefined)} />
                 </div>

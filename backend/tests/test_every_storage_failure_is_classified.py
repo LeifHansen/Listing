@@ -301,6 +301,13 @@ WHY_A_BLANK_IS_SAFE = {
     "load_notes":
         "\"\" means 'no hints for this session', which drafts from the photos "
         "alone; it is an input to the AI, never a fact shown to the seller",
+    "save_item_notes":
+        "same as save_notes: an unsaved line costs a less-informed draft, "
+        "which is the draft a seller who skipped the guidance step gets, and "
+        "no screen reads it back to claim it was kept",
+    "load_item_notes":
+        "\"\" means 'the seller skipped the guidance step for this item', "
+        "which is a prompt byte-identical to one without the step at all",
     "session_touched_at":
         "an unknown mtime makes the orphan sweep skip the dir rather than delete it",
     "sweep_orphan_sessions":

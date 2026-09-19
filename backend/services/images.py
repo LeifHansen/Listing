@@ -1139,12 +1139,35 @@ ART_NO_BORDER_KEPT_AS_SHOT = (
     "shot.")
 
 
-def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
+def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
+    """The photo cut to the outer border of the FLAT RECTANGULAR THING in it,
+    kept whole on white — or None when there isn't one.
+
+    artwork.border() on its own, composited. Geometry, no model: the border
+    is scanned from the photo, and what ships is a filled rectangle, so
+    nothing inside it can be removed.
+
+    Two callers, and they want it for two different reasons. art_cutout asks
+    first because a scanned border cannot be wrong about what is inside the
+    box it returns. And the ordinary cutout path asks LAST, after the model
+    has found nothing it would ship — see optimize() and
+    remove_background_white().
+    """
+    box = artwork.border(rgb)
+    if box is None:
+        return None
+    log.info("art cutout: kept everything inside the scanned border %s of a "
+             "%dx%d photo", box, rgb.width, rgb.height)
+    return _compose_on_white(rgb, artwork.mask(rgb.size, box))
+
+
+def art_cutout(rgb: Image.Image,
+               wait: Optional[float] = None) -> Optional[Image.Image]:
     """A PICTURE on white: everything inside its outer border, kept whole.
 
     The separate path for paintings, prints, posters, drawings, photographs
-    and anything else whose own front surface is an image. It does not call
-    the model at all, and that is the entire point — see services/artwork. A
+    and anything else whose own front surface is an image. The model never
+    supplies the matte, and that is the entire point — see services/artwork. A
     salient-object model handed a photograph OF A PICTURE finds the subject
     the picture depicts and deletes the artwork around it, which is how a
     Marcia Alpert gouache reached a listing as the baby out of it, floating on
@@ -1157,53 +1180,108 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
 
     So the matte here is a FILLED RECTANGLE, and nothing inside the border is
     ever examined, let alone removed. None means the border could not be found
-    and the photo must be kept exactly as shot; it never means "try the model
-    instead", which is the failure this exists to prevent.
+    and the photo must be kept exactly as shot; it never means "cut to what
+    the model kept", which is the failure this exists to prevent.
 
-    A REMOTE engine gets a second look at the border, and only at the border.
-    `border()` is asked first and is still the trusted answer, because it is
-    geometry and cannot be wrong about what is inside the box it returns. It
-    handles a hand-held photo itself -- it fits the content it found at an
-    angle rather than demanding an upright rectangle -- so what reaches the
-    remote engine is a picture whose edge could not be found at all: one lying
-    on a surface close to its own colour. Then the remote matte's outer SHAPE
-    is offered instead, and artwork.quad_from_alpha refuses it unless it is a
-    rectangle at some angle rather than a subject lifted out of one. Either
-    way the matte that ships is solid, from artwork.mask() or artwork.quad().
-    There is still no code path here that can remove a pixel from inside the
-    border.
+    A SECOND LOOK at the border, and only at the border. `border()` is asked
+    first and is still the trusted answer, because it is geometry and cannot
+    be wrong about what is inside the box it returns. It handles a hand-held
+    photo itself -- it fits the content it found at an angle rather than
+    demanding an upright rectangle -- so what reaches the second look is a
+    picture whose edge could not be found at all: one lying on a surface close
+    to its own colour. Then a segmentation matte's outer SHAPE is offered
+    instead, and artwork.quad_from_alpha refuses it unless it is a rectangle
+    at some angle rather than a subject lifted out of one. Either way what
+    ships is solid, from artwork.mask() or artwork.quad(). There is still no
+    code path here that can remove a pixel from inside the border.
+
+    Which model draws that matte is _border_alpha's business, and until this
+    change the answer in production was "none, ever" -- see its note. `wait`
+    is how long that model may queue for the inference slot before giving up
+    with CutoutBusy, and it defaults to the batch deadline, which is where
+    every caller of this is today.
     """
-    box = artwork.border(rgb)
-    if box is not None:
-        log.info("art cutout: kept the picture whole inside %s (scanned) of a "
-                 "%dx%d photo", box, rgb.width, rgb.height)
-        return _compose_on_white(rgb, artwork.mask(rgb.size, box))
-    remote = _remote_alpha(rgb)
-    if remote is None:
+    out = _rectangle_cutout(rgb)
+    if out is not None:
+        return out
+    alpha, who = _border_alpha(rgb, wait=wait)
+    if alpha is None:
         return None
     # Four corners rather than a box, because the photo that gets here is the
     # one border() could not scan at all, and a print that faint against its
     # background is usually also lying at an angle on it. See
     # artwork.quad_from_alpha.
-    corners = artwork.quad_from_alpha(rgb.size, remote)
+    corners = artwork.quad_from_alpha(rgb.size, alpha)
     if corners is None:
         return None
     log.info("art cutout: kept the picture whole inside %s (located by the "
-             "remote engine) of a %dx%d photo", corners, rgb.width, rgb.height)
+             "%s engine) of a %dx%d photo", corners, who, rgb.width, rgb.height)
     return _compose_on_white(rgb, artwork.quad(rgb.size, corners))
 
 
-def _remote_alpha(rgb: Image.Image) -> Optional[Image.Image]:
-    """A remote engine's matte for `rgb`, or None when there isn't one.
+# Whether the LOCAL model may be asked where a picture's border is when the
+# geometric scan could not find one. On by default; ART_LOCAL_BORDER=off puts
+# the second look back to paid engines only. See _border_alpha.
+_ART_LOCAL_BORDER = (os.getenv("ART_LOCAL_BORDER", "on").strip().lower()
+                     not in ("off", "0", "false", "no"))
 
-    Only the ALPHA, and only for art: the caller wants a box, not a cutout. A
-    failure here is not worth surfacing -- the photo is about to be kept as
-    shot anyway, which is exactly what would have happened without this call.
+
+def _border_alpha(rgb: Image.Image, wait: Optional[float] = None,
+                  ) -> tuple[Optional[Image.Image], str]:
+    """A matte to LOCATE a picture's outer edge with, and what produced it --
+    a paid engine's when one is configured, the local model's otherwise.
+
+    Only the outer SHAPE of it is ever used. artwork.quad_from_alpha refuses
+    anything that is not a rectangle at some angle, and what the caller ships
+    is artwork.quad() -- a solid convex shape -- so there is still no code
+    path here that can remove a pixel from inside a picture's border. That is
+    the invariant services/artwork exists for and nothing here touches it.
+
+    WHAT CHANGED IS WHO MAY BE ASKED, and it changed because the answer used
+    to be "nobody". This was remote-only, and nothing configures a remote
+    engine: BG_ENGINE is commented out in fly.toml and no key is set, so
+    bg_engine_chain() is ["local"] and this returned None on its first step.
+    The second look at a picture's border -- the whole of it, including the
+    hand-held case it was written for -- was dead code in production.
+
+    What a seller saw was the complaint this is being fixed for: the
+    background remover "works great for shirts, horrible for square objects".
+    A shirt is not a picture, so it goes to the model and comes back cut out
+    on white. A framed print, a poster, a map, a tray with a picture on its
+    face -- anything the screen calls art -- goes to the geometric scan
+    instead, and when that scan cannot find an edge (a dark frame on a wood
+    table, a print on paper close to the colour of the floor) the photo is
+    kept exactly as shot. Side by side in one grid that reads as a background
+    remover that works on clothes and not on anything flat, and the real
+    reason was "no paid API key", which is not something anybody could have
+    guessed from the outside.
+
+    A remote engine is the same KIND of thing as the local one: a
+    segmentation model with the same failure on a picture. What makes its
+    answer safe here was never that it was paid for -- it is that the answer
+    is used as GEOMETRY and checked for being a rectangle. A baby lifted out
+    of a painting is not a rectangle at any angle (a round subject scores
+    0.785 against a floor of 0.9), so it is refused whichever model it came
+    from, and the photo is kept as shot exactly as it is today.
+
+    The matte is HARDENED first, and only for the local one. The bounding box
+    the corners are measured from is the box of every non-zero pixel, and the
+    local model leaves a faint haze over the backdrop that a paid engine's
+    clean matte does not have -- unhardened, that haze is what the box would
+    be fitted to. _harden drops everything under _ALPHA_LOW, which is the
+    same line it draws for the shipping matte.
+
+    The cost is one inference, paid only by a picture whose border the scan
+    could not find -- the photo that was otherwise getting nothing at all. A
+    model that is missing or broken is not worth surfacing here: the photo is
+    about to be kept as shot, which is exactly what would have happened
+    without this call. A BUSY slot is different and is raised, so the caller
+    can say "try again" rather than quietly shipping the photo untouched.
     """
     from . import cutout_api
     for name in config.bg_engine_chain():
         if name == "local":
-            return None
+            break
         engine = cutout_api.ENGINES.get(name)
         if engine is None:
             continue
@@ -1213,8 +1291,16 @@ def _remote_alpha(rgb: Image.Image) -> Optional[Image.Image]:
             log.info("art border: %s couldn't help (%s)", name, exc)
             continue
         if cut is not None:
-            return cut.split()[3]
-    return None
+            return cut.split()[3], name
+    if not _ART_LOCAL_BORDER:
+        return None, ""
+    try:
+        return _harden(_mask(rgb, wait=wait)), "local"
+    except CutoutBusy:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a border nobody can find is not an error
+        log.info("art border: the local model couldn't help (%s)", exc)
+        return None, ""
 
 
 def _flatten(img: Image.Image) -> Image.Image:
@@ -1357,7 +1443,11 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
              rotate: int = 0, detail: bool = False, art: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that finds nothing keeps the photo as shot
-    and says so in `bg_error`, so the caller can give the charge back.
+    and says so in `bg_error`, so the caller can give the charge back — after
+    one last question, which is whether the thing in the photo is simply a
+    RECTANGLE. A tray, a sign, a boxed set: the model drops those or keeps
+    only the picture printed on their face, and the geometry that cuts a
+    framed print cuts them too. `bg_engine` says "border" when it did.
 
     `rotate` is clockwise degrees (0/90/180/270): the ITEM's turn, decided by
     services/orient and applied right after the camera's EXIF — before the
@@ -1407,6 +1497,24 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
                 out, bg_engine = art_cutout(img), "art"
             else:
                 out, bg_engine = cutout_with_engine(img)
+                if out is None:
+                    # The model kept nothing this file would ship, and for a
+                    # FLAT RECTANGULAR THING that is the likeliest outcome
+                    # there is: a tray, a sign, a plaque, a boxed set, a
+                    # record sleeve. The model finds the picture PRINTED on
+                    # its face and drops the object around it, and what
+                    # survives is a rectangle that fails coverage or fails to
+                    # look like a product. The screen did not call any of
+                    # these art, and it is right not to -- a tray with a map
+                    # on it is a tray -- but the shape of the thing is the
+                    # same, so the same geometry answers it. Asked only after
+                    # the model has declined, so no photo that gets a cutout
+                    # today changes, and artwork.border() answers None for
+                    # anything that is not a rectangle, so a garment or a
+                    # close-up is still kept as shot.
+                    rescued = _rectangle_cutout(img)
+                    if rescued is not None:
+                        out, bg_engine = rescued, "border"
             if out is None and art:
                 bg_error = ART_NO_BORDER_KEPT_AS_SHOT
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
@@ -1631,11 +1739,22 @@ def warm() -> None:
 
 def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     """The studio's "Remove background": the item on white, and the name of
-    the engine that did it. Raises ValueError when the model found nothing to
+    the engine that did it. Raises ValueError when nothing found an item to
     keep, so the editor can tell the seller instead of silently doing
     nothing, and CutoutBusy when the slot is taken (the editor's wait is the
-    short one: a person is watching)."""
-    out, engine = cutout_with_engine(_flatten(img), wait=INFER_WAIT_SECONDS)
+    short one: a person is watching).
+
+    The geometric border is the same last resort it is in the photo pass, and
+    the studio is where it matters most: this is the button a seller presses
+    AFTER a batch left a photo as shot, so answering "couldn't separate this
+    photo" a second time is the end of the road for that listing. The message
+    below already named a photo OF A PICTURE as a likely cause; now something
+    is actually done about it.
+    """
+    rgb = _flatten(img)
+    out, engine = cutout_with_engine(rgb, wait=INFER_WAIT_SECONDS)
+    if out is None:
+        out, engine = _rectangle_cutout(rgb), "border"
     if out is None:
         raise ValueError(
             "Couldn't separate this photo from its background — it's likely "

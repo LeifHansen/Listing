@@ -137,6 +137,51 @@ describe("Teach the AI", () => {
     expect(m.text()).toContain("a login wall");
   });
 
+  it("gives the seller a way to read the page again when it failed", async () => {
+    // Most of the reasons a reference fails are about the moment rather than
+    // the page — the site was busy, it asked for consent first, our own
+    // summariser was down — and the server has already retried those twice by
+    // the time this message is on screen. Without this button the only way to
+    // re-read a page was to delete the reference and type it in again.
+    const broken = {
+      references: [{
+        ...ONE.references[0],
+        distillate: "",
+        fetch_error: "the site is busy or limiting how often it will answer "
+                     + "(HTTP 429) — press Try again whenever you like",
+      }],
+      cap: 20,
+    };
+    const posts = [];
+    vi.stubGlobal("fetch", vi.fn(server(() => json(broken), posts)));
+    const m = await mount();
+    root = m.root;
+
+    const button = [...m.host.querySelectorAll("button")]
+      .find((b) => (b.textContent || "").includes("Try again"));
+    expect(button).toBeTruthy();
+    await act(async () => { button.click(); });
+    expect(posts.map((p) => p.path))
+      .toContain("/api/expert-knowledge/r1/refresh");
+  });
+
+  it("does not offer to re-read a built-in reference the seller doesn't own",
+     async () => {
+    const broken = {
+      references: [{
+        ...ONE.references[0], scope: "global", editable: false,
+        distillate: "", fetch_error: "the site is busy (HTTP 429)",
+      }],
+      cap: 20,
+    };
+    vi.stubGlobal("fetch", vi.fn(server(() => json(broken))));
+    const m = await mount();
+    root = m.root;
+    expect(m.text()).toContain("the site is busy");
+    expect([...m.host.querySelectorAll("button")]
+      .some((b) => (b.textContent || "").includes("Try again"))).toBe(false);
+  });
+
   it("marks a built-in reference as not the seller's to edit", async () => {
     const global = {
       references: [{ ...ONE.references[0], scope: "global", editable: false }],

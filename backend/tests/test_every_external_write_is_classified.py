@@ -102,6 +102,10 @@ SAFE_TO_REPEAT = {
         "asks the carrier to void a label: money comes back to the seller, "
         "never goes away, and EasyPost refuses a second request on the same "
         "shipment rather than filing two.",
+    "backend.services.google_ai._generate":
+        "a POST that READS: it asks Gemini a question about the seller's "
+        "photos. Nothing of theirs exists on Google's side to change, and a "
+        "lost answer costs the tokens of asking again and nothing else.",
     "backend.services.promotions.suggested_ad_rates":
         "a POST that READS: findListingRecommendations. Commits to no fee.",
     "backend.services.tokens._stripe_post":

@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Sparkles, FolderOpen, Trash2, Camera, MessageSquareText, Check, CheckCheck, X,
+  ChevronDown, ChevronUp, ImagePlus,
 } from "lucide-react";
 import { cn, once } from "@/lib/utils";
 import { turnedUprightMessage } from "@/lib/turnedUpright";
 import {
-  api, pollJob, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
+  api, pollJob, postJson, downscaleAllForUpload, isPhotoFile, PHOTO_ACCEPT,
   UPLOAD_TIMEOUT_MS,
 } from "@/lib/api";
 import { useApp } from "@/store";
+import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
 import { Button } from "@/components/ui/Button";
 import { Field, Textarea, Toggle } from "@/components/ui/fields";
 import { Card } from "@/components/ui/Card";
@@ -17,6 +19,7 @@ import { BrandPulse } from "@/components/ui/AIStatus";
 import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 import { MAX_PHOTOS } from "./blockers";
+import { AiNotesStep } from "./AiNotesStep";
 
 // When background removal can't run (out of credits, bad key, rate limit) the
 // server KEEPS the original photo — the right call, but silent: the photos just
@@ -47,6 +50,10 @@ const MAX_BATCH_FILES = 250;
 // the server so the box stops taking characters it is about to drop, rather
 // than silently truncating a hint the seller watched themselves type.
 const MAX_NOTES_CHARS = 1000;
+
+// Where a paused upload's job id waits while the seller is somewhere else.
+// See the restore effect below for why it has to be written down at all.
+const ASK_KEY = "ask";
 
 // The seller's hints, one per comma — the same split the server prompt does,
 // so the count under the box is the number of hints the AI will actually see.
@@ -84,6 +91,18 @@ export function UploadPhase() {
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
+  // Is the drop zone unfolded? Shut on every mount, and deliberately not
+  // remembered.
+  //
+  // The uploader is a half-screen panel sitting at the top of Sell, above the
+  // drafts strip and the whole listing manager — so a seller who came to Sell
+  // to look at what they are already selling had to scroll past a box asking
+  // for photos first, every single visit. Folded, it is one line, and the
+  // lists are where the screen starts. "Open, like last time" would be the
+  // same trap the cutout toggle above documents: a decision made on another
+  // visit, re-applied to this one without being asked — and re-opening itself
+  // on arrival is precisely what this fold exists to stop.
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // Select mode: pick several photos out of the pile and drop them in one go.
   // A per-tile trash is one tap for one wrong photo, and forty taps for the
@@ -104,8 +123,63 @@ export function UploadPhase() {
   // Live status of the background pipeline job (phase/current/total_photos),
   // so the wait card reports what's actually happening instead of guessing.
   const [stage, setStage] = useState(null);
+  // The guidance step. The pipeline job stops once the photos are optimized
+  // and before anything is drafted, and hands back the item it is about to
+  // write — so this holds that question while the seller answers it.
+  // { sessionId, jobId, items } or null.
+  const [pending, setPending] = useState(null);
+  // What the seller has typed into it, keyed by item index. Held HERE rather
+  // than inside the step, which is unmounted the moment the answer is sent —
+  // see AiNotesStep: a failed submit has to come back to the words they
+  // wrote, not to an empty box.
+  const [itemNotes, setItemNotes] = useState({});
+  // Answering it. Separate from `busy` because the two render differently:
+  // `busy` is the wait before the question, this is the wait after it.
+  const [notesBusy, setNotesBusy] = useState(false);
   // Taken once, on mount — a later retry must not re-seed the drop zone.
   useEffect(() => { clearBulkRetry(); }, [clearBulkRetry]);
+
+  // A question the seller walked away from.
+  //
+  // The step lives in this component, so opening Drafts — or reloading —
+  // unmounts it. That used to cost nothing: the old straight-through pass
+  // finished in the background and left a draft behind whether anyone was
+  // watching or not. A paused job drafts NOTHING until it is answered, so
+  // losing the question loses the whole upload. Hence the id on the way into
+  // the pause, and this on the way back: return to Sell and the question is
+  // there again.
+  //
+  // Only the ids are stored. The items are re-read from the job, which is the
+  // one copy that cannot be stale — and the same read is what settles a
+  // stored id that is no longer worth putting back.
+  useEffect(() => {
+    const raw = readLocal(ASK_KEY);
+    if (!raw) return undefined;
+    let live = true;
+    (async () => {
+      let saved = null;
+      try { saved = JSON.parse(raw); } catch { /* unreadable — drop it */ }
+      // Both ids or neither: the job id finds the question, the session id is
+      // what the answer's draft is opened from. Half a record cannot do the
+      // job and must not put a question on screen that leads nowhere.
+      if (!saved?.jobId || !saved?.sessionId) { clearLocal(ASK_KEY); return; }
+      try {
+        const j = await api(`/api/bulk/status/${saved.jobId}`);
+        if (!live) return;
+        if (!j.done && j.phase === "awaiting_notes") {
+          setPending({ sessionId: saved.sessionId, jobId: saved.jobId,
+                       items: j.pending_items || [] });
+          return;
+        }
+      } catch (e) { /* 404, or not ours: no question left to put back */ }
+      // It finished, failed, or the server has no record of it. Anything it
+      // drafted is in Drafts, and a stale id must not sit in front of the
+      // drop zone forever.
+      if (live) clearLocal(ASK_KEY);
+    })();
+    return () => { live = false; };
+    // Once, on mount: this is a restore, not a subscription.
+  }, []);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -117,6 +191,12 @@ export function UploadPhase() {
     list.some((e) => e.file.name === f.name && e.file.size === f.size);
 
   const addFiles = (fileList) => {
+    // Photos arriving is the panel's cue to open — dropped onto the folded
+    // bar, picked from the library, or handed back by a failed batch. It
+    // stays open afterwards even if the pile is emptied again: a seller
+    // deleting the last wrong shot is about to pick another one, not asking
+    // for the uploader to fold away under their hands.
+    setOpen(true);
     // Copied before anything else runs. `fileList` is the input's own LIVE
     // FileList, and the change handler clears the input the moment this
     // returns (`e.target.value = ""`, without which picking the same photo
@@ -201,6 +281,65 @@ export function UploadPhase() {
     await runBulkUpload(files, removeBg, notes);
   });
 
+  // The draft has landed — the same ending for the pass that ran straight
+  // through and the one that waited for the seller's notes.
+  const finish = (sessionId, result) => {
+    setSession({
+      sessionId,
+      listing: result.listing,
+      confidence: result.confidence,
+      // Server already ran the specifics/maker enrichment for this draft —
+      // the editor's autofill effect skips its (re-charging) re-run.
+      specificsAutofilled: !!result.specifics_autofilled,
+    });
+    // A listing that did not exist a moment ago now does. Nothing else asks
+    // the server again on its own, so without this the new draft is absent
+    // from Drafts, from the tab counts and from the dashboard until some
+    // unrelated refresh happens along. See store.invalidateListings.
+    invalidateListings();
+  };
+
+  // The seller has answered the guidance step (or left every box blank, which
+  // is the same request and the same drafts a run without the step would have
+  // produced). `pending` is deliberately NOT cleared until the draft lands:
+  // a failed submit has to come back to the question, not to a dead screen —
+  // the photos are still on the server and the job is still paused.
+  const submitNotes = async (notes) => {
+    if (!pending || notesBusy) return;
+    setNotesBusy(true);
+    setStage({ phase: "identifying" });
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}`, { notes });
+      const result = await pollJob(pending.jobId, {
+        onUpdate: (j) => setStage(j),
+      });
+      clearLocal(ASK_KEY);  // answered — there is no question to come back to
+      setPending(null);
+      finish(pending.sessionId, result);
+    } catch (e) {
+      // 409 is the server saying this question has already been answered —
+      // another tab, or a reload that raced the first press. Keeping the
+      // boxes up would be a dead end: every press from here is refused. So
+      // the question goes, and the seller is pointed at the draft it made.
+      //
+      // `e.status`, not the message: api() uses the sentence the server wrote
+      // AS the message and puts the code on the error, so a status match is
+      // the only reliable one.
+      if (e.status === 409) {
+        clearLocal(ASK_KEY);
+        setPending(null);
+        invalidateListings();
+        toast("This upload has already been written — find it in Drafts.",
+              { kind: "info" });
+      } else {
+        toast(`Error: ${e.message}`, { kind: "error" });
+      }
+    } finally {
+      setNotesBusy(false);
+      setStage(null);
+    }
+  };
+
   const process = once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
@@ -222,8 +361,15 @@ export function UploadPhase() {
       const up = await api("/api/upload",
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       let last = null;
-      const result = await pollJob(up.job_id, {
+      // Stops at the guidance step, where the job pauses with the photos
+      // ready and nothing drafted — waiting on the seller rather than on the
+      // machine, which is why the poll has to be told this is not a job that
+      // has gone quiet. A server that ran straight through (nothing paused)
+      // hands back the identify result exactly as it always did, so the two
+      // are told apart by what came back rather than by trusting either.
+      const out = await pollJob(up.job_id, {
         onUpdate: (j) => { last = j; setStage(j); },
+        stopWhen: (j) => j.phase === "awaiting_notes",
       });
       const optResults = last?.upload?.optimize_results || [];
       if (removeBg) {
@@ -234,20 +380,19 @@ export function UploadPhase() {
       // change. Say so, and how to turn it back if the pass got it wrong.
       const turned = turnedUprightMessage(optResults);
       if (turned) toast(turned, { kind: "info", ttl: 10000 });
+      // The photos are on the server now and everything from here shows
+      // THOSE, so the local previews have done their job.
       files.forEach((f) => URL.revokeObjectURL(f.url));
-      setSession({
-        sessionId: up.session_id,
-        listing: result.listing,
-        confidence: result.confidence,
-        // Server already ran the specifics/maker enrichment for this draft —
-        // the editor's autofill effect skips its (re-charging) re-run.
-        specificsAutofilled: !!result.specifics_autofilled,
-      });
-      // A listing that did not exist a moment ago now does. Nothing else asks
-      // the server again on its own, so without this the new draft is absent
-      // from Drafts, from the tab counts and from the dashboard until some
-      // unrelated refresh happens along. See store.invalidateListings.
-      invalidateListings();
+      if (out?.phase === "awaiting_notes") {
+        // Written down BEFORE the question goes up, so a seller who leaves
+        // the screen a second later can still be brought back to it.
+        writeLocal(ASK_KEY, JSON.stringify({ sessionId: up.session_id,
+                                             jobId: up.job_id }));
+        setPending({ sessionId: up.session_id, jobId: up.job_id,
+                     items: out.pending_items || [] });
+        return;
+      }
+      finish(up.session_id, out);
     } catch (e) {
       toast(`Error: ${e.message}`, { kind: "error" });
     } finally {
@@ -256,7 +401,7 @@ export function UploadPhase() {
     }
   });
 
-  if (busy) {
+  if (busy || notesBusy) {
     // Real pipeline stages from the job status; the pre-job moment (uploading
     // the files themselves) is the only guessed line.
     const total = stage?.total_photos || files.length;
@@ -288,49 +433,146 @@ export function UploadPhase() {
     );
   }
 
+  // The guidance step, in place of the uploader: the photos are already on
+  // the server, so there is nothing to drop and nothing to pick — the only
+  // thing left before the AI writes is what the seller knows about the item.
+  if (pending) {
+    return (
+      <div className="flex flex-col gap-5">
+        <AiNotesStep
+          items={pending.items}
+          values={itemNotes}
+          onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
+          onSubmit={submitNotes}
+        />
+      </div>
+    );
+  }
+
+  // A pile on screen is never folded away. The staged photos, the notes box
+  // and the button that starts the AI all live in the card below this one —
+  // hiding them behind a bar that reads "Add photos" is how a seller loses a
+  // shoot they thought was queued. So the fold is offered only while there is
+  // nothing in it, which is also the only state it was ever in the way in.
+  const collapsed = !open && files.length === 0;
+
+  // One drop target's worth of handlers, shared by the folded bar and the
+  // open drop zone: dropping photos has to work in both, or folding the panel
+  // would quietly take the app's main gesture away with it.
+  const dropHandlers = {
+    onDragOver: (e) => { e.preventDefault(); setDrag(true); },
+    onDragEnter: (e) => { e.preventDefault(); setDrag(true); },
+    onDragLeave: (e) => { e.preventDefault(); setDrag(false); },
+    onDrop: (e) => {
+      e.preventDefault();
+      setDrag(false);
+      addFiles(e.dataTransfer.files);
+    },
+  };
+
   return (
     <div className="flex flex-col gap-5">
-      <Card
-        className={cn(
-          "border-2 border-dashed transition-colors duration-200 cursor-pointer",
-          drag ? "border-blue bg-blue-soft" : "border-line-strong hover:border-blue/60",
-        )}
-        onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-        onDragEnter={(e) => { e.preventDefault(); setDrag(true); }}
-        onDragLeave={(e) => { e.preventDefault(); setDrag(false); }}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
-      >
-        <div className="flex flex-col items-center text-center gap-3 py-8">
-          <PhotoUploadIllustration />
-          <h2 className="text-xl font-bold text-ink">Drag photos here</h2>
-          <p className="text-sm text-ink-secondary">
-            or bring them in another way — the AI writes the listing from your shots.
-          </p>
-          <div className="flex flex-wrap justify-center gap-2.5 mt-1">
-            <Button
-              variant="primary" size="lg"
-              onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
-            >
-              <FolderOpen aria-hidden /> Browse Files
-            </Button>
-            <Button
-              variant="secondary" size="lg"
-              onClick={(e) => { e.stopPropagation(); cameraRef.current?.click(); }}
-            >
-              <Camera aria-hidden /> Take Photos
-            </Button>
-          </div>
-        </div>
-        <input
-          ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple hidden
-          onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
-        />
-        <input
-          ref={cameraRef} type="file" accept={PHOTO_ACCEPT} capture="environment" hidden
-          onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
-        />
-      </Card>
+      {/* Mounted in both states. Browse Files and the camera reach these
+          through their refs, and a photo handed straight to the input — which
+          is what a phone's library picker does — must land in the pile
+          whether or not the panel happens to be open. */}
+      <input
+        ref={inputRef} type="file" accept={PHOTO_ACCEPT} multiple hidden
+        onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+      />
+      <input
+        ref={cameraRef} type="file" accept={PHOTO_ACCEPT} capture="environment" hidden
+        onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
+      />
+
+      {collapsed ? (
+        /* Folded: one line at the top of Sell instead of half the screen —
+           and still a drop target, because that is the gesture the big box
+           spent its whole life teaching. Photos dropped here open it. */
+        <Card
+          className={cn(
+            "p-0 overflow-hidden transition-colors duration-200",
+            drag ? "border-blue bg-blue-soft" : "hover:border-line-strong",
+          )}
+          {...dropHandlers}
+        >
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-expanded={false}
+            className="w-full flex items-center gap-3 p-4 sm:px-5 text-left cursor-pointer group"
+          >
+            <span className="grid place-items-center size-10 rounded-[13px] bg-blue-soft text-blue shrink-0">
+              <ImagePlus size={19} strokeWidth={2} aria-hidden />
+            </span>
+            <span className="flex-1 min-w-0">
+              <span className="block font-bold text-[16px] text-ink">Add photos</span>
+              {/* Wraps rather than truncates: on a phone this is the line
+                  that says the bar is still a drop target, and half of it
+                  followed by an ellipsis says nothing. */}
+              <span className="block text-[13px] text-ink-secondary">
+                Drop them here, or open it to browse and shoot.
+              </span>
+            </span>
+            <ChevronDown
+              size={19} aria-hidden
+              className="shrink-0 text-ink-faint group-hover:text-ink transition-colors duration-150"
+            />
+          </button>
+        </Card>
+      ) : (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+          className="overflow-hidden"
+        >
+          <Card
+            className={cn(
+              "relative border-2 border-dashed transition-colors duration-200 cursor-pointer",
+              drag ? "border-blue bg-blue-soft" : "border-line-strong hover:border-blue/60",
+            )}
+            onClick={() => inputRef.current?.click()}
+            {...dropHandlers}
+          >
+            {/* The way back to one line. Offered only while the pile is empty,
+                for the reason `collapsed` gives — with photos staged this would
+                be a button that visibly does nothing. stopPropagation because the
+                card it sits in is itself one big "open the picker" target. */}
+            {files.length === 0 && (
+              <Button
+                variant="ghost" size="sm"
+                aria-expanded={true}
+                className="absolute top-3 right-3 text-ink-faint"
+                onClick={(e) => { e.stopPropagation(); setOpen(false); }}
+              >
+                <ChevronUp aria-hidden /> Hide
+              </Button>
+            )}
+            <div className="flex flex-col items-center text-center gap-3 py-8">
+              <PhotoUploadIllustration />
+              <h2 className="text-xl font-bold text-ink">Drag photos here</h2>
+              <p className="text-sm text-ink-secondary">
+                or bring them in another way — the AI writes the listing from your shots.
+              </p>
+              <div className="flex flex-wrap justify-center gap-2.5 mt-1">
+                <Button
+                  variant="primary" size="lg"
+                  onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
+                >
+                  <FolderOpen aria-hidden /> Browse Files
+                </Button>
+                <Button
+                  variant="secondary" size="lg"
+                  onClick={(e) => { e.stopPropagation(); cameraRef.current?.click(); }}
+                >
+                  <Camera aria-hidden /> Take Photos
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </motion.div>
+      )}
 
       <AnimatePresence>
         {files.length > 0 && (

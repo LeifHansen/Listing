@@ -220,7 +220,8 @@ export function AppProvider({ children }) {
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
-    anthropic_configured: false, ebay_configured: false, taxonomy_configured: false,
+    anthropic_configured: false, google_ai_configured: false,
+    ebay_configured: false, taxonomy_configured: false,
   });
   const loadHealth = useCallback(async () => {
     try {
@@ -1265,6 +1266,18 @@ export function AppProvider({ children }) {
         misses = 0;
         fails = 0;
         if (stopped) return;
+        // A batch that has stopped to ask the seller what its items are is
+        // not "processing", and saying so is the whole reason this is read
+        // from every screen. A batch that is working finishes on its own; one
+        // that is waiting waits forever, so a seller who walked away has to
+        // be told it is their turn. The SAME object is handed back when
+        // nothing changed — see bulkSettled for what a fresh identity here
+        // costs every reader of this context.
+        setActiveBulk((b) => {
+          if (!b || b.jobId !== jobId) return b;
+          const awaiting = j.phase === "awaiting_notes";
+          return !!b.awaiting === awaiting ? b : { ...b, awaiting };
+        });
         if (j.done) {
           // One full read at the end, for the drafted session ids: the brief
           // deliberately leaves them out on every other tick.

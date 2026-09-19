@@ -20,6 +20,23 @@ import { useToast } from "@/components/ui/Toaster";
 
 // Shop Mode — scan items while thrifting: instant ID + typical resale price,
 // then one tap drops it into inventory to finish later.
+//
+// A scan is NOT a draft. /api/identify writes the row as db.SCANNED, which
+// every seller-facing read leaves out, and "Buy" promotes it to "unlisted" —
+// the Finds tab. That is the whole difference between a thrift run and the
+// Sell pipeline: ten scans and two buys leaves two records, not twelve.
+//
+// It is also the one flow that does NOT ask the seller what the item is
+// before the AI guesses. The single-upload and bulk flows both stop and ask
+// (views/listing/AiNotesStep), on the reasoning that the answer is free
+// before the guess and expensive after it. It is not free here: the seller is
+// standing in a shop holding the item, and the question this screen exists to
+// answer is "is this worth buying at all". A box between the shutter and that
+// answer costs more than a wrong guess does, and a wrong guess is already
+// recoverable — the scan is re-runnable, and everything the draft needs is
+// still asked in the editor once the item has actually been bought. The
+// backend takes notes from storage either way (storage.load_notes), so
+// wiring a box in later is a UI change and nothing else.
 export function ShopMode() {
   const { user, openAuth, health, openListings, loadListings } = useApp();
   const { toast } = useToast();
@@ -84,7 +101,11 @@ export function ShopMode() {
     setShelf(null);
     setBusy(["Reading the video…", "Scanning the shelf for gems…", "Judging resale potential…"]);
     try {
-      const frames = await extractFrames(file);
+      // Eight, not the default six: /api/shelf-scan reads files[:8] and the
+      // scan is charged per run (2 tokens), not per frame -- so two more
+      // frames of a pan are free evidence, and a shelf is exactly the subject
+      // where the item worth flagging is the one that was only in frame once.
+      const frames = await extractFrames(file, 8);
       if (!frames.length) {
         toast("Couldn't get any frames from that video.", { kind: "warning" });
         return;
@@ -114,13 +135,27 @@ export function ShopMode() {
       await postJson("/api/inventory/add", {
         session_id: result.session, listing: result.listing,
       });
+      // AWAITED, because the tab being jumped to may not exist yet: the Finds
+      // tab is hidden while its count is zero (ListingsView's TABS filter),
+      // and until this reload lands that count is whatever it was before the
+      // Buy -- zero, for the first find. Firing the reload and jumping in the
+      // same tick sent the seller to a tab that was not in the tab bar.
+      // Quiet: the grid is not on screen yet, so there is nothing to spinner.
+      await loadListings({ quiet: true });
+      // Cleared only now, so the find stays on screen for the whole wait
+      // rather than the seller watching "Nothing scanned yet" appear in the
+      // gap -- on a shop's connection that gap is the reload, not a tick.
       setResult(null);
-      loadListings({ quiet: true });
       toast("Added! It's under Finds on the Sell tab — open it there to finish and publish.",
         { kind: "success" });
       openListings("finds");
     } catch (e) {
-      toast(`Couldn't add to inventory: ${e.message}`, { kind: "error" });
+      // The server's own sentence, unprefixed. lib/api turns every failure
+      // into a complete one -- a timeout, a dropped connection, or the 503
+      // this route raises when the write did not land ("Couldn't save that to
+      // your inventory just now. Try again in a moment.") -- and a
+      // "Couldn't add to inventory:" in front of that one said it twice.
+      toast(e.message, { kind: "error" });
     }
   });
 
