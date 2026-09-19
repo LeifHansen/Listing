@@ -16,6 +16,12 @@ import pytest
 from backend.marketplaces.base import PublishOutcome
 from backend.services import jobstore
 
+# backend.main pulls in the AI and photo stacks, which the minimal CI install
+# does not have. Skipped there rather than erroring, like every other test
+# that drives the app.
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 
 def _rec(rid):
     return {"id": rid, "user_id": "u1", "status": "published", "listing": {

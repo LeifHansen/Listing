@@ -21,6 +21,12 @@ from fastapi.testclient import TestClient
 from backend.marketplaces.base import PublishOutcome
 from backend.services import jobstore
 
+# backend.main pulls in the AI and photo stacks, which the minimal CI install
+# does not have. Skipped there rather than erroring, like every other test
+# that drives the app.
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 
 class _Etsy:
     key, label = "etsy", "Etsy"
@@ -129,10 +135,17 @@ def test_stop_is_honoured_between_listings(api, monkeypatch):
 
     monkeypatch.setattr(main, "_crosspost_one", _slow)
     job_id = _start(client, ["a", "b", "c"]).json()["job_id"]
+    # Waited on the WORKER, not on `done`. request_cancel marks the job done
+    # the moment it is asked — that is its whole point, so a seller watching a
+    # wedged run is freed immediately — which means `done` says nothing about
+    # where the worker got to. The thread releases its per-user reservation as
+    # it exits, and that is the signal that the item in flight is finished and
+    # nothing more will start.
     for _ in range(600):
-        if jobstore.snapshot(job_id, "u1").get("done"):
+        if "u1" not in main._CROSSPOST_JOBS:
             break
         time.sleep(0.01)
+    assert "u1" not in main._CROSSPOST_JOBS, "the worker never stood down"
     # The one in flight was finished; nothing after it was begun.
     assert started == ["a"]
     assert published == ["a"]

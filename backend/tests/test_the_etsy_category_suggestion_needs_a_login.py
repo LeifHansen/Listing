@@ -10,6 +10,12 @@ from fastapi.testclient import TestClient
 from backend import config, ratelimit
 from backend.services import etsy as etsy_service
 
+# backend.main pulls in the AI and photo stacks, which the minimal CI install
+# does not have. Skipped there rather than erroring, like every other test
+# that drives the app.
+pytest.importorskip("anthropic")
+pytest.importorskip("PIL")
+
 
 @pytest.fixture
 def api(monkeypatch, every_marketplace):
