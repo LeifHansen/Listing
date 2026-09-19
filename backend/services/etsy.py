@@ -370,33 +370,92 @@ def taxonomy_paths() -> list[dict]:
     return _flatten_taxonomy(taxonomy_nodes())
 
 
-def suggest_taxonomy(listing: Listing) -> dict:
-    """Pick the best Etsy category for this listing: cheap keyword filter down
-    to a shortlist, then one small Claude call to choose (the same shape as
-    the eBay taxonomy suggestion flow). Returns {taxonomy_id, path}."""
+_INDEX_CACHE: dict = {"at": 0.0, "paths": None}
+
+
+def taxonomy_index() -> list[dict]:
+    """Every leaf path with its words already split out.
+
+    A crosspost scores the whole tree once per listing, and splitting three
+    thousand paths per item is the difference between a batch of two hundred
+    costing a second and costing a minute. Cached beside the tree it is
+    built from, and rebuilt when that is refetched.
+    """
+    if (_INDEX_CACHE["paths"] is not None
+            and _INDEX_CACHE["at"] == _TAXONOMY_CACHE["at"]):
+        return _INDEX_CACHE["paths"]
+    paths = [{**p, "words": set(p["path"].lower().replace(">", " ").split())}
+             for p in taxonomy_paths()]
+    _INDEX_CACHE.update(at=_TAXONOMY_CACHE["at"], paths=paths)
+    return paths
+
+
+def _words_of(*parts: str) -> set:
+    text = " ".join(filter(None, parts)).lower()
+    return {w for w in text.replace("/", " ").replace("-", " ").replace(">", " ").split()
+            if len(w) > 2}
+
+
+_EBAY_PATH_CACHE: dict[str, Optional[dict]] = {}
+
+
+def taxonomy_from_ebay_path(category_suggestion: str) -> Optional[dict]:
+    """The Etsy category an eBay category PATH already names, or None.
+
+    eBay files an item under "Clothing, Shoes & Accessories > Men >
+    Men's Clothing > T-Shirts" and Etsy under "Clothing > Men's Clothing >
+    Shirts & Tees > T-shirts"; the leaf is the same word. Matching on it
+    saves a model call per listing on the items a crosspost is mostly made
+    of, and the ones it cannot match fall through to the shortlist and the
+    AI as before.
+
+    Deliberately strict: every word of eBay's LAST segment has to appear in
+    the Etsy path, so "T-Shirts" matches "T-shirts" and a vague eBay leaf
+    matches nothing rather than something. Ties are broken by the rest of
+    eBay's path, then by the shortest Etsy path — the least specific shelf
+    that still fits, which is the one a seller would not have to correct
+    downwards.
+    """
+    trail = [seg.strip() for seg in (category_suggestion or "").split(">") if seg.strip()]
+    if not trail:
+        return None
+    key = " > ".join(trail).lower()
+    if key in _EBAY_PATH_CACHE:
+        return _EBAY_PATH_CACHE[key]
+    leaf = _words_of(trail[-1])
+    context = _words_of(*trail[:-1])
+    best = None
+    if leaf:
+        for candidate in taxonomy_index():
+            if not leaf <= candidate["words"]:
+                continue
+            rank = (-len(context & candidate["words"]), len(candidate["path"]))
+            if best is None or rank < best[0]:
+                best = (rank, {"id": candidate["id"], "path": candidate["path"]})
+    if len(_EBAY_PATH_CACHE) > 512:
+        _EBAY_PATH_CACHE.clear()
+    _EBAY_PATH_CACHE[key] = best[1] if best else None
+    return _EBAY_PATH_CACHE[key]
+
+
+def shortlist_taxonomy(listing: Listing, limit: int = 30) -> list[dict]:
+    """The `limit` Etsy categories whose paths share the most words with this
+    listing — what the model is asked to choose between."""
+    words = _words_of(listing.title, listing.brand, listing.category_suggestion,
+                      " ".join(s.value for s in listing.item_specifics))
+    scored = sorted(taxonomy_index(),
+                    key=lambda p: len(words & p["words"]), reverse=True)
+    return [{"id": p["id"], "path": p["path"]} for p in scored[:limit]]
+
+
+def pick_taxonomy(listing: Listing, shortlist: list[dict]) -> dict:
+    """One small Claude call: which of these categories is the item's."""
     # Imported here, not at module scope: this is the only function that needs
     # the Anthropic SDK, and hoisting it made the whole Etsy transport layer
     # unimportable wherever that dependency isn't installed (CI's minimal
     # install, which exists to unit-test exactly these pure request bodies).
     from . import claude_ai
 
-    paths = taxonomy_paths()
-    text = " ".join(filter(None, [
-        listing.title, listing.brand, listing.category_suggestion,
-        " ".join(s.value for s in listing.item_specifics)])).lower()
-    words = {w for w in text.replace("/", " ").replace("-", " ").split()
-             if len(w) > 2}
-
-    def score(p: dict) -> int:
-        path_words = set(p["path"].lower().replace(">", " ").split())
-        return len(words & path_words)
-
-    shortlist = sorted(paths, key=score, reverse=True)[:30]
-    if not shortlist:
-        return {"taxonomy_id": 0, "path": ""}
-    if not config.anthropic_ready():
-        best = shortlist[0]
-        return {"taxonomy_id": best["id"], "path": best["path"]}
     client = claude_ai._client()
     options = "\n".join(f"{p['id']}: {p['path']}" for p in shortlist)
     resp = client.messages.create(
@@ -416,3 +475,27 @@ def suggest_taxonomy(listing: Listing) -> dict:
         picked = 0
     match = next((p for p in shortlist if p["id"] == picked), shortlist[0])
     return {"taxonomy_id": match["id"], "path": match["path"]}
+
+
+def suggest_taxonomy(listing: Listing) -> dict:
+    """The best Etsy category for this listing, and where the answer came
+    from: {taxonomy_id, path, source}.
+
+    Three steps, cheapest first. eBay's own category path often names the
+    same shelf Etsy does, and that costs nothing; failing that, a keyword
+    shortlist of thirty and one small model call; failing the model (no key,
+    unparseable answer), the keyword winner. `source` is "ebay_path" | "ai" |
+    "keyword", which is what lets a crosspost tell a seller how many
+    categories it had to guess at.
+    """
+    from_ebay = taxonomy_from_ebay_path(listing.category_suggestion)
+    if from_ebay:
+        return {"taxonomy_id": from_ebay["id"], "path": from_ebay["path"],
+                "source": "ebay_path"}
+    shortlist = shortlist_taxonomy(listing)
+    if not shortlist:
+        return {"taxonomy_id": 0, "path": "", "source": ""}
+    if not config.anthropic_ready():
+        best = shortlist[0]
+        return {"taxonomy_id": best["id"], "path": best["path"], "source": "keyword"}
+    return {**pick_taxonomy(listing, shortlist), "source": "ai"}

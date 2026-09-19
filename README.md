@@ -869,6 +869,8 @@ is *no verdict*, not "medium".
 | `POST` | `/api/{marketplace}/end-listing` | End one marketplace's live listing |
 | `GET/POST` | `/api/etsy/settings-options` | Etsy shipping-profile / return-policy / processing-profile defaults (ids only; anything else is a 400) |
 | `POST` | `/api/etsy/suggest-taxonomy/{session_id}` | Best Etsy category for a listing (login required, per-user ceiling) |
+| `POST` | `/api/crosspost/etsy/review` | What the crosspost would send for each ticked listing, before anything is sent |
+| `POST` | `/api/crosspost/etsy/start` | Run it as a job — watched through `/api/bulk/status/{id}`, stopped through `/api/bulk/cancel/{id}` |
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
@@ -1391,6 +1393,61 @@ video reached eBay and uploads it if it did not — for a video added before
 eBay was connected, or an upload that failed — and **never fails the publish
 over it**: a listing with no video sells, a listing that will not publish is
 the seller's afternoon.
+
+## Crossposting an eBay store to Etsy
+
+**Crosspost to Etsy** on the Listings page: tick live listings, answer Etsy's
+questions once for the batch, review what each one will become, and send. It
+exists because the two marketplaces ask different questions about the same
+object, and answering them one listing at a time is the reason sellers
+cross-post ten items instead of two hundred.
+
+- **Which listings.** The manager gains a second cut beside its lifecycle
+  tabs — *All · On eBay · On Etsy · eBay only, not on Etsy* — and the last of
+  those is the crosspost's shopping list. Ticking live cards arms the bar.
+  Already on Etsy, an auction, variations, or not live: left out with the
+  reason, in the browser and again on the server.
+- **What is filled in.** Everything `backend/marketplaces/field_map.py` calls
+  *derived*: the title tidied to Etsy's character rules, the description in
+  plain text with the condition written into it, tags from the brand and item
+  specifics, materials from the Material specific, and the **category matched
+  from eBay's own category path** before any model is asked (`source:
+  "ebay_path"`), which is what keeps a two-hundred-item run from costing two
+  hundred AI calls. The **age** is read off a Decade / Era / Year specific or
+  a year in the title.
+- **What is asked once.** Who made it, when, and whether it is a craft
+  supply — Etsy allows only handmade, vintage (20+ years) and supplies, so
+  this is an attestation, not a field, and the wizard gates on it. Anything a
+  listing already says for itself wins over the batch answer. An item someone
+  else made *recently* is flagged: Etsy calls that a production-partner
+  listing, and for a reseller it is a refusal.
+- **Drafts by default.** Etsy charges a listing fee per listing that goes
+  live, so the run creates Etsy drafts unless the seller switches to live —
+  and the switch says what it will cost, in the footer beside the button.
+- **The run** is a job like every other long run here: sequential and paced
+  (`CROSSPOST_PACE_SECONDS`, because Etsy's rate limit is the whole app's), a
+  progress bar, a Stop honoured *between* listings, one 429 backoff, and a
+  per-listing outcome. It publishes through `main._publish_targets` — the same
+  function `/api/publish` uses — so the duplicate guard and the state fold
+  cannot drift. A restart mid-run picks the rest back up and reports the one
+  that was in flight as **unknown**, because Etsy may have created it: the
+  seller is sent to their Etsy drafts rather than having it sent twice.
+
+**One item, one unit of stock.** A crossposted listing is the same object in
+the same box, so when it sells or ends on eBay the Etsy copy is deactivated
+in the background (`services/inventory_mirror.py`) — deactivated, not
+deleted, so it can be put back if the sale falls through. A takedown that
+fails is written onto the listing's Etsy state and raised as a notification,
+because the seller has to know the thing they just sold is still for sale.
+The other direction does not exist yet: nothing reads the Etsy shop, so a
+sale *on* Etsy has to be ended here by hand, and the card and the wizard both
+say so.
+
+**Still ahead** (the honest list): an Etsy store import, which is also what a
+three-way merge needs, so an Etsy revise still sends the whole payload and
+replaces an edit made on etsy.com; per-marketplace dirty tracking; and
+per-marketplace overrides, so a listing could carry an Etsy title and price
+of its own rather than sharing eBay's.
 
 ## Bi-directional eBay sync
 

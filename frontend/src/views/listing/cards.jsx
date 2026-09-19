@@ -1897,13 +1897,13 @@ export function PromoteCard({ w }) {
 // Rendered only while that marketplace is among the publish targets (the
 // chips in the publish bar), so eBay-only sellers never see them.
 
-const WHO_MADE_OPTIONS = [
+export const WHO_MADE_OPTIONS = [
   ["i_did", "I made it"],
   ["someone_else", "Someone else made it (vintage / resale)"],
   ["collective", "A member of my shop made it"],
 ];
 
-const WHEN_MADE_OPTIONS = [
+export const WHEN_MADE_OPTIONS = [
   ["made_to_order", "Made to order"],
   ["2020_2026", "2020–2026"],
   ["2010_2019", "2010–2019"],
