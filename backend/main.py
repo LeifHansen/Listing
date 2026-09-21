@@ -4149,6 +4149,129 @@ def save_prefs(request: Request, payload: dict) -> dict:
     return {"ok": True, "prefs": merged}
 
 
+# ---- saved listing views -----------------------------------------------
+#
+# A saved view is a NAME for a question: which tab of the listings pipeline,
+# plus the filters applied on top of it ("Nike under $20", "auctions with no
+# photos"). The seller builds one on the Sell screen and it is theirs from
+# then on, on every device they sign in from.
+#
+# What a view must never be is a snapshot of the listings it matched, and the
+# storage is where that is decided: this endpoint persists the QUESTION and
+# nothing else, so a view called "Needs photos" empties itself as the photos
+# get taken instead of going stale the first time it is used.
+_MAX_LISTING_VIEWS = 20
+_VIEW_NAME_MAX = 40
+# Per view, once serialised. A guard on the users row, not a product limit —
+# the real filter set is a few hundred bytes, and the frontend's own cap
+# (lib/listingFilters.TEXT_MAX) keeps every text field to 60 characters.
+_VIEW_JSON_MAX = 4096
+# How many keys one filter set may carry, and how long a stored string may be.
+_VIEW_FILTER_KEYS = 32
+_VIEW_VALUE_MAX = 80
+_VIEW_LIST_MAX = 40
+
+
+def _clean_view_filters(raw: object) -> dict:
+    """One view's filters, bounded but NOT vocabulary-checked.
+
+    Deliberately structural rather than a whitelist of filter names. The
+    filter set is the frontend's vocabulary (lib/listingFilters) and it is
+    where every value is validated on the way in and again on the way out —
+    `normalizeFilters` drops anything it does not recognise, so a stale or
+    hand-crafted key reaches no predicate. Mirroring that list here would put
+    the same vocabulary in two languages, where the only way it can end is
+    out of step: add a filter, forget the Python copy, and the server
+    silently drops the seller's new filter from every view they save.
+
+    So what this enforces is the thing the server actually owns — that the
+    blob stays small, flat and JSON — and the meaning stays in one place.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for key, value in list(raw.items())[:_VIEW_FILTER_KEYS]:
+        name = str(key)[:40]
+        if isinstance(value, bool) or value is None:
+            out[name] = value
+        elif isinstance(value, (int, float)):
+            out[name] = value
+        elif isinstance(value, str):
+            out[name] = value[:_VIEW_VALUE_MAX]
+        elif isinstance(value, list):
+            out[name] = [str(v)[:_VIEW_VALUE_MAX]
+                         for v in value[:_VIEW_LIST_MAX]
+                         if isinstance(v, (str, int, float))]
+        # Anything else (a nested object, a set of objects) is dropped: a
+        # filter set is flat, and a place to store arbitrary nesting on the
+        # users row is a place for a payload to live.
+    return out
+
+
+def _clean_listing_views(raw: object) -> list:
+    """The whole strip, bounded. Unnamed views are dropped — a pill nobody
+    can read is one nobody can delete either."""
+    views: list = []
+    seen: set = set()
+    for item in (raw if isinstance(raw, list) else [])[:_MAX_LISTING_VIEWS * 2]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:_VIEW_NAME_MAX]
+        if not name:
+            continue
+        vid = str(item.get("id") or "")[:64] or secrets.token_hex(8)
+        if vid in seen:          # two views with one id is a delete that
+            continue             # removes the wrong one
+        view = {
+            "id": vid,
+            "name": name,
+            "tab": str(item.get("tab") or "active")[:24],
+            "filters": _clean_view_filters(item.get("filters")),
+            "created_at": str(item.get("created_at") or "")[:40],
+        }
+        if len(json.dumps(view)) > _VIEW_JSON_MAX:
+            continue
+        seen.add(vid)
+        views.append(view)
+        if len(views) >= _MAX_LISTING_VIEWS:
+            break
+    return views
+
+
+@app.get("/api/listing-views")
+def listing_views(request: Request) -> dict:
+    """The seller's saved listing views."""
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    # Strict: this screen REPORTS what is saved, and `[]` from a failed read
+    # is a claim that the seller has saved nothing — the same mistake as
+    # rendering a failed /api/listings as an empty store.
+    return {"views": _clean_listing_views(db.saved_listing_views(uid, strict=True))}
+
+
+@app.put("/api/listing-views")
+def put_listing_views(request: Request, payload: dict) -> dict:
+    """Replace the seller's saved views with the ones sent.
+
+    The whole strip, not one view: saving and deleting are both edits to a
+    short list the client already holds, and a per-view endpoint would need
+    its own merge rules for a race that a single write does not have.
+    """
+    uid = _uid(request)
+    if not uid:
+        raise HTTPException(401, "Log in first.")
+    views = _clean_listing_views((payload or {}).get("views"))
+    if not db.save_listing_views(uid, views):
+        raise HTTPException(
+            503,
+            "No database configured — saved views need DATABASE_URL set."
+            if not db.enabled()
+            else "We couldn’t save your views just now — nothing was changed. "
+                 "Try again in a moment.")
+    return {"ok": True, "views": views}
+
+
 # Moved to marketplaces/ebay_provider.py with the publish pipeline; the local
 # name keeps the sync routes below unchanged.
 _auto_promote_enabled = ebay_provider.auto_promote_enabled
