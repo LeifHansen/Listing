@@ -1062,6 +1062,11 @@ export function AppProvider({ children }) {
           found: job.found || 0, imported: job.imported || 0,
           updated: job.updated || 0, deduped: job.deduped || 0,
           failed: job.failed || 0,
+          // Cards this run took OFF the grid: listings eBay reports as ended,
+          // and ended records past their grace period. The server has always
+          // counted them and this dropped the number on the floor, so the one
+          // sync that removes five of them said "everything's already in sync".
+          removed: job.removed || 0,
           // eBay's per-seller call limits are windowed, so a big store can
           // run into one part-way. Carried through because the counts alone
           // read as a complete sync of a store that was only half read.

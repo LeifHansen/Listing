@@ -646,8 +646,49 @@ def _quantity_sold(selling: Optional[ET.Element]) -> int:
     return _int(selling, "QuantitySold") if selling is not None else 0
 
 
+def _state_of(item: ET.Element) -> tuple[Optional[str], int, int]:
+    """Where eBay says ONE listing is in its life, in this app's own words:
+    (status, sold_quantity, watch_count).
+
+    `status` is 'published' | 'sold' | 'ended' | None, and None means eBay did
+    not say — a listing state this app has no word for, or a response without
+    the SellingStatus the answer lives in. Nothing may be changed on a None:
+    see listing_sync.drop_ended for what an ending costs and why it has to be
+    definitive.
+
+    ONE rule, because two callers ask the same question of the same response
+    and used to answer it differently: `listing_status` below (the status
+    sweep) and `_item_to_listing` (the store import, which carries it on every
+    listing it maps — see ITEM_STATE_KEY).
+    """
+    selling = _find(item, "SellingStatus")
+    state = (_text(selling, "ListingStatus") or "").upper()
+    sold = _quantity_sold(selling)
+    watch = _int(item, "WatchCount")
+    if state == "ACTIVE":
+        return "published", sold, watch
+    if state in ("COMPLETED", "ENDED"):
+        return ("sold" if sold > 0 else "ended"), sold, watch
+    return None, sold, watch
+
+
+# eBay's own answer about whether an imported listing is still running, carried
+# on the dict `_item_to_listing` returns. Deliberately NOT a Listing field —
+# the underscore says so, and the import pops it off before anything is stored.
+#
+# It is here because the response that carries a listing's CONTENT carries its
+# STATE too, and the import used to throw the state away: it filed each record
+# by which of eBay's lists the item id had arrived in. Those lists are a cached
+# view of the store, so a listing that had already finished came back as live —
+# including over a record this app had correctly archived, which is how an
+# ended listing climbed back out of Inactive and into Active.
+ITEM_STATE_KEY = "_ebay_state"
+
+
 def _item_to_listing(item: ET.Element) -> dict:
-    """Map one Trading API <Item> to this app's Listing shape (as a dict)."""
+    """Map one Trading API <Item> to this app's Listing shape (as a dict),
+    plus ITEM_STATE_KEY — eBay's answer about the listing's state, which is
+    not part of that shape and is read (and dropped) by the import."""
     selling = _find(item, "SellingStatus")
     listing_type = _text(item, "ListingType")
     bin_price = _float(item, "BuyItNowPrice")
@@ -760,6 +801,9 @@ def _item_to_listing(item: ET.Element) -> dict:
         # signal an imported listing has — without it every listing looks as
         # new as the sync that pulled it in.
         "ebay_start_time": _text(item, "ListingDetails/StartTime"),
+        # Not a Listing field — see ITEM_STATE_KEY. "" when eBay did not say,
+        # which leaves the caller's own idea of the status standing.
+        ITEM_STATE_KEY: _state_of(item)[0] or "",
     }
 
 
@@ -2020,7 +2064,11 @@ def end_listing(token: str, item_id: str, reason: str = "NotAvailable") -> dict:
 
 def listing_status(token: str, item_id: str) -> tuple[Optional[str], int, int]:
     """(status, sold_quantity, watch_count) for one listing, where status is
-    'published' | 'sold' | 'ended' | None (couldn't tell — change nothing)."""
+    'published' | 'sold' | 'ended' | None (couldn't tell — change nothing).
+
+    The reading of eBay's answer lives in `_state_of`, so the status sweep and
+    the store import cannot come to different conclusions about one response.
+    """
     try:
         root = _call("GetItem", token,
                      f"<ItemID>{_esc(item_id)}</ItemID><DetailLevel>ReturnAll</DetailLevel>")
@@ -2030,12 +2078,4 @@ def listing_status(token: str, item_id: str) -> tuple[Optional[str], int, int]:
     item = _find(root, "Item")
     if item is None:
         return None, 0, 0
-    selling = _find(item, "SellingStatus")
-    state = (_text(selling, "ListingStatus") or "").upper()
-    sold = _int(selling, "QuantitySold") if selling is not None else 0
-    watch = _int(item, "WatchCount")
-    if state == "ACTIVE":
-        return "published", sold, watch
-    if state in ("COMPLETED", "ENDED"):
-        return ("sold" if sold > 0 else "ended"), sold, watch
-    return None, sold, watch
+    return _state_of(item)

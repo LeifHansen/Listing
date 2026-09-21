@@ -49,7 +49,8 @@ from ..models import Listing
 from . import (ebay_account, ebay_trading, ebay_video, inventory_mirror,
                notifications,
                publish_guard, recommender, sync_merge, taxonomy)
-from .ebay_trading import AlreadyListedError, TradingError, UnknownOutcome
+from .ebay_trading import (ITEM_STATE_KEY, AlreadyListedError, TradingError,
+                           UnknownOutcome)
 
 # Listing fields the seller owns in THIS app. On a re-sync we refresh the
 # live/market facts from eBay but keep everything else the record already has,
@@ -686,9 +687,27 @@ def clear_ended(user_id: str, limit: int = 500) -> int:
 
 
 # How many SOLD listings to mirror alongside the active ones, and how far
-# back the finished-item lists are read when reconciling. eBay only retains
-# ~90 days of either, so a modest cap covers the real backlog.
-_INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "100") or "100")
+# back the finished-item lists are read when reconciling.
+#
+# This was 100 — one page — while eBay's own PaginationResult said there were
+# more, and the walk stopped on the cap without a word. Everything downstream
+# is only as complete as this number:
+#
+#   * a sale past it is never mirrored, so it is missing from Inactive;
+#   * an ending past it never makes its record a candidate for the cheap
+#     finished-list reconcile, so the listing sits under Active until the
+#     random per-item sweep happens to draw it — which on a real store can be
+#     many syncs, and a mirror of it is never removed;
+#   * and when the sweep DOES draw such a sale, the transaction is not in the
+#     map either, so the archive records today's date and the asking price
+#     for a sale eBay reported weeks ago at another figure.
+#
+# So the ceiling that matters is eBay's own paging (_MAX_PAGES * _PAGE_SIZE),
+# exactly as it is for ACTIVE_LIMIT above. The walks stop at eBay's
+# TotalNumberOfPages, so what this costs is proportional to the seller's real
+# backlog and not to the cap: a store with forty finished listings still reads
+# one page per list, as it did at 100.
+_INACTIVE_LIMIT = int(os.getenv("EBAY_SYNC_INACTIVE_LIMIT", "2500") or "2500")
 
 # How many ACTIVE listings to mirror. This was 300, which silently truncated
 # any store bigger than that — a 616-listing account simply never saw half its
@@ -726,6 +745,21 @@ def _started_at(data: dict) -> Optional[datetime]:
     # where they are UTC too. duplicates._listed_at and recommender._age_days
     # already do exactly this with the same values.
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _warn_if_capped(items, what: str, user_id: str) -> None:
+    """Say so when a finished-item read came back exactly at the cap.
+
+    Never silently, for the same reason the dedupe read says when it is capped:
+    past this line the reconcile is working from part of eBay's answer, and the
+    listings it could not see are the ones a seller reports as "Inactive isn't
+    what eBay shows me".
+    """
+    if len(items) < _INACTIVE_LIMIT:
+        return
+    log.warning("sync: user=%s has at least %d finished (%s) listing(s) in "
+                "eBay's window — the read is capped, so some may still be "
+                "reported as live here", user_id, _INACTIVE_LIMIT, what)
 
 
 def recent_sales(token: str) -> dict[str, dict]:
@@ -792,9 +826,14 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     """Mirror the seller's eBay store into the app: every ACTIVE listing (up
     to `limit`), plus recently SOLD ones (status 'sold', capped at
     EBAY_SYNC_INACTIVE_LIMIT). Listings that ENDED without selling are not
-    mirrored, and ended records here that have run out of road are removed as
-    the run goes (`removed` — see sweep_ended_records). Returns {"found",
+    mirrored — an item eBay reports as ended is settled instead (see
+    settle_ended), and ended records here that have run out of road are removed
+    as the run goes. Both count towards `removed`. Returns {"found",
     "imported", "updated", "deduped", "removed", "failed"}.
+
+    Which of eBay's lists an item id arrived in decides only where to LOOK; the
+    record's status comes from eBay's own answer for the item, which the detail
+    fetch already carries (ebay_trading.ITEM_STATE_KEY).
 
     `on_progress(phase, done, total)` is called as the run advances — one
     GetItem per listing means a real store takes minutes, and the caller runs
@@ -914,7 +953,42 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # Records already written by an earlier listing in this run. See the
     # first-claim-wins guard in the save loop.
     claimed: set[str] = set()
+    # Records this run REMOVED because eBay said their listing had ended — the
+    # mirrors among the items it was handed. Counted with the sweep's own
+    # removals, since to the seller they are the same event: a card gone
+    # because the listing behind it is over.
+    settled: set[str] = set()
     imported = updated = failed = 0
+    # How many of eBay's listings this run covers, counted BEFORE the archived
+    # sales come off the fetch list below — they are covered, just not paid for
+    # twice.
+    covered = len(jobs)
+    # A sale this app has ALREADY archived needs no detail fetch. The listing is
+    # finished, so its content cannot change again, and the one thing that still
+    # can — what it made, as more units of a multi-quantity listing sell — is in
+    # the sold list this run has already read. Nothing in GetItem's answer for it
+    # would be new.
+    #
+    # This is what keeps reading eBay's WHOLE sold window affordable. The
+    # Trading API's daily allowance is the app's, not one seller's, and without
+    # this a seller with 400 sales in eBay's window would spend 400 calls of it
+    # per sync being told again what the sold list already said. The backfill is
+    # paid for once, on the sync that first archives each sale.
+    # Their figures are brought up to date AFTER the fetch loop below, not
+    # here: the loop's first-claim-wins rule is ordered on purpose (eBay's
+    # active list is walked before its sold one, so the listing that is LIVE
+    # wins the record and the finished one goes to its own mirror), and a claim
+    # staked before it ran would reverse that.
+    archived_sales: list[tuple[str, dict]] = []   # (record id, eBay's sale)
+    fetching: list[tuple[str, str]] = []
+    for item_id, status in jobs:
+        rec = owned.get(item_id) or known.get(record_id(item_id))
+        if (status == "sold" and rec is not None
+                and (rec.get("status") or "") == "sold"):
+            archived_sales.append((rec["id"], sales.get(item_id) or {}))
+        else:
+            fetching.append((item_id, status))
+    jobs = fetching
     # eBay's call limits are per seller and windowed. Once one is hit, every
     # further call is refused AND keeps the window open, so carrying on makes
     # the wait longer rather than shorter. This is the flag that stops the
@@ -985,6 +1059,32 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             failed += 1
             continue
         mirror_id = record_id(item_id)
+        # eBay's answer about THIS ITEM outranks the list its id arrived in.
+        #
+        # The lists are a cached view of the store and the walk of them happens
+        # once, at the start of a run that then spends MINUTES fetching details
+        # — so "it was in the active list" is not the same claim as "eBay says
+        # it is live", and filing the record on the former is what sent a
+        # listing that had already finished back to Active. Worst of all over a
+        # record this app had correctly archived: the seller ended a listing,
+        # watched its card move to Inactive, pressed Sync, and watched it climb
+        # back out. The same mistake in the other direction files a
+        # multi-quantity listing that has sold some units — in eBay's sold list
+        # AND still running — as finished.
+        #
+        # "" means eBay did not say (see ebay_trading.ITEM_STATE_KEY), and then
+        # the list its id came from is the best thing we have. Popped rather
+        # than read, because nothing below this line should ever store it.
+        #
+        # The key is imported by name rather than read off the module, which a
+        # test may have replaced with a stand-in wholesale: this is a constant
+        # of the protocol between the two modules, not a call to make.
+        state = str(fresh.pop(ITEM_STATE_KEY, "") or "")
+        if state and state != status:
+            log.info("sync: eBay's %s list named item %s, but eBay's answer "
+                     "for the item is %s — going with the answer",
+                     status, item_id, state)
+            status = state
         # Item id first: it is eBay's own identity for the listing and the
         # strongest match there is. The publish key only ever answers for a
         # record that has no item id to match on -- which is exactly the
@@ -1023,6 +1123,39 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
                      "another listing this run — importing it separately",
                      item_id, prior["id"])
             prior = None
+        if status == "ended":
+            # eBay says this listing is over and sold nothing. An ending is
+            # never mirrored in (see the module note), so there is nothing here
+            # to import: an item we have never seen is simply not imported, and
+            # a record we already hold is SETTLED rather than written back as
+            # live — a mirror removed with its photos, the seller's own filed
+            # as ended and swept once its grace period is up.
+            #
+            # Which is the same decision refresh_statuses makes on the same
+            # evidence (eBay's own answer for the item), through the same
+            # function, so the import and the sweep cannot disagree about what
+            # an ending costs.
+            if prior is None:
+                continue
+            # Read BEFORE the write: a record filed as ended is a record whose
+            # status changed, and asking afterwards asks the copy the write has
+            # already moved on.
+            was = prior.get("status") or ""
+            try:
+                if settle_ended(prior["id"], prior.get("listing") or {},
+                                prior, user_id, why="ended on eBay"):
+                    settled.add(prior["id"])
+                    known.pop(prior["id"], None)
+                elif was != "ended":
+                    updated += 1
+            except Exception as exc:  # noqa: BLE001 - one row, not the run
+                log.warning("sync: couldn't settle ended listing %s: %s",
+                            prior["id"], exc)
+                failed += 1
+            # Claimed either way: one record, one listing per run, so a second
+            # item this run must not write over the record just settled.
+            claimed.add(prior["id"])
+            continue
         rid = prior["id"] if prior else mirror_id
         data = _merge(prior.get("listing") if prior else None, fresh,
                       own_source=bool(prior) and not _is_mirror(prior))
@@ -1075,13 +1208,39 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             updated += 1
         else:
             imported += 1
+    # The sales this run did not re-fetch: what they MADE can still change as
+    # more units of a multi-quantity listing go, and eBay's sold list — already
+    # read, above — is where that arrives. So it costs no call to apply.
+    for rid, sale in archived_sales:
+        if rid in claimed:
+            # A live listing claimed this record in the loop above, which means
+            # it is not the archive record this pass took it for.
+            continue
+        data = (known.get(rid) or {}).get("listing") or {}
+        # Only what eBay actually reported, and only if it differs — an upsert
+        # of an unchanged record is a no-op, but comparing here keeps `updated`
+        # honest about what really moved. mark_now is NEVER right on this path:
+        # the record is already sold, so today is not when it happened.
+        figures = stamp_sale(data, sale)
+        claimed.add(rid)
+        if figures == data:
+            continue
+        if db.upsert_listing(rid, figures, status="sold", user_id=user_id,
+                             when=_started_at(figures)):
+            updated += 1
+    if settled:
+        # The index has to forget the rows the endings above removed, or the
+        # dedupe below reads a deleted record as the keeper an item lives on
+        # and drops a mirror that is the only row left for it.
+        owned = _index_by_item(known.values())
     deduped = _drop_stale_mirrors(known, owned, user_id)
-    log.info("sync: user=%s found=%d imported=%d updated=%d deduped=%d "
-             "ended_removed=%d failed=%d",
-             user_id, len(jobs), imported, updated, deduped, len(cleared),
+    removed = len(cleared) + len(settled)
+    log.info("sync: user=%s found=%d fetched=%d imported=%d updated=%d "
+             "deduped=%d ended_removed=%d failed=%d",
+             user_id, covered, len(jobs), imported, updated, deduped, removed,
              failed)
-    return {"found": len(jobs), "imported": imported, "updated": updated,
-            "deduped": deduped, "removed": len(cleared), "failed": failed,
+    return {"found": covered, "imported": imported, "updated": updated,
+            "deduped": deduped, "removed": removed, "failed": failed,
             # So a caller can say "we got through 120 of your 400, eBay asked
             # us to wait" instead of reporting a complete sync -- or, worse,
             # 280 failures for listings eBay never looked at.
@@ -1218,12 +1377,15 @@ def reconcile_recent(token: str, user_id: str, records: list[dict],
     A list that can't be fetched contributes nothing rather than failing."""
     def _ids(fetch, what: str) -> set[str]:
         try:
-            return set(fetch(token, limit=_INACTIVE_LIMIT))
+            ids = list(fetch(token, limit=_INACTIVE_LIMIT))
         except Exception as exc:  # noqa: BLE001 - reconcile is best-effort
             log.info("sync: couldn't list %s items: %s", what, exc)
             return set()
+        _warn_if_capped(ids, what, user_id)
+        return set(ids)
 
     sales = recent_sales(token)
+    _warn_if_capped(sales, "sold", user_id)
     finished = set(sales) | _ids(ebay_trading.unsold_listing_ids, "ended")
     candidates = [r for r in records
                   if owns(r.get("listing") or {}, account)
