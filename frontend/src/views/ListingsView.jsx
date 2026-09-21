@@ -26,6 +26,7 @@ import {
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
+import { DraftSpecificsReview } from "@/views/listing/SpecificsQuickReview";
 import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
@@ -249,6 +250,15 @@ export function ListingsView({ search = "" }) {
     })) deleteListing(item.id);
   }, [confirm, deleteListing]);
 
+  // Which card has its AI-guess review open. One at a time: the panel is a
+  // list of values to read, and twenty of them open at once is the grid the
+  // chip exists to keep scannable. useCallback for the memo'd card, for the
+  // reason spelled out above askDelete.
+  const [reviewingId, setReviewingId] = useState(null);
+  const toggleReview = useCallback((it) => {
+    setReviewingId((open) => (open === it.id ? null : it.id));
+  }, []);
+
   // End a live listing straight from its card. What happens to the card
   // afterwards depends on whose work is in it — kept under Inactive for the
   // grace period, or removed there and then for a record the store sync made
@@ -423,6 +433,10 @@ export function ListingsView({ search = "" }) {
               /* Drafts only, like the category and format controls below: a
                  live listing's photos are the copy eBay already took. */
               onRotate={isDraft(item) ? rotateListingPhoto : undefined}
+              /* Drafts only, for the same reason the chip is drafts only:
+                 once a listing is live the seller has stood behind it. */
+              onReview={isDraft(item) ? toggleReview : undefined}
+              reviewing={reviewingId === item.id}
               skipped={skippedDraftIds.has(item.id)}
               stale={(item.status === "published" || item.status === "live")
                 && dayAge(item.created_at) >= STALE_DAYS}
@@ -431,6 +445,13 @@ export function ListingsView({ search = "" }) {
               selectable={selectable && isLive(item)}
               selected={!!liveSelection[item.id]}
               onSelect={() => toggleLive(item.id)} />
+            {/* What the "N to review" chip on the card was counting, opened
+                by it. First of the under-card controls because it is the one
+                the seller asked for by tapping — the three below are always
+                offered. */}
+            {isDraft(item) && reviewingId === item.id && (
+              <DraftSpecificsReview item={item} className={cn("mt-1.5", list && "sm:w-96")} />
+            )}
             {/* Drafts carry their category on the card here too — the "All"
                 tab mixes them in with live listings, and a draft is exactly
                 where the category is still wrong and still free to fix. It

@@ -944,6 +944,54 @@ the answer through the same `priceView` split the editor and Shop Mode use, so
 "we couldn't check" never arrives as "no comparable listings, try a simpler
 title".
 
+### The "N to review" chip is the review
+
+The chip counts the item specifics the AI **inferred** rather than read off the
+item (`confidence: "medium"` — see `views/listing/specifics.reviewAspects`,
+which the chip and the panel share so a chip saying 3 cannot open a list of
+two). Those block nothing: a draft publishes with every one of them
+outstanding. The chip exists only because a *wrong* specific is worse than a
+missing one — and until now the only place to answer it was the full editor's
+Item specifics card. A seller working a grid of twenty fresh drafts made twenty
+round trips to say twenty times that the guess was fine, which is how a warning
+becomes something you publish past.
+
+So the chip is a **button**, on every draft card there is — the drafts strip,
+the dashboard's recent cards and the listings manager, in both layouts — and it
+opens the editor's two gestures under the card it belongs to
+(`views/listing/SpecificsQuickReview`): **✓** to take a guess as it stands, or
+type over it and take the correction in one move. Multi-select aspects (eBay's
+tick boxes) are read there and changed in the editor: a text box holds one
+answer, and offering one for four ticked values would quietly drop three.
+"I've read them all" keeps the editor's terms exactly — offered last, only past
+one outstanding guess, and worded as a claim the seller is making — because a
+button that clears twenty flags without showing twenty values is how a wrong
+value reaches a live listing.
+
+Two things it does *not* do. It never sits where a **blocker** belongs: a card
+that needs info before eBay will take it shows that instead, because "eBay will
+reject this" and "give this a glance" being the same chip is what taught
+sellers to ignore both. And it is **drafts only**, like the chip itself — once
+a listing is live the seller has stood behind it.
+
+The chip is a sibling of the card's button, never nested in it. The whole card
+is one `<button>`, and a button inside a button is invalid HTML: the browser
+closes the outer one early and the chip drops out of the tab order. Every other
+control on the card is laid over it for the same reason (rotate, the bulk tick,
+delete/end/skip), so in the grid the chip keeps the photo corner it already had
+and in a list row it joins the row's controls.
+
+What it sends is the point of the route behind it. A card holds whatever the
+last `/api/listings` load handed it, and a draft has a guaranteed concurrent
+writer — "Enrich all" fills specifics in a worker thread, on exactly the
+listing whose guesses the seller is reading. So the panel posts **aspect
+names**, never `item_specifics`, and `POST /api/listings/{id}/specifics/confirm`
+applies the ✓ to the rows the server is holding now, under the row lock
+(`db.mutate_listing_data`). Same discipline as `PATCH /api/listings/{id}`,
+with a sharper reason: a panel that sent the array back would erase every row
+that landed since it loaded, at the exact moment the seller was telling us the
+listing looked right.
+
 
 ## API endpoints
 
@@ -976,6 +1024,7 @@ title".
 | `GET`  | `/api/listings` | Current user's saved listing history |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/{id}/specifics/confirm` | Accept the AI's guesses at the **named** item specifics — clears the ⚠ review flag on every row of each aspect, and writes a corrected value where one is sent. Names aspects, never the specifics list, so the ✓ lands on the rows the server holds rather than the copy the card loaded |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |

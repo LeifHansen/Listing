@@ -75,11 +75,31 @@ export function toggleSpecificValue(specifics, name, value, on) {
    guesses to check" where a single flag was on screen, and made one click
    drop the count by four. */
 export function reviewAspectCount(specifics) {
-  const names = new Set();
+  return reviewAspects(specifics).length;
+}
+
+/* WHICH aspects those are, with what the AI put in each — the same rule as
+   the count above, spelled out, so the chip that counts them and the panel
+   that lists them cannot disagree about what is outstanding.
+
+   Derived from one function on purpose: the count is read on every card in
+   the grid and the list only when a seller opens the review panel, and a
+   second implementation of "still wants a glance" is how a chip saying 3
+   ends up over a list of two. One entry per ASPECT, in the order its rows
+   appear, carrying every value the aspect holds — a multi-select's four
+   ticked values are one thing to look at, so they arrive as one entry with
+   four values rather than four entries. */
+export function reviewAspects(specifics) {
+  const found = new Map();
   for (const s of specifics || []) {
-    if ((s.value || "").trim() && s.confidence === "medium") names.add(key(s.name));
+    const value = (s.value || "").trim();
+    if (!value || s.confidence !== "medium") continue;
+    const k = key(s.name);
+    const seen = found.get(k);
+    if (seen) seen.values.push(value);
+    else found.set(k, { name: (s.name || "").trim(), values: [value] });
   }
-  return names.size;
+  return [...found.values()];
 }
 
 // Clear the AI review flag on EVERY row for an aspect, not just the first: a
