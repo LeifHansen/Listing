@@ -326,6 +326,22 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   }, [jobId, toast]);
 
+  // Drop one photo from one item, while the batch is still asking about it.
+  // Nothing has been drafted or charged for at this point, so the photo just
+  // isn't in the item the drafting run copies out of the pile.
+  //
+  // It THROWS on failure, which is the contract AiNotesStep's queue reads to
+  // put the thumb back: a photo still in the batch has to be back on screen,
+  // or the seller presses on believing it is out of that item.
+  const deletePhoto = useCallback(async (gi, photo) => {
+    try {
+      await postJson(`/api/bulk/notes/${jobId}/delete-photo`, { gi, photo });
+    } catch (e) {
+      toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  }, [jobId, toast]);
+
   // Take an item the AI could not identify off the batch.
   //
   // Best-effort server-side: a failed identify usually produced no record at
@@ -447,6 +463,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             values={itemNotes}
             onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
             onSubmit={submitNotes}
+            onDeletePhoto={deletePhoto}
           />
           {/* Still the way off a batch the seller has changed their mind
               about. Nothing has been drafted at this point, so stopping here

@@ -47,8 +47,8 @@ from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
-                     MarketplaceState, PublishRequest, RefineRequest,
-                     SessionOnlyRequest)
+                     MarketplaceState, PendingPhotoRequest, PublishRequest,
+                     RefineRequest, SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, easypost, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
@@ -7174,22 +7174,22 @@ def item_conditions(payload: dict, request: Request) -> dict:
         return {"conditions": [], "checked": False}
 
 
-@app.post("/api/delete-image")
-def delete_image(payload: dict, request: Request) -> dict:
-    """Remove one optimized image from a session (local disk + R2)."""
-    session_id = str(payload.get("session_id", "")).strip()
-    name = str(payload.get("name", "")).strip()
-    if not session_id or not name:
-        raise HTTPException(400, "session_id and name are required")
-    _assert_session_owner(session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:  # path-traversal guard
-        raise HTTPException(400, "Invalid image name")
+def _drop_optimized_image(session_id: str, name: str,
+                          uid: Optional[str]) -> Optional[list[str]]:
+    """Take one optimized photo off a session: out of the saved listing, off
+    the disk, and out of the R2 mirror. Returns the listing's image order with
+    it gone, or None for a session that has no saved listing yet.
+
+    Split out of the route below because the guidance step deletes the same
+    way (see delete_pending_photo) and a photo half-removed -- gone from the
+    disk but still in the listing -- is the exact failure the ordering here
+    was written to end. RAISES on a disk error, with the listing already
+    saved: see the route for why that order.
+    """
     # Out of the LISTING first, then off the disk — and if the listing can't
     # be written, nothing is deleted at all.
     #
-    # This route used to unlink the file and stop there, which left the photo
+    # This delete used to unlink the file and stop there, which left the photo
     # in the saved listing forever: a reload brought the deleted tile back
     # pointing at bytes that no longer existed, a publish handed eBay a photo
     # that 404s, and — because the editor's list and the stored list could
@@ -7204,7 +7204,11 @@ def delete_image(payload: dict, request: Request) -> dict:
     if stored is not None:
         images = [n for n in stored if n != name]
         if images != stored:
-            images = _save_image_order(session_id, rec, images, _uid(request))
+            images = _save_image_order(session_id, rec, images, uid)
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents:  # path-traversal guard
+        raise HTTPException(400, "Invalid image name")
     if path.is_file():
         try:
             path.unlink()
@@ -7220,6 +7224,18 @@ def delete_image(payload: dict, request: Request) -> dict:
         _in_background(objstore.delete, objstore.key_for(session_id, name),
                        what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
+    return images
+
+
+@app.post("/api/delete-image")
+def delete_image(payload: dict, request: Request) -> dict:
+    """Remove one optimized image from a session (local disk + R2)."""
+    session_id = str(payload.get("session_id", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    if not session_id or not name:
+        raise HTTPException(400, "session_id and name are required")
+    _assert_session_owner(session_id, request)
+    images = _drop_optimized_image(session_id, name, _uid(request))
     remaining = storage.list_optimized(session_id)
     # `images` is the listing's own order with the photo gone — what the
     # editor should now be holding, and what the next reorder is checked
@@ -8868,6 +8884,171 @@ def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
     log.info("bulk %s: notes in for %d of %d item(s); drafting",
              job_id, len(cleaned), len(plan["groups"]))
     return {"ok": True, "items": len(plan["groups"])}
+
+
+# What the guidance step will not let the seller delete their way past. An
+# item with no photos is not an item -- the drafting run would copy an empty
+# directory into its session and charge for an identify with nothing to look
+# at -- so the last one stays, and the client greys its button out for the
+# same reason rather than discovering this.
+_MIN_ITEM_PHOTOS = 1
+
+
+def _pending_photo_gone() -> HTTPException:
+    """The photo named is not one of that item's. A stale tab, a double tap
+    that crossed, or a delete the seller already made from somewhere else —
+    all of them mean the same thing to the client, which is that its row is
+    out of date and the next poll will say so."""
+    return HTTPException(409, "That photo isn't part of this item any more — "
+                              "reload to see what's left.")
+
+
+@app.post("/api/bulk/notes/{job_id}/delete-photo")
+def delete_pending_photo(job_id: str, req: PendingPhotoRequest,
+                         request: Request) -> dict:
+    """Take one photo off one item, while the job is still asking about it.
+
+    The guidance step is where a seller sees the photos the AI is about to
+    read, as the AI has them: optimized, grouped, and not yet drafted from.
+    It is therefore the one moment a bad shot — the blurred one, the one of
+    the floor, the receipt that got swept up with the pile — can be dropped
+    for nothing. Afterwards it costs a draft that had to look at it and an
+    edit to undo.
+
+    The job stays PAUSED (jobstore.revise, not claim): this changes what the
+    question is about, it does not answer it. And it is checked against the
+    item's own photos rather than trusted as a path, so the only thing a
+    caller can delete is a photo they were just shown.
+
+    Both flows, like the answer itself, and they differ in what "off this
+    item" means:
+
+      * a batch is a pile split into groups, so the photo leaves the pile —
+        out of `_names` and out of the group that held it, with every later
+        index renumbered so the two stay in step. Nothing has been drafted
+        yet, so the grouping is the only thing those indices are read by.
+      * a single upload has no grouping at all: the item IS the session's
+        optimized directory, which the identify chain re-reads from disk
+        (including months later, on a "Start over"). So the file goes, the
+        same way the editor's own delete takes one off a saved listing.
+    """
+    uid = _uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    if seen.get("done") or seen.get("phase") != _AWAITING_NOTES:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    rev = seen.get("_rev")
+    photo = (req.photo or "").strip()
+
+    if seen.get("kind") == "pipeline":
+        session_id = str(seen.get("_session_id") or "")
+        names = storage.list_optimized(session_id) if session_id else []
+        if not names:
+            raise _photos_gone(
+                job_id, "upload them again",
+                "Those photos are no longer on the server — they were "
+                "cleared while this waited for your notes. Please upload "
+                "them again.")
+        urls = [f"/media/{session_id}/optimized/{n}" for n in names]
+        if req.gi != 0 or photo not in urls:
+            raise _pending_photo_gone()
+        if len(names) <= _MIN_ITEM_PHOTOS:
+            raise HTTPException(
+                400, "Keep at least one photo — the AI has nothing to write "
+                     "from otherwise.")
+        # The FILE first here, and the job's copy of the question after it.
+        # The identify chain reads the directory, not the status, so a job
+        # that has been told the photo is gone while the file is still there
+        # would draft from the photo the seller just deleted. The other order
+        # can only leave a file nothing points at.
+        name = names[urls.index(photo)]
+        _drop_optimized_image(session_id, name, uid)
+        left = storage.list_optimized(session_id)
+        pending = _pending_items(
+            session_id, left, [{"name": "", "indices": list(range(len(left)))}])
+        job = jobstore.revise(job_id, _AWAITING_NOTES, uid, expect_rev=rev,
+                              pending_items=pending, total_photos=len(left))
+        if job is None:
+            # The photo IS deleted — it went first, on purpose — and the job
+            # moved on while this ran. Saying so is the honest answer: the
+            # draft it is making no longer has that photo in it either.
+            raise HTTPException(
+                409, "That photo is gone, but this job had already moved on — "
+                     "reload to see where it got to.")
+        log.info("pipeline %s: seller dropped a photo at the question "
+                 "(%d left)", job_id, len(left))
+        return {"ok": True, "pending_items": pending}
+
+    staging = str(seen.get("_staging_id") or "")
+    names = [n for n in (seen.get("_names") or []) if isinstance(n, str)]
+    groups = [g for g in (seen.get("_groups") or [])
+              if isinstance(g, dict) and isinstance(g.get("indices"), list)]
+    if not staging or not names or not groups:
+        raise _photos_gone(
+            job_id, "run it again",
+            "This batch's photos are no longer on the server — they were "
+            "cleared while it waited for your notes. Please run the batch "
+            "again.")
+    if not 0 <= req.gi < len(groups):
+        raise _pending_photo_gone()
+    mine = [i for i in groups[req.gi]["indices"] if 0 <= i < len(names)]
+    urls = {f"/media/{staging}/optimized/{names[i]}": i for i in mine}
+    idx = urls.get(photo)
+    if idx is None:
+        raise _pending_photo_gone()
+    # Out of the pile and out of the grouping in one move. Renumbering is what
+    # keeps `_names` and `_groups` describing the same pile, and it is only
+    # safe because nothing has been drafted: at this phase the indices are
+    # read by the grouping alone (see _drafting_plan), never by a finished
+    # item pointing back at one.
+    kept = [i for i in range(len(names)) if i != idx]
+    moved = {old: new for new, old in enumerate(kept)}
+    left = [names[i] for i in kept]
+    regrouped = [{**g, "indices": [moved[i] for i in g.get("indices") or []
+                                   if i in moved]}
+                 for g in groups]
+    # Checked over EVERY item, not just the one the seller tapped. The
+    # grouping is the model's, and nothing stops it from putting one photo
+    # under two items — in which case dropping it from the one with three
+    # shots would empty the one it was the only shot of, and that item would
+    # be drafted from an empty directory. Rare, and silent if it happened.
+    if any(len(g["indices"]) < _MIN_ITEM_PHOTOS for g in regrouped):
+        raise HTTPException(
+            400, "Keep at least one photo — an item with none can't be "
+                 "drafted at all.")
+    pending = _pending_items(staging, left, regrouped)
+    job = jobstore.revise(job_id, _AWAITING_NOTES, uid, expect_rev=rev,
+                          _names=left, _groups=regrouped,
+                          pending_items=pending, total_photos=len(left))
+    if job is None:
+        # Nothing has been touched: the pile is still whole and the batch is
+        # drafting from it, or another delete landed first and this one was
+        # written against the list it changed.
+        raise HTTPException(
+            409, "This batch moved on while that was sent — reload to see "
+                 "what it's working from.")
+    # Now that no plan points at it. Best-effort and never fatal: the photo is
+    # already off the item either way, and a pile that keeps one orphaned file
+    # until the batch ends is a tidiness problem, not the seller's. The pile
+    # is never mirrored to R2 (only the per-item sessions the drafting run
+    # copies into are), so the local file is the whole of it.
+    #
+    # optimized_path, not optimized_dir: the latter ensures the session, and a
+    # delete must not re-create the tree an orphan sweep has just taken away.
+    stray = storage.optimized_path(staging) / names[idx]
+    try:
+        if stray.is_file():
+            stray.unlink()
+    except OSError as exc:
+        log.info("bulk %s: couldn't drop %s from the pile: %s",
+                 job_id, names[idx], exc)
+    log.info("bulk %s: seller dropped a photo from item %d (%d left on it, "
+             "%d in the pile)", job_id, req.gi,
+             len(regrouped[req.gi]["indices"]), len(left))
+    return {"ok": True, "pending_items": pending}
 
 
 @app.get("/api/bulk/status/{job_id}/brief")

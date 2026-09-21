@@ -783,6 +783,21 @@ class ItemNotesRequest(BaseModel):
     notes: dict[str, str] = Field(default_factory=dict)
 
 
+class PendingPhotoRequest(BaseModel):
+    """One photo to take off one item at the guidance step — see POST
+    /api/bulk/notes/{job_id}/delete-photo.
+
+    `photo` is the URL the paused job published for it, sent back exactly as
+    it came. A path rather than a file name because that is what the client
+    was handed and the only thing it can be sure of, and it is never used as
+    one: the route matches it against the URLs it builds for that item's own
+    photos, so a string that names no photo of this item names nothing at all.
+    """
+
+    gi: int
+    photo: str
+
+
 class PublishRequest(BaseModel):
     session_id: SessionId
     listing: Listing
