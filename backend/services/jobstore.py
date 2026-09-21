@@ -289,6 +289,51 @@ def claim(job_id: str, expect_phase: str, uid: Optional[str] = None,
     return was
 
 
+def revise(job_id: str, expect_phase: str, uid: Optional[str] = None,
+           expect_rev: Optional[int] = None, **fields) -> Optional[dict]:
+    """Edit a job that is PAUSED in `expect_phase`, and leave it paused.
+
+    `claim` is the other half of this: it takes a job out of its pause and
+    hands it to exactly one caller. This one changes what the pause is ABOUT
+    -- the photos the guidance step is asking over (see main.delete_pending_
+    photo) -- and the job must still be waiting when it returns, for the
+    same answer it was waiting for before.
+
+    Two things are checked under the one lock, and both are the difference
+    between an edit and a lost one:
+
+      * the phase, because a job that has moved on has a worker reading the
+        very fields this would rewrite;
+      * `expect_rev`, when the caller has one. The new value of a field here
+        is DERIVED from the old (a photo list with one gone), which a plain
+        merge cannot express: two deletes that both read revision 5 would each
+        write their own idea of the whole list, and the photo the first one
+        removed would come back. Handing back None instead lets the caller say
+        so rather than quietly undo it.
+
+    Returns the job as it now IS -- a deep copy, bookkeeping keys included,
+    like `internal` -- or None when it was not in that phase, not at that
+    revision, finished, unknown, or not this caller's.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            return None
+        owner = job.get("_uid")
+        if owner and owner != uid:
+            return None
+        if job.get("done") or job.get("phase") != expect_phase:
+            return None
+        if expect_rev is not None and job.get("_rev", 0) != expect_rev:
+            return None
+        job.update(fields)
+        job["_rev"] = job.get("_rev", 0) + 1
+        now = json.loads(json.dumps(job))  # deep copy, safe to hand out
+        record = _record(job)
+    _write_mirror(job_id, record)
+    return now
+
+
 def snapshot_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
     """`snapshot` as a ready-to-serve JSON body, cached until the job changes.
     Same None semantics (unknown job or not yours)."""

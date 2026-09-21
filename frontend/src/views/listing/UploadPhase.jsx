@@ -107,6 +107,15 @@ export function UploadPhase({ defaultOpen = false }) {
   // Sell into List and Manage answers that properly: the lists have their own
   // tab, so on List the box can be the box again, and `defaultOpen` says so.
   //
+  // This is where #333's `openUploaderRef` went. That flag existed to make
+  // ONE arrival open — the dashboard's create-a-listing buttons, whose whole
+  // promise is a box to put photos in — while the nav, the top bar and a deep
+  // link stayed folded. The List tab keeps that promise for every door now,
+  // so the flag had nothing left to decide: the only place this component
+  // renders passes `defaultOpen`, and a one-shot that can never change an
+  // outcome is just a comment insisting on an invariant that has stopped
+  // being true.
+  //
   // The fold itself stays, for the seller who has scrolled or wants the
   // drafts up — it is just no longer the arrival state. What must NOT come
   // back is remembering it: "open, like last time" is the same trap the
@@ -350,6 +359,24 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // Drop one photo from the item the question is about. The job is still
+  // paused, so nothing has been drafted from it and nothing is refunded —
+  // the photo simply isn't there when the AI starts reading.
+  //
+  // It THROWS on failure, which is the contract AiNotesStep's queue reads to
+  // put the thumb back: a photo that is still on the server has to be back on
+  // screen, or the seller presses on believing it is out of their listing.
+  const deletePhoto = async (gi, photo) => {
+    if (!pending) return;
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}/delete-photo`,
+                     { gi, photo });
+    } catch (e) {
+      toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  };
+
   const process = once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
@@ -454,6 +481,7 @@ export function UploadPhase({ defaultOpen = false }) {
           values={itemNotes}
           onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
           onSubmit={submitNotes}
+          onDeletePhoto={deletePhoto}
         />
       </div>
     );

@@ -30,7 +30,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 | Identify | Photos sent to a vision model — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Google Gemini API (`GOOGLE_API_KEY`) or Anthropic API |
 | Price | The draft's price is the one thing the photos cannot answer, so a second pass looks it up. On the Google backend it runs with **Google Search grounding**: the model searches for what comparable items actually sold for and answers with the pages it read, and those URLs — the ones the API vouches for, not the ones the model typed — are what the finding is cited with. Never lowers a price and never demotes an item; it may raise a price to the bottom of the researched range, name a hedged item, and flag the more valuable variant the photos cannot rule out | Google Search grounding, or Claude's web search |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
-| Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it | Anthropic API |
+| Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it. The photos are on screen, so they can be pruned there too: every thumbnail carries a delete (`POST /api/bulk/notes/{job_id}/delete-photo`), and the blurred shot or the one of the floor leaves the item before anything is drafted from it — the last photo of an item stays, since an item with none cannot be drafted at all | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
 | Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
@@ -974,6 +974,8 @@ title".
 | `POST` | `/api/crosspost/etsy/review` | What the crosspost would send for each ticked listing, before anything is sent |
 | `POST` | `/api/crosspost/etsy/start` | Run it as a job — watched through `/api/bulk/status/{id}`, stopped through `/api/bulk/cancel/{id}` |
 | `GET`  | `/api/listings` | Current user's saved listing history |
+| `GET`  | `/api/listing-views` | The seller's **saved listing views** — a name for a tab plus a set of filters. Account data, so the same views are there on the phone they list from |
+| `PUT`  | `/api/listing-views` | Replace the strip. Stores the *question* and never the listings it matched, so a view called "Needs photos" empties as the photos get taken |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
@@ -2180,6 +2182,72 @@ set `EBAY_MESSAGING_ENABLED=1` once eBay has approved the app, and connected
 sellers reconnect once to grant it. Until then the icon simply isn't there.
 Flipping the flag can't disturb existing connections — the refresh grant
 deliberately omits `scope` — so rolling back is an env change, not a deploy.
+
+## Filtering the store, and saving the cut as a view
+
+The listings grid could be narrowed two ways: the lifecycle tabs (Active,
+Finds, Inactive, All) and the search box, which matches a title, a brand or a
+description. Both are about one listing at a time. Neither answers the
+questions a seller with a few hundred items actually has — *which auctions
+have I not priced*, *everything Nike under $20*, *the drafts still missing
+photos* — and a seller who worked one of those out by scrolling had to work it
+out again the next morning.
+
+**Filters**, on the Sell screen beside the tabs, stack on top of whichever tab
+is open: format, condition, price range, brand, category, photos, how recently
+it was listed, and *still needs work*. Every predicate lives in one module
+(`frontend/src/lib/listingFilters.js`) because the grid, the count beside it
+and the empty state below all have to agree about what is showing — three
+components each doing their own filtering is three chances to disagree.
+
+**A filter narrows; it never invents.** Each one is asked of a fact the record
+carries, and a listing the fact is missing from *fails* it rather than passing
+it: an unpriced draft is not "under $20", and a record with no listed date is
+not "listed this week". The price help text says so, because quietly including
+what could not be measured is the same mistake as a tab badge counting an
+outage as a zero. The number a price filter reads is format-aware and
+lifecycle-aware for the same reason: an auction is measured at its starting
+bid (read `price` alone and every auction in the store filters as unpriced),
+and a sold listing at what it *went for*, since an accepted offer settles
+below the ask.
+
+**A cut list says it was cut.** Fewer cards is also what an outage, a
+half-finished sync and a deleted batch look like, so the filters that are on
+are named on chips — each with an × that clears that one dimension — with
+*Showing 12 of 355* beside them. The tab badges deliberately keep counting the
+whole tab: a badge is a claim about the tab, not about the filter, and moving
+it would leave no number anywhere saying how big the store really is. An empty
+filtered tab says it is empty *because of the filters* and offers **Clear
+filters**, rather than showing "No listings yet" and a button to create a first
+listing to a seller who has three hundred.
+
+**Save view** keeps the cut under a name. A saved view is the tab *and* the
+filters — restoring only the filters would land the seller on whichever tab
+they happened to be on, which is a different list under the same name — and
+the pill for the view currently on screen reads as pressed. Saving again under
+an existing name updates that view in place rather than making a second pill
+with the same name.
+
+**A view is a question, not a snapshot.** It stores the filters and never the
+listings that matched them, so "Needs photos" empties itself as the photos get
+taken. A view that stored ids would go stale the first time it was used, which
+is the one thing a saved list must not do.
+
+They ride the **account**, not the browser — the same per-user `prefs` JSON the
+new-listing defaults live in, under a reserved key that `POST /api/prefs`
+cannot reach (its whitelist is scalars only, so saving a package weight in
+Settings can never overwrite a seller's views). Unlike the grid/list toggle,
+which is a per-device viewing preference in `localStorage`, a named list is
+work — and work that only exists on the laptop it was made on is work done
+twice. The server bounds what it stores (twenty views, a 40-character name, a
+flat filter object) but deliberately does *not* police the filter vocabulary:
+that is the frontend's, validated on the way in and again on the way out, and
+a second copy of the same list in Python is a copy that goes out of step the
+first time a filter is added.
+
+The filters themselves are **not** remembered across visits, and that is on
+purpose: a filter silently restored days later is how somebody concludes their
+listings have gone missing. The way to keep one is to name it.
 
 ## Taking the whole store with you (CSV export)
 
