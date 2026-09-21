@@ -340,6 +340,24 @@ export function UploadPhase() {
     }
   };
 
+  // Drop one photo from the item the question is about. The job is still
+  // paused, so nothing has been drafted from it and nothing is refunded —
+  // the photo simply isn't there when the AI starts reading.
+  //
+  // It THROWS on failure, which is the contract AiNotesStep's queue reads to
+  // put the thumb back: a photo that is still on the server has to be back on
+  // screen, or the seller presses on believing it is out of their listing.
+  const deletePhoto = async (gi, photo) => {
+    if (!pending) return;
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}/delete-photo`,
+                     { gi, photo });
+    } catch (e) {
+      toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  };
+
   const process = once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
@@ -444,6 +462,7 @@ export function UploadPhase() {
           values={itemNotes}
           onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
           onSubmit={submitNotes}
+          onDeletePhoto={deletePhoto}
         />
       </div>
     );
