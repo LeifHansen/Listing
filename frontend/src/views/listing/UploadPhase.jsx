@@ -64,7 +64,12 @@ function countHints(notes) {
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
-export function UploadPhase() {
+//
+// @param defaultOpen  start unfolded. The List tab passes it: the drop zone
+//                     is what that tab is FOR, so arriving to a one-line bar
+//                     would be the page hiding its own point. See the fold
+//                     below for why anywhere else still starts shut.
+export function UploadPhase({ defaultOpen = false }) {
   const { setSession, runBulkUpload, bulkRetry, clearBulkRetry,
           invalidateListings } = useApp();
   const { toast } = useToast();
@@ -91,18 +96,23 @@ export function UploadPhase() {
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
-  // Is the drop zone unfolded? Shut on every mount, and deliberately not
-  // remembered.
+  // Is the drop zone unfolded? Seeded from `defaultOpen` on every mount, and
+  // deliberately never remembered.
   //
-  // The uploader is a half-screen panel sitting at the top of Sell, above the
-  // drafts strip and the whole listing manager — so a seller who came to Sell
-  // to look at what they are already selling had to scroll past a box asking
-  // for photos first, every single visit. Folded, it is one line, and the
-  // lists are where the screen starts. "Open, like last time" would be the
-  // same trap the cutout toggle above documents: a decision made on another
-  // visit, re-applied to this one without being asked — and re-opening itself
-  // on arrival is precisely what this fold exists to stop.
-  const [open, setOpen] = useState(false);
+  // The fold was an answer to a screen that no longer exists. This panel used
+  // to sit at the top of "Sell", above the drafts strip AND the whole listing
+  // manager, so a seller who came to look at what they were already selling
+  // scrolled past a box asking for photos first, every single visit — folded,
+  // it was one line and the lists were where the screen started. Splitting
+  // Sell into List and Manage answers that properly: the lists have their own
+  // tab, so on List the box can be the box again, and `defaultOpen` says so.
+  //
+  // The fold itself stays, for the seller who has scrolled or wants the
+  // drafts up — it is just no longer the arrival state. What must NOT come
+  // back is remembering it: "open, like last time" is the same trap the
+  // cutout toggle above documents, a decision made on another visit
+  // re-applied to this one without being asked.
+  const [open, setOpen] = useState(defaultOpen);
   const [busy, setBusy] = useState(false);
   // Select mode: pick several photos out of the pile and drop them in one go.
   // A per-tile trash is one tap for one wrong photo, and forty taps for the

@@ -32,6 +32,8 @@ import App, { screenFor } from "@/App";
 import { Dashboard } from "@/views/Dashboard";
 import { SettingsView } from "@/views/SettingsView";
 import { AdminView } from "@/views/AdminView";
+import { NewListing } from "@/views/NewListing";
+import { ManageView } from "@/views/ManageView";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -103,7 +105,7 @@ describe("the screen under the nav bar", () => {
     // No polling loop here — the bug WAS the wait.
     const { root, host, text } = await mount();
 
-    await act(async () => { navButton(host, "Sell").click(); });
+    await act(async () => { navButton(host, "List").click(); });
     expect((main(host).textContent || "").trim().length).toBeGreaterThan(0);
 
     await act(async () => { navButton(host, "Home").click(); });
@@ -118,7 +120,7 @@ describe("the screen under the nav bar", () => {
     const { root, host, text } = await mount();
 
     await act(async () => {
-      navButton(host, "Sell").click();
+      navButton(host, "List").click();
       navButton(host, "Home").click();
     });
 
@@ -130,7 +132,7 @@ describe("the screen under the nav bar", () => {
   it("keeps its content while moving between other screens too", async () => {
     const { root, host } = await mount();
 
-    for (const label of ["Shop", "Settings", "Home", "Sell"]) {
+    for (const label of ["Shop", "Settings", "Home", "List", "Manage"]) {
       await act(async () => { navButton(host, label).click(); });
       expect((main(host).textContent || "").trim().length).toBeGreaterThan(0);
     }
@@ -163,5 +165,15 @@ describe("the screen a view name maps to", () => {
     // be the one thing that reaches a blank page.
     expect(screenType("ebay")).toBe(SettingsView);
     expect(screenType("settings")).toBe(SettingsView);
+  });
+
+  it("gives List and Manage each their own screen", () => {
+    // The Sell tab was split in two. `new` keeps its name — it has always
+    // meant "start a listing" — and `list` says the same thing out loud, so
+    // whichever one a caller reaches for lands on the uploader rather than
+    // silently falling through to Home.
+    expect(screenType("new")).toBe(NewListing);
+    expect(screenType("list")).toBe(NewListing);
+    expect(screenType("manage")).toBe(ManageView);
   });
 });

@@ -159,6 +159,29 @@ const EBAY_CONNECT_ERRORS = {
   unknown: "eBay connection failed. Please try again.",
 };
 
+/** Which main-nav tab a lifecycle tab belongs to.
+ *
+ * "Sell" used to be one screen, so every deep link landed on it and scrolled.
+ * It is two tabs now: drafts are the List tab's business (they sit under the
+ * uploader that makes them), and everything with a lifecycle behind it —
+ * active, finds, inactive, all — is the Manage tab's.
+ *
+ * Exported because it is the whole routing rule for a dozen call sites
+ * (dashboard tiles, Shop Mode, the publish paths) and none of them says it
+ * out loud; getting it wrong sends a tile somewhere plausible and silent.
+ */
+export const viewForTab = (tab) => (tab === "drafts" ? "new" : "manage");
+
+/** The tabs that render the listing editor when a session is open.
+ *
+ * Both halves of the old Sell screen do, which is what lets a listing open
+ * where the seller already is — tap a live one on Manage and you stay on
+ * Manage, rather than being handed the photo uploader. Anywhere else (Home,
+ * Messages, the notifications bell) there is nothing to render the editor,
+ * so opening one has to go somewhere: List, as it always did.
+ */
+const EDITOR_VIEWS = ["new", "list", "manage"];
+
 export function AppProvider({ children }) {
   const { toast } = useToast();
 
@@ -176,13 +199,14 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
-  // Which tab of the listings pipeline is showing. Deep links (a dashboard
-  // tile, a task row) set it and jump: openListings("drafts"). The pipeline
-  // lives on the merged Sell screen now, so opening it clears any open
-  // editor session (same as the Sell nav's startNew always did) and records
-  // the requested tab so the screen can scroll to the right section.
+  // Which tab of the listings manager is showing. Deep links (a dashboard
+  // tile, a task row) set it and jump: openListings("active"). Opening the
+  // manager clears any open editor session, the same way the nav's own
+  // startNew always did.
   const [listingsTab, setListingsTab] = useState("active");
-  // Grid (the default) or list, for the listing grids on the Sell screen.
+  // Grid (the default) or list, for the listing grids. Drafts (List) and the
+  // manager (Manage) are two screens now but share this one preference: a
+  // seller who likes rows wants rows in both places.
   // It's a per-device viewing preference, not account data, so it rides
   // localStorage next to the theme rather than the server.
   const [listingsLayout, setLayout] = useState(() => {
@@ -212,10 +236,15 @@ export function AppProvider({ children }) {
   const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
+    const t = tab || "active";
     if (tab) setListingsTab(tab);
-    listingsJumpRef.current = tab || "active";
+    // The ref is a signal to the List screen alone (a batch in flight reads
+    // it to step aside for the lists -- see NewListing). Setting it on a jump
+    // that lands on Manage would leave it set with nobody to consume it, and
+    // the NEXT visit to List would hide a running batch queue for no reason.
+    listingsJumpRef.current = t === "drafts" ? t : null;
     setSession(null);
-    setView("new");
+    setView(viewForTab(t));
   }, []);
 
   // ---------- server health ----------
@@ -1124,7 +1153,14 @@ export function AppProvider({ children }) {
       // reach eBay, and the editor is where the question gets asked.
       setSession({ sessionId: rec.id, listing: rec.listing, confidence: null,
                    status: rec.status, conflicts: rec.conflicts || [] });
-      setView("new");
+      // Stay put if this screen can show the editor, and only move if it
+      // cannot. Always forcing "new" is what would drag someone who tapped a
+      // live listing on Manage over to List, and drop them back on a screen
+      // they never asked for when they closed it. Never moving is worse: a
+      // draft opened from Home, the inbox or the notifications bell would
+      // set a session nothing on screen renders, and the tap would look
+      // like it did nothing at all.
+      setView((v) => (EDITOR_VIEWS.includes(v) ? v : "new"));
     } catch (e) {
       toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
     }

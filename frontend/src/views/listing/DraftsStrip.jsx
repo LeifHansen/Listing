@@ -27,9 +27,9 @@ import {
 } from "./publishCelebration";
 import { isDraft, lastRefusal } from "@/lib/listingsView";
 
-/* The drafts experience on the merged Sell screen: every draft one click
-   from Publish or Review & List, plus a tick box on every card for bulk
-   publish / merge / delete.
+/* The drafts experience on the List tab: every draft one click from Publish
+   or Review & List, plus a tick box on every card for bulk publish / merge /
+   delete.
    Renders nothing when there are no (matching) drafts — the upload box
    directly above is the empty-state CTA.
 
@@ -115,8 +115,9 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   } = useApp();
   const { confirm, toast } = useToast();
   const { selected, toggle, otherConnected, effectiveTargets } = usePublishTargets();
-  // Drafts follow the same grid/list preference as the listings manager
-  // below — one Sell screen, one layout.
+  // Drafts follow the same grid/list preference as the listings manager on
+  // Manage. Two tabs, one layout: grid-vs-list is a per-device viewing
+  // habit, and a seller who likes rows wants rows in both places.
   const list = listingsLayout === "list";
 
   // The ticks live in the app store (see store.jsx): opening a draft to edit

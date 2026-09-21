@@ -29,9 +29,10 @@ import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
 import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
-   lifecycle tab. Rendered as the lower section of the merged Sell screen —
-   drafts have their own strip above it (DraftsStrip), so there is no Drafts
-   tab here (the "All" tab holds every status, drafts and archive included). */
+   lifecycle tab. It IS the Manage tab now (ManageView wraps it with the page
+   header) rather than the bottom section of a merged screen. Drafts live on
+   the List tab with the uploader that makes them, so there is no Drafts tab
+   here — the "All" tab holds every status, drafts and archive included. */
 
 export const TABS = [
   {
@@ -324,21 +325,19 @@ export function ListingsView({ search = "" }) {
     ? {} : Object.fromEntries(liveItems.map((i) => [i.id, true])));
   const clearLive = () => setLiveSelection({});
 
-  // "Create Listing" from an empty tab used to look broken: this list now
-  // lives on the Sell screen, so startNew() lands you where you already are
-  // and nothing visibly happens. The uploader is at the top of this same
-  // screen — take them to it.
+  // "Create Listing" from an empty tab. This used to need a scroll: the
+  // uploader was at the top of the SAME screen, so startNew() landed you
+  // where you already were and nothing visibly happened. It is a different
+  // tab now, so the plain navigation is the whole job — and startNew clears
+  // any open editor on the way, which setView alone would not.
   const go = () => {
     // Guard the whole thing, not just the read: the Inactive tab has no
     // `action`, and `?.go !== "new"` is TRUE for undefined, which walked
     // straight into dereferencing it.
     const action = tab.empty.action;
     if (!action) return;
-    if (action.go !== "new") return setView(action.go);
-    startNew();
-    try {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch (e) { window.scrollTo(0, 0); }
+    if (action.go === "new") return startNew();
+    setView(action.go);
   };
 
   const view = listingsView({
@@ -464,39 +463,43 @@ export function ListingsView({ search = "" }) {
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0 flex items-center gap-2">
-          <h2 className="text-lg sm:text-xl font-bold text-ink">Listings</h2>
-          <InfoTip text={tab.sub} />
-        </div>
-        {/* Wraps like its parent does. Without it the toggle plus "Ship
-            orders" plus "Sync with eBay" measured 442px against a 375px
-            viewport, so the Sell screen scrolled sideways on a phone. */}
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {/* Grid or list — a viewing preference, so it sits with the other
-              view-level controls and is remembered across visits. */}
-          <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
-          {/* Offered once there is something to put in the file. Keyed off the
-              whole store rather than the open tab: the export ignores the
-              tabs, so a seller on an empty Inactive tab must not be told
-              there is nothing to export when their store is full. */}
-          {user && listingsState.items.length > 0 && (
-            <Button variant="soft" onClick={exportCsv} loading={exporting}
-              title="Download every listing on your account — all tabs, with prices, dates and a link to every photo — as a CSV spreadsheet.">
-              <Download aria-hidden /> Export CSV
-            </Button>
-          )}
-          {user && ebay.connected && (
-            <Button variant="soft" onClick={() => openShipping()}>
-              <Truck aria-hidden /> Ship orders
-            </Button>
-          )}
-          {user && ebay.connected && (
-            <Button variant="soft" onClick={importFromEbay} loading={storeSync.syncing}>
-              <RefreshCw aria-hidden /> Sync with eBay
-            </Button>
-          )}
-        </div>
+      {/* The controls, and nothing else. There is no heading on this row: the
+          page is titled by the Manage header above (PageHeader) and the open
+          tab is named by its own pill below, so anything here could only
+          repeat one of them — the first draft of this split had it saying
+          "Active" directly above the Active pill. The tab's explanation
+          rides the pills instead.
+
+          Wraps, because the toggle plus "Ship orders" plus "Sync with eBay"
+          measured 442px against a 375px viewport and scrolled the page
+          sideways. It wraps to the LEFT and only pulls right once there is a
+          row to pull against: right-aligned while wrapping is what stacks
+          three buttons down the right edge on a phone, each line starting at
+          a different place. */}
+      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+        {/* Grid or list — a viewing preference, so it sits with the other
+            view-level controls and is remembered across visits. */}
+        <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
+        {/* Offered once there is something to put in the file. Keyed off the
+            whole store rather than the open tab: the export ignores the
+            tabs, so a seller on an empty Inactive tab must not be told
+            there is nothing to export when their store is full. */}
+        {user && listingsState.items.length > 0 && (
+          <Button variant="soft" onClick={exportCsv} loading={exporting}
+            title="Download every listing on your account — all tabs, with prices, dates and a link to every photo — as a CSV spreadsheet.">
+            <Download aria-hidden /> Export CSV
+          </Button>
+        )}
+        {user && ebay.connected && (
+          <Button variant="soft" onClick={() => openShipping()}>
+            <Truck aria-hidden /> Ship orders
+          </Button>
+        )}
+        {user && ebay.connected && (
+          <Button variant="soft" onClick={importFromEbay} loading={storeSync.syncing}>
+            <RefreshCw aria-hidden /> Sync with eBay
+          </Button>
+        )}
       </div>
 
       {/* The pipeline: one tab per lifecycle stage, with live counts. "Finds"
@@ -530,6 +533,10 @@ export function ListingsView({ search = "" }) {
             </span>
           </button>
         ))}
+        {/* What the open tab actually holds. It followed the heading that
+            used to sit above this row; the row is where it belongs anyway,
+            beside the thing it describes. */}
+        <InfoTip text={tab.sub} />
       </div>
 
       {/* Where a listing lives — the second cut, for a seller on more than
