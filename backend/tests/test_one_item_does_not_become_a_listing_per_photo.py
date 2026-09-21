@@ -218,6 +218,41 @@ def test_the_merge_answer_has_room_for_a_big_pile():
     assert client.requests[1]["max_tokens"] > client.requests[0]["max_tokens"]
 
 
+def _merge_budget(n):
+    """What the merge pass asks for, for a pile of `n` groups.
+
+    Two or more: a single group has nothing to merge with, so _verify_groups
+    returns before asking and there is no budget to read."""
+    client = _Client([{"merge": []}])
+    groups = [{"name": f"g{i}", "indices": [i]} for i in range(n)]
+    claude_ai._verify_groups(client, _photos(n), groups)
+    return client.requests[0]["max_tokens"]
+
+
+def test_the_merge_answer_has_room_for_a_middling_pile():
+    """The size of pile the test above steps straight over.
+
+    `max(400, 24 * n)` read like it grew from the first group. It did not:
+    24 * n does not pass 400 until the 17th, so every pile from one group to
+    sixteen got the same flat 400 that the big-pile case above exists to say
+    is not enough -- and the comparison there, 3 against 60, passes just as
+    happily whether or not the bottom of the range is flat.
+
+    Production found the gap at fifteen: one "the merge answer for 15 groups
+    was cut off", and fifteen groups left exactly as first grouped, which is
+    the duplicate-listings outcome this pass is here to prevent.
+    """
+    assert _merge_budget(15) > 400
+    assert _merge_budget(2) > 400
+
+
+def test_a_bigger_pile_is_never_given_less_room():
+    """Monotonic, so no size is quietly worse off than a smaller one -- which
+    is the shape the old floor hid."""
+    budgets = [_merge_budget(n) for n in (2, 5, 15, 16, 17, 30, 60)]
+    assert budgets == sorted(budgets)
+
+
 def test_a_cut_off_merge_answer_is_raised_rather_than_read(monkeypatch):
     """It reaches group_photos' best-effort catch, which now logs it. Silence
     there was a pile of duplicate drafts with nothing to read back."""

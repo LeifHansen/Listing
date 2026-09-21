@@ -1043,7 +1043,20 @@ def _verify_groups(client, images: list[bytes], groups: list[dict],
         # untangle is a longer answer than that, and a cut-off one is
         # unparseable JSON — which failed silently, leaving every accidental
         # split standing.
-        max_tokens=max(400, min(2000, 24 * len(groups))),
+        #
+        # The scaling has a FLOOR that rides with it rather than a flat one
+        # underneath it. `max(400, 24 * n)` looked like it grew from the
+        # first group and did not: 24 * n stays under 400 until the 17th, so
+        # every pile from one group to sixteen got the same flat 400 the line
+        # above calls far too little, and the growth nobody could see began
+        # only past the size most piles ever reach. Production found it at
+        # fifteen — one RuntimeError, "the merge answer for 15 groups was cut
+        # off", and fifteen groups left exactly as first grouped.
+        #
+        # These are output tokens on a pass that runs once per batch, against
+        # duplicate live listings if it comes up short, so the budget is set
+        # generously and the ceiling still caps it.
+        max_tokens=min(2000, 600 + 32 * len(groups)),
         messages=[{"role": "user", "content": content}],
     )
     if resp.stop_reason == "max_tokens":
