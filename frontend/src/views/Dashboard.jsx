@@ -602,6 +602,14 @@ function SoldRangePicker({ value, onChange }) {
 export function Dashboard() {
   const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, rotateListingPhoto, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
+  // Every button on this screen that starts a listing — the hero, the three
+  // quick actions, the "Listed today" tile, the empty states — is a seller
+  // asking for the photo box by name, so Sell opens with the uploader already
+  // unfolded rather than the one-line bar it shows a seller who came for the
+  // lists. Only from here: startNew() through the nav, the top bar or the
+  // listings screen keeps the fold.
+  const openUploader = useCallback(
+    () => startNew({ openUploader: true }), [startNew]);
   const items = listingsState.items;
   const storeView = listingsView({
     ...listingsState, user, count: items.length,
@@ -932,9 +940,9 @@ export function Dashboard() {
   const recent = recentListings(items, metricsById);
 
   const quickActions = [
-    { label: "Take Photos", icon: Camera, onClick: startNew, tone: "bg-blue-soft text-blue" },
-    { label: "Upload Images", icon: Upload, onClick: startNew, tone: "bg-green-soft text-green" },
-    { label: "Create Listing", icon: PlusCircle, onClick: startNew, tone: "bg-yellow-soft text-warning" },
+    { label: "Take Photos", icon: Camera, onClick: openUploader, tone: "bg-blue-soft text-blue" },
+    { label: "Upload Images", icon: Upload, onClick: openUploader, tone: "bg-green-soft text-green" },
+    { label: "Create Listing", icon: PlusCircle, onClick: openUploader, tone: "bg-yellow-soft text-warning" },
     { label: "Shop Mode", icon: Store, onClick: () => setView("shop"), tone: "bg-red-soft text-error" },
   ];
 
@@ -964,7 +972,7 @@ export function Dashboard() {
                     <ArrowRight aria-hidden className="shrink-0" />
                   </Button>
                 ) : (
-                  <Button variant="primary" size="lg" onClick={startNew}>
+                  <Button variant="primary" size="lg" onClick={openUploader}>
                     <PlusCircle aria-hidden /> Create a listing
                   </Button>
                 )}
@@ -1038,7 +1046,7 @@ export function Dashboard() {
           {...storeTotal(storeView.kind, todays.length,
                          todays.length ? "keep the streak going"
                                        : "photos in, listing out — ~30s")}
-          onClick={startNew} />
+          onClick={openUploader} />
       </motion.div>
 
       {/* Traffic — real eBay numbers for the live listings (Sell Analytics
@@ -1236,7 +1244,7 @@ export function Dashboard() {
                 + "have is a finished sale, filed under Sold."}
               action={
                 <div className="flex flex-wrap gap-2 justify-center">
-                  <Button variant="primary" size="lg" onClick={startNew}>
+                  <Button variant="primary" size="lg" onClick={openUploader}>
                     <PlusCircle aria-hidden /> Create Listing
                   </Button>
                   <Button variant="soft" size="lg" onClick={() => openListings("inactive")}>
@@ -1255,7 +1263,7 @@ export function Dashboard() {
                 ? "Let's create your first listing — snap a few photos and the AI writes the rest."
                 : "Log in to keep your listings, or jump straight in and create one."}
               action={
-                <Button variant="primary" size="lg" onClick={startNew}>
+                <Button variant="primary" size="lg" onClick={openUploader}>
                   <PlusCircle aria-hidden /> Create Listing
                 </Button>
               }
