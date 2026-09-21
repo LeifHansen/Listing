@@ -66,7 +66,7 @@ function countHints(notes) {
 // photos it can also run in bulk mode: one pile, many listings.
 export function UploadPhase() {
   const { setSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings } = useApp();
+          invalidateListings, openUploaderRef } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -91,8 +91,8 @@ export function UploadPhase() {
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
-  // Is the drop zone unfolded? Shut on every mount, and deliberately not
-  // remembered.
+  // Is the drop zone unfolded? Shut on every mount but one, and deliberately
+  // not remembered.
   //
   // The uploader is a half-screen panel sitting at the top of Sell, above the
   // drafts strip and the whole listing manager — so a seller who came to Sell
@@ -102,7 +102,30 @@ export function UploadPhase() {
   // same trap the cutout toggle above documents: a decision made on another
   // visit, re-applied to this one without being asked — and re-opening itself
   // on arrival is precisely what this fold exists to stop.
-  const [open, setOpen] = useState(false);
+  //
+  // The exception is the one arrival that asked for this panel and nothing
+  // else: the dashboard's create-a-listing buttons, which set the store's
+  // one-shot `openUploaderRef` on their way here (see startNew). That is a
+  // decision made seconds ago about THIS visit, not a remembered one — the
+  // seller pressed a button whose whole promise is a box to put photos in,
+  // and it opens showing them that box. Every other door into Sell — the nav,
+  // the top bar, a deep link into the lists — leaves the flag false and lands
+  // folded.
+  //
+  // The read below is a mount-time snapshot, which is the one read of a ref
+  // during render that is not the bug react-hooks/refs describes: the flag
+  // cannot change while this component is mounted (the only writers are the
+  // navigation that mounted it, and the effect underneath), so there is no
+  // later value for a render to miss. Deriving the fold from context state
+  // instead would make it a preference that outlives its visit, which is the
+  // thing this must not become. The initializer is pure — it spends nothing,
+  // so StrictMode running it twice reads the same flag twice.
+  // eslint-disable-next-line react-hooks/refs -- deliberate: see the note above
+  const [open, setOpen] = useState(() => openUploaderRef.current === true);
+  // And spent here, once the panel is really on screen, rather than in the
+  // initializer above. What must not happen is the flag outliving the arrival
+  // that set it and unfolding some later visit the seller made for the lists.
+  useEffect(() => { openUploaderRef.current = false; }, [openUploaderRef]);
   const [busy, setBusy] = useState(false);
   // Select mode: pick several photos out of the pile and drop them in one go.
   // A per-tile trash is one tap for one wrong photo, and forty taps for the

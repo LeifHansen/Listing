@@ -220,9 +220,21 @@ export function AppProvider({ children }) {
   // and held here so opening a listing to fix it keeps the other ticks.
   const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
+  // Does the next uploader to mount open unfolded? The Sell screen's uploader
+  // is folded on arrival (see UploadPhase), because a seller coming to Sell is
+  // usually there for the lists. A seller who pressed "Create a listing" on
+  // the dashboard is not: they asked for the uploader by name, and handing
+  // them a one-line bar they have to press again is a step for nothing.
+  //
+  // A ref, not state: nothing renders from it, it is read once by the uploader
+  // as it mounts and cleared there, and every other door into Sell sets it
+  // false on the way through — so it can never turn into "open, like last
+  // time", which is exactly what the fold exists to stop.
+  const openUploaderRef = useRef(false);
   const openListings = useCallback((tab) => {
     if (tab) setListingsTab(tab);
     listingsJumpRef.current = tab || "active";
+    openUploaderRef.current = false;
     setSession(null);
     setView("new");
   }, []);
@@ -1198,7 +1210,14 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
-  const startNew = useCallback(() => {
+  // `opts` is an options object, never a click event: most call sites are
+  // `onClick={startNew}` and hand this a MouseEvent, which has no
+  // `openUploader` of its own — so the flag can only be turned on by a caller
+  // that actually asked for it, spelled out as startNew({ openUploader: true }).
+  // That is the dashboard's create-a-listing buttons and nothing else; the
+  // nav, the top bar and the listings screen land folded as before.
+  const startNew = useCallback((opts) => {
+    openUploaderRef.current = opts?.openUploader === true;
     setSession(null);
     setView("new");
   }, []);
@@ -1532,6 +1551,7 @@ export function AppProvider({ children }) {
     setFilters(EMPTY_FILTERS);
     setSavedViews(NO_SAVED_VIEWS);
     listingsJumpRef.current = null;
+    openUploaderRef.current = false;
 
     // ...and land where signing back in is the obvious next move. There is no
     // separate /login route to send anyone to — the sign-in prompt IS a dialog
@@ -1738,6 +1758,7 @@ export function AppProvider({ children }) {
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
+    openUploaderRef,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     listingFilters, setListingFilters, clearListingFilters,
