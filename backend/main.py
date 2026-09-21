@@ -7016,6 +7016,176 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     return {"ok": True, "listing": data}
 
 
+def _confirm_specific_aspects(listing: Listing, aspects: list) -> int:
+    """Accept the AI's guess at each named aspect, on the rows stored HERE.
+
+    The browser's specifics.js draws the ⚠ review flag per ASPECT and clears
+    it per aspect (reviewAspectCount / confirmSpecificRows); this is the same
+    two rules on the server, applied to whatever rows the listing is holding
+    at the moment the seller pressed ✓:
+
+      - clearing the flag means `confidence = ""` on EVERY row with that
+        name, because one aspect can own several (eBay's multi-selects are
+        tick boxes, so four ticked values are one thing to look at);
+      - a value sent with the aspect is the seller correcting the guess, and
+        it lands on the aspect's ANSWER row — the first one carrying a value,
+        not simply the first one with the name. Empty leftovers accumulate
+        beside a real answer (a cleared field leaves its row behind), and a
+        writer that stopped at the first row would fill the leftover and
+        leave the answer it meant to replace sitting underneath it.
+
+    Names that match no stored row are appended only when they carry a value:
+    a ✓ on an aspect this listing no longer has is nothing to record.
+
+    Returns how many aspects actually changed.
+    """
+    changed = 0
+    for entry in aspects:
+        name = str((entry or {}).get("name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        value = str((entry or {}).get("value") or "").strip()
+        rows = [i for i, s in enumerate(listing.item_specifics)
+                if s.name.strip().lower() == key]
+        if not rows:
+            if value:
+                listing.item_specifics.append(
+                    ItemSpecific(name=name, value=value, confidence=""))
+                changed += 1
+            continue
+        touched = False
+        if value:
+            # The answer row, by the same rule specificRowIndex uses.
+            answer = next((i for i in rows
+                           if (listing.item_specifics[i].value or "").strip()),
+                          rows[0])
+            if (listing.item_specifics[answer].value or "").strip() != value:
+                listing.item_specifics[answer].value = value
+                touched = True
+        for i in rows:
+            if (listing.item_specifics[i].confidence or "").strip():
+                listing.item_specifics[i].confidence = ""
+                touched = True
+        if touched:
+            changed += 1
+    return changed
+
+
+@app.post("/api/listings/{session_id}/specifics/confirm")
+def confirm_specifics(session_id: str, payload: dict, request: Request) -> dict:
+    """Mark AI-guessed item specifics as read — from wherever the seller is.
+
+    The draft cards carry a "N to review" chip: the specifics the AI inferred
+    rather than read off the item, which publish perfectly well and are merely
+    the ones most likely to be wrong. Clearing that chip meant opening the
+    listing, and a seller working a grid of twenty fresh drafts was making
+    twenty round trips into the editor to answer twenty times that the guess
+    was fine. This is that answer, given from the card.
+
+    The payload names ASPECTS, never the specifics list:
+
+        {"aspects": [{"name": "Brand"}, {"name": "Colour", "value": "Navy"}]}
+
+    which is the same discipline as PATCH /api/listings/{id} above and for
+    the same reason. A card holds the copy of the listing that the last
+    /api/listings load handed it. Were it to send `item_specifics` back
+    wholesale, every row the AI filled in since — an "Enrich all" running in
+    the background, an edit made in the editor in another tab — would be
+    erased by that older copy the moment somebody pressed ✓ on one aspect.
+    Naming the aspects lets the server apply the ✓ to the rows it is holding
+    NOW, so there is no stale copy anywhere in the exchange.
+
+    Written under the row lock (db.mutate_listing_data) rather than the
+    read-edit-write patch_listing does, because the background writer this
+    races is a real one: "Enrich all" fills specifics on drafts in a worker
+    thread, which is precisely the listing whose guesses the seller is
+    reading. Whichever plain write landed second would erase the other's.
+    """
+    _assert_session_owner(session_id, request)
+    rec = db.get_listing(session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != _uid(request):
+        raise HTTPException(404, "Listing not found")
+
+    aspects = [a for a in ((payload or {}).get("aspects") or [])
+               if isinstance(a, dict) and str(a.get("name") or "").strip()]
+    if not aspects:
+        raise HTTPException(
+            400, "Nothing to confirm. Send the aspects you've read, as "
+                 '{"aspects": [{"name": "Brand"}]}.')
+
+    # `read` is the part that matters, and it is NOT "did anything change".
+    # mutate_listing_data answers None for three different things — no
+    # database, no such row, and a write that failed — and _apply adds a
+    # fourth by returning None when there is nothing to change. Only the
+    # first two mean "the locked row was never read", and only those may
+    # fall through to the copy this request loaded. Without the flag, a ✓ on
+    # an aspect the row had already had cleared (by the enrichment thread,
+    # by another tab) came back None, fell through, found the flag still set
+    # on our older copy, and wrote that copy back — reintroducing the lost
+    # update the lock is here to stop, on the one path least likely to be
+    # noticed.
+    state = {"read": False, "changed": 0}
+
+    def _apply(data: dict) -> Optional[dict]:
+        try:
+            listing = Listing(**data)
+        except Exception:  # noqa: BLE001 - a blob we can't parse, we can't edit
+            return None
+        state["read"] = True
+        state["changed"] = _confirm_specific_aspects(listing, aspects)
+        if not state["changed"]:
+            return None
+        # So a revise actually carries a corrected value: eBay is only sent
+        # the fields the seller is known to have edited, and a listing that
+        # goes live later publishes everything anyway.
+        listing.mark_dirty("item_specifics")
+        return listing.model_dump()
+
+    data = (db.mutate_listing_data(
+        session_id, _apply, status=_sticky_status(rec), user_id=_uid(request))
+        if db.enabled() else None)
+    if data is None and state["read"]:
+        # The row WAS read under the lock. Either there was nothing left to
+        # confirm — an answer, not a failure — or the write itself did not
+        # land, which is, and has to be said rather than reported as a save.
+        if state["changed"]:
+            raise errors.StorageUnavailable(
+                "Couldn't save that just now. Try again in a moment.")
+        return {"ok": True, "listing": dict(rec.get("listing") or {}),
+                "confirmed": 0}
+    if data is None:
+        # No database, or no row to lock: the on-disk draft is the listing,
+        # and the copy this request read is the only one there is.
+        merged = dict(rec.get("listing") or {})
+        try:
+            listing = Listing(**merged)
+        except Exception as exc:  # noqa: BLE001 - a bad value is the record's
+            raise HTTPException(
+                400, "That value isn't valid: " + _validation_summary(exc)) from exc
+        state["changed"] = _confirm_specific_aspects(listing, aspects)
+        if state["changed"]:
+            listing.mark_dirty("item_specifics")
+        data = listing.model_dump()
+        if state["changed"]:
+            storage.save_listing(session_id, listing)
+            if db.enabled() and not db.upsert_listing(
+                    session_id, data, status=_sticky_status(rec),
+                    user_id=rec.get("user_id")):
+                raise errors.StorageUnavailable(
+                    "Couldn't save that just now. Try again in a moment.")
+    else:
+        # Keep the on-disk draft in step with the row that was just written.
+        try:
+            storage.save_listing(session_id, Listing(**data))
+        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+            log.warning("specifics: disk mirror not updated for %s: %s",
+                        session_id, exc)
+    return {"ok": True, "listing": data, "confirmed": state["changed"]}
+
+
 def _listing_image_order(session_id: str,
                          rec: Optional[dict]) -> Optional[list[str]]:
     """The photo order this listing is SAVED with, or None when it is saved

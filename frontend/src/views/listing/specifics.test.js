@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  confirmSpecificRows, reviewAspectCount, specificRowIndex, specificValue,
+  confirmSpecificRows, reviewAspectCount, reviewAspects, specificRowIndex,
+  specificValue,
   specificValues, toggleSpecificValue,
 } from "./specifics";
 
@@ -142,5 +143,35 @@ describe("reviewAspectCount", () => {
 
   it("survives a missing list", () => {
     expect(reviewAspectCount(undefined)).toBe(0);
+  });
+});
+
+describe("reviewAspects", () => {
+  // The chip counts these and the review panel lists them, off one function,
+  // so a chip saying 3 can never open a list of two.
+  it("names each outstanding aspect once, carrying every value it holds", () => {
+    const specs = rows(["Features", "Pockets", "medium"],
+      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"]);
+    expect(reviewAspects(specs)).toEqual([
+      { name: "Features", values: ["Pockets", "Lined"] },
+      { name: "Fit", values: ["Slim"] },
+    ]);
+  });
+
+  it("leaves out anything the count leaves out", () => {
+    const specs = rows(["Features", "Pockets", ""], ["Fit", "Slim", "high"],
+      ["Style", "", "medium"]);
+    expect(reviewAspects(specs)).toEqual([]);
+  });
+
+  it("agrees with the count it is derived from", () => {
+    const specs = rows(["Features", "Pockets", "medium"],
+      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"],
+      ["Brand", "Levi's", ""]);
+    expect(reviewAspects(specs)).toHaveLength(reviewAspectCount(specs));
+  });
+
+  it("survives a missing list", () => {
+    expect(reviewAspects(undefined)).toEqual([]);
   });
 });
