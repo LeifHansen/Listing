@@ -428,13 +428,21 @@ export function PublishBar({ w }) {
   return (
     // bottom-20 was measured against a bottom nav that has no home-indicator
     // inset. On every current iPhone that nav is 28px taller, and its raised
-    // "Sell" button reaches 20px higher still — right across the bottom of
+    // centre button reaches 20px higher still — right across the bottom of
     // "Publish Live", where a tap starts a NEW listing instead of publishing
     // this one. The bar has to rise by exactly what the nav grew by, so the
     // clearance holds on a phone with an inset and on one without.
+    //
+    // 6rem, not 5rem, since the thumb bar went to five slots: that put the
+    // raised button dead centre, and every control in this bar is full width
+    // on a phone, so its midpoint — where a thumb lands, and where `reach`
+    // probes — is now exactly the FAB's column. 5rem left the button's bottom
+    // edge 7px inside it. It cleared before only because the FAB sat off to
+    // one side; that was luck, not clearance, and any nav reshuffle would
+    // have spent it. Measured, not guessed: `npm run reach` is the check.
     <div
       data-publish-bar
-      className="sticky bottom-[calc(5rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1"
+      className="sticky bottom-[calc(6rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1"
     >
       <div className={cn(
         "rounded-card border-2 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95",

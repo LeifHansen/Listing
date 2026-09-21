@@ -26,7 +26,7 @@ const BASE = process.env.SMOKE_BASE || 'http://127.0.0.1:8099';
 // Every top-level screen the nav can reach. The real nav labels — clicked,
 // not faked, so this exercises each screen's own render and data fetching
 // rather than the landing screen four times.
-const VIEWS = ['Home', 'Sell', 'Shop', 'Settings'];
+const VIEWS = ['Home', 'List', 'Manage', 'Shop', 'Settings'];
 const PASSWORD = 'smoke-password-123';
 
 const browser = await chromium.launch(
@@ -81,7 +81,7 @@ async function visit(page, view, errs) {
   if (bodyText.trim().length < 20) errs.push('rendered an empty page');
   // The BODY is not a strict enough question, and a seller found out why: the
   // nav bars render outside <main>, so a screen with nothing at all in it
-  // still leaves a body full of "Home Sell Shop Settings" and sails past the
+  // still leaves a body full of "Home List Manage Shop Settings" and sails
   // check above. That is precisely what "clicking home brings me to a dead
   // screen" looked like — nav bar there, everything under it blank, no crash
   // and no error to report. So the screen itself has to say something.
@@ -362,7 +362,12 @@ if (signedIn) {
 // replaces, and whether it stops.
 const paging = [];
 if (signedIn) {
-  const card = (id) => ({ id, user_id: 'u', status: 'draft',
+  // Published, not drafts. Paging belongs to the listings manager -- the
+  // Manage tab -- and its default Active tab shows what is live. These were
+  // drafts back when one screen carried the uploader, the drafts grid AND the
+  // manager, so anything put on it showed up somewhere; now the cards have to
+  // belong to the tab whose button this check is here to press.
+  const card = (id) => ({ id, user_id: 'u', status: 'published',
                           listing: { title: `Paged item ${id}` } });
   try {
     await page.route('**/api/listings*', (r) => {
@@ -379,10 +384,10 @@ if (signedIn) {
       });
     });
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    // Not `visit()`: the nav button carries a draft-count badge, so with
-    // listings on screen its accessible name is no longer just "Sell" and the
-    // exact match that walk uses stops finding it.
-    await page.getByRole('button', { name: 'Sell' }).first().click();
+    // Manage, where the store's own pages live -- the listings manager moved
+    // off the old merged Sell screen onto its own tab. Not `visit()`: that
+    // walk matches exactly, and a nav button here can carry a count badge.
+    await page.getByRole('button', { name: 'Manage' }).first().click();
     await settle(page);
 
     const first = (await page.textContent('body')) || '';
@@ -486,7 +491,7 @@ if (signedIn) {
     expected = /503|resolve-conflict/;
 
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    await page.getByRole('button', { name: 'Sell' }).first().click();
+    await page.getByRole('button', { name: 'Manage' }).first().click();
     await settle(page);
     await page.getByText('Vintage denim jacket').first().click();
     await settle(page);
@@ -672,7 +677,7 @@ if (signedIn) {
     });
 
     await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
-    await page.getByRole('button', { name: 'Sell' }).first().click();
+    await page.getByRole('button', { name: 'Manage' }).first().click();
     await settle(page);
     await page.getByText('Copper kettle').first().click();
     await settle(page);

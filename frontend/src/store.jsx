@@ -767,10 +767,18 @@ export function AppProvider({ children }) {
   // stating something about the seller's account on the strength of having
   // failed to find out. See lib/listingsView.js; it is the same distinction
   // metricsStatus makes below for eBay's traffic numbers.
+  // The committed listings state, for the callbacks that must read it without
+  // going through a setState updater (see loadMoreListings for what that cost).
+  const listingsStateRef = useRef(null);
   const [listingsState, setListingsState] = useState({
     loaded: false, loading: false, authed: true, dbConfigured: true,
     error: "", items: [],
   });
+  // Kept in step during render rather than in an effect: a callback fired from
+  // the same commit that changed this state (a click on a button the new state
+  // just enabled -- "Load older listings" is exactly that) would otherwise read
+  // the previous value, which is the bug the ref exists to prevent.
+  listingsStateRef.current = listingsState;
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState(NO_METRICS);
   // Whether eBay's traffic report (views/impressions) was actually readable —
@@ -1191,16 +1199,36 @@ export function AppProvider({ children }) {
   // records were not on the page, not in the tabs, not findable and not
   // openable. The notice was honest about it and offered no way through.
   const loadMoreListings = useCallback(async () => {
-    let cursor = null;
+    // The cursor is read from a ref, not smuggled out of a setState updater.
+    //
+    // It used to be the latter -- `let cursor` assigned inside the updater,
+    // read on the line after. That only works when React runs the updater
+    // synchronously, which it does as an optimisation (the eager-state bailout
+    // check) and only while nothing else is already queued on this hook. With
+    // an update in flight the updater is deferred to the render phase, the
+    // read below still sees `null`, and the function returns having done
+    // nothing: the button clicks, no request goes out, and the notice keeps
+    // saying the store was cut. No error anywhere -- it looks like a dead
+    // button, which is exactly how it was found (the smoke test's "the rest of
+    // the store can be reached", once splitting Sell in two changed what else
+    // was rendering at the moment of the click).
+    //
+    // A ref always holds the committed state, so the read cannot miss. The
+    // updater below still guards the flag itself, which is what keeps two
+    // quick clicks from fetching and appending the same page twice.
+    const current = listingsStateRef.current;
+    if (current.loadingMore || !current.nextCursor) return;
+    const cursor = current.nextCursor;
+    let started = false;
     setListingsState((s) => {
-      // Guarded here, where the current state is: two clicks (or a click
+      // Guarded here too, where the current state is: two clicks (or a click
       // during the fetch) would otherwise ask for the same page twice and
       // append it twice.
       if (s.loadingMore || !s.nextCursor) return s;
-      cursor = s.nextCursor;
+      started = true;
       return { ...s, loadingMore: true };
     });
-    if (!cursor) return;
+    if (!started && listingsStateRef.current.loadingMore) return;
     try {
       const res = await api(`/api/listings?before=${encodeURIComponent(cursor)}`);
       setListingsState((s) => {
