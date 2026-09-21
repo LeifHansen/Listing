@@ -1,13 +1,15 @@
-/* The Sell tab opens on the listings, not on a box asking for photos.
+/* The List tab opens on the drop zone. Everywhere else, the uploader folds.
  *
- * The uploader is the biggest thing on Sell — illustration, headline, two
- * buttons, the better part of a screen — and it sits ABOVE the drafts strip
- * and the whole listing manager. A seller who came to Sell to look at what
- * they are already selling scrolled past it every single time. Reported as:
- * make the Sell window collapsable, and collapsed by default.
+ * This box used to live at the top of "Sell", above the drafts strip AND the
+ * whole listing manager, so a seller who came to look at what they were
+ * already selling scrolled past a box asking for photos every single visit.
+ * The answer then was to fold it down to one line and let the lists start the
+ * screen. The answer now is that the lists have their own tab (Manage), so on
+ * List the box can be the box again — `defaultOpen` says so, and that is the
+ * only thing the tab has to pass.
  *
- * So it opens folded: one line that says what it is, with the lists right
- * under it. What these guard is everything the fold must NOT cost —
+ * The fold itself has not gone anywhere, and neither has anything it must not
+ * cost —
  *
  *  - the drop gesture, which the big dashed box spent its whole life
  *    teaching. Photos dropped on the folded bar land in the pile;
@@ -19,9 +21,9 @@
  *    that starts the AI must never end up behind a bar reading "Add photos",
  *    which is how a seller loses a shoot they thought was queued.
  *
- * And the fold is not remembered: every mount starts folded, because "open,
- * like last time" is a decision made on another visit — the same trap the
- * cutout toggle's own test describes.
+ * And the state is still not remembered: every mount starts from the prop,
+ * never from what was left open last time — the same trap the cutout toggle's
+ * own test describes.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -40,17 +42,22 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 let root;
 let host;
 
-async function mountUploader() {
+async function mountUploader({ defaultOpen = false } = {}) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => {
     root.render(
-      <ToastProvider><AppProvider><UploadPhase /></AppProvider></ToastProvider>,
+      <ToastProvider><AppProvider>
+        <UploadPhase defaultOpen={defaultOpen} />
+      </AppProvider></ToastProvider>,
     );
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 }
+
+/** How the List tab mounts it. */
+const mountOnList = () => mountUploader({ defaultOpen: true });
 
 const text = () => host.textContent || "";
 
@@ -117,7 +124,49 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("the uploader on the Sell tab", () => {
+describe("the uploader on the List tab", () => {
+  it("opens on the drop zone, not on a bar asking to be opened", async () => {
+    // The whole point of the tab. A seller who tapped "List" wants to put
+    // photos in; making them press a one-line bar first to reveal the box
+    // they came for is the screen hiding its own purpose.
+    await mountOnList();
+
+    expect(text()).toContain("Drag photos here");
+    expect(button("Browse Files")).toBeTruthy();
+    expect(button("Take Photos")).toBeTruthy();
+    expect(bar()).toBeFalsy();
+  });
+
+  it("still folds away for a seller who wants the drafts up", async () => {
+    // Open by default is not the same as stuck open: the fold is still the
+    // way to get the grid below into view.
+    await mountOnList();
+
+    await press(button("Hide"));
+    expect(text()).not.toContain("Drag photos here");
+    expect(bar()).toBeTruthy();
+    expect(bar().getAttribute("aria-expanded")).toBe("false");
+
+    await press(bar());
+    expect(text()).toContain("Drag photos here");
+  });
+
+  it("opens on the drop zone again next visit, whatever was left folded", async () => {
+    // Same rule as ever, read the other way round: the arrival state is the
+    // prop, never a decision made on another visit.
+    await mountOnList();
+    await press(button("Hide"));
+    expect(bar()).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    host.remove();
+    await mountOnList();
+
+    expect(text()).toContain("Drag photos here");
+  });
+});
+
+describe("the uploader anywhere it is not the point of the screen", () => {
   it("opens folded, as one line", async () => {
     await mountUploader();
 

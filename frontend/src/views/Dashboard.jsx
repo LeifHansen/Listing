@@ -605,12 +605,16 @@ export function Dashboard() {
   const { confirm, toast } = useToast();
   // Every button on this screen that starts a listing — the hero, the three
   // quick actions, the "Listed today" tile, the empty states — is a seller
-  // asking for the photo box by name, so Sell opens with the uploader already
-  // unfolded rather than the one-line bar it shows a seller who came for the
-  // lists. Only from here: startNew() through the nav, the top bar or the
-  // listings screen keeps the fold.
-  const openUploader = useCallback(
-    () => startNew({ openUploader: true }), [startNew]);
+  // asking for the photo box by name, and they get it: the List tab opens on
+  // the drop zone.
+  //
+  // This used to need an intent flag to arrange (#333, startNew({
+  // openUploader: true })), because back then Sell showed a one-line bar to
+  // everyone who had not come from here. Splitting Sell into List and Manage
+  // gave the lists their own tab, so the box is the arrival state for every
+  // door and there is nothing left to ask for. The name stays: seven call
+  // sites below read better saying what the button promises.
+  const openUploader = startNew;
   const items = listingsState.items;
   const storeView = listingsView({
     ...listingsState, user, count: items.length,

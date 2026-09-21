@@ -1,20 +1,23 @@
 /* "Create a listing" on the dashboard lands on the open uploader.
  *
- * The uploader folds itself away on arrival at Sell — one line above the
- * lists — because a seller who came to Sell came for what they are already
- * selling (theUploaderOpensFolded documents that in full, and everything it
- * guards still holds). But the dashboard's buttons are not that arrival: a
- * seller who pressed "Create a listing", "Take Photos" or "Upload Images"
+ * A seller who pressed "Create a listing", "Take Photos" or "Upload Images"
  * asked for the photo box by name, and giving them a one-line bar reading
- * "Add photos" to press again is a step that exists for nobody.
+ * "Add photos" to press again is a step that exists for nobody. That promise
+ * is what this file has always been about, and it still holds.
  *
- * So the dashboard's create-a-listing buttons carry an intent with them, and
- * the uploader spends it as it mounts. What this pins is both halves of
- * "only from home": those buttons open it, and the intent lasts exactly one
- * arrival — every other door into Sell (the nav, the top bar, a deep link
- * into the lists, a second visit after the first spent it) lands folded, the
- * way it always has. "Open, like last time" is precisely what the fold
- * exists to stop, and a flag that outlived its own visit would be that.
+ * What changed underneath it is everything else. These buttons used to be
+ * the ONLY arrival that opened the box: Sell was one screen with the lists
+ * on it, the uploader folded itself away so they could start it, and the
+ * dashboard carried a one-shot intent flag (#333) to make its own arrival
+ * the exception. Splitting Sell into List and Manage gave the lists their
+ * own tab, so the box is the arrival state for every door into List and the
+ * flag had nothing left to decide — it is gone, and so are the assertions
+ * here that pinned "every other door lands folded", which is precisely what
+ * the split reverses.
+ *
+ * So this now guards the promise rather than the mechanism: press any of
+ * these buttons and you are on the photo box, however the app arranges it.
+ * The fold's own remaining contract lives in theUploaderOpensOnTheListTab.
  */
 import { act, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -72,9 +75,12 @@ function Probe({ onValue }) {
 
 /* The shell, cut down to the two screens this is about: the dashboard, and
    Sell with its uploader on top. Same switch the real app makes on `view`. */
+// The List tab in miniature: it renders the uploader with `defaultOpen`, so
+// this stand-in has to as well or it would be testing a screen the app does
+// not have. (ListHome is the real thing -- see NewListing.)
 function Shell() {
   const { view } = useApp();
-  return view === "new" ? <UploadPhase /> : <Dashboard />;
+  return view === "new" ? <UploadPhase defaultOpen /> : <Dashboard />;
 }
 
 let root;
@@ -170,41 +176,49 @@ describe("the dashboard's way into a new listing", () => {
     }
   });
 
-  it("leaves the fold alone for every other door into Sell", async () => {
-    // The nav and the top bar call startNew() with nothing: a seller heading
-    // for Sell, who gets the lists first.
+  it("opens for the plain doors too, now that List is its own tab", async () => {
+    // The nav and the top bar call startNew() with nothing. They used to be
+    // the counter-example — the arrival that got the lists and a folded bar —
+    // and the whole point of the split is that they no longer are: there are
+    // no lists on this tab to get in front of.
     await mountHome();
 
     await act(async () => { app.startNew(); });
     await settle();
 
-    expect(isFolded()).toBe(true);
+    expect(isOpen()).toBe(true);
   });
 
-  it("leaves a deep link into the lists folded", async () => {
-    // A dashboard tile asking for the drafts is asking for the lists.
+  it("sends a Drafts deep link to List, on the box", async () => {
+    // A dashboard tile asking for the drafts is asking for the List tab —
+    // the drafts live under the uploader that makes them.
     await mountHome();
 
     await act(async () => { app.openListings("drafts"); });
     await settle();
 
-    expect(isFolded()).toBe(true);
+    expect(app.view).toBe("new");
+    expect(isOpen()).toBe(true);
   });
 
-  it("spends the intent on the arrival that follows the press", async () => {
-    // One visit, not a preference. A seller who opened it from the dashboard
-    // and came back to Sell later — by a route that never touched the flag —
-    // gets the folded bar, not "open, like last time".
+  it("is an arrival state, not a remembered one", async () => {
+    // The fold is still never carried between visits. It is the DEFAULT that
+    // moved, so a seller who folded the box away and came back gets it open
+    // again rather than "shut, like last time" — the same rule the cutout
+    // toggle keeps, pointing the other way.
     await mountHome();
     await press(button("Create a listing"));
     expect(isOpen()).toBe(true);
+
+    await press(button("Hide"));
+    expect(isFolded()).toBe(true);
 
     await act(async () => { app.setView("dashboard"); });
     await settle();
     await act(async () => { app.setView("new"); });
     await settle();
 
-    expect(isFolded()).toBe(true);
+    expect(isOpen()).toBe(true);
   });
 
   it("leaves the rest of the arrival exactly as it was", async () => {

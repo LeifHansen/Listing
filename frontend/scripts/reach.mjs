@@ -141,7 +141,7 @@ const applyHomeIndicatorInset = (px) => page.evaluate((px_) => {
 /* Every control in the publish bar that a tap cannot reach.
  *
  * Two points per control: its centre, and 6px above its bottom edge — the
- * bottom edge is where the nav, its raised "Sell" button and the toast stack
+ * bottom edge is where the nav, its raised "List" button and the toast stack
  * all arrive from, so a check that only probes centres passes on a button
  * whose bottom third is under something else. */
 const unreachable = () => page.evaluate(() => {
@@ -175,10 +175,11 @@ const unreachable = () => page.evaluate(() => {
 
 try {
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: "networkidle", timeout: 30000 });
-  // Visible-only: the phone nav and the sidebar both carry a Sell button, and
+  // The List tab -- the drafts, and the editor a draft opens into. Visible-
+  // only: the phone nav and the sidebar both carry a List button, and
   // whichever one this screen hides is still in the DOM. The sidebar's also
-  // wears a draft count ("Sell1"), so the name is matched by prefix.
-  await page.getByRole("button", { name: /^Sell/ })
+  // wears a draft count ("List1"), so the name is matched by prefix.
+  await page.getByRole("button", { name: /^List/ })
     .filter({ visible: true }).first().click();
   await page.waitForTimeout(600);
   await page.getByRole("button", { name: /Review & List/i }).first().click();

@@ -12,6 +12,7 @@ import { AiConsentDialog } from "@/components/AiConsentDialog";
 import { ShippingDialog } from "@/components/ShippingDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
+import { ManageView } from "@/views/ManageView";
 import { ShopMode } from "@/views/ShopMode";
 import { MessagesView } from "@/views/MessagesView";
 import { SettingsView } from "@/views/SettingsView";
@@ -26,9 +27,13 @@ import { AdminView } from "@/views/AdminView";
 // unlike a crash it never reports itself.
 const VIEWS = {
   dashboard: Dashboard,
-  // Sell IS the pipeline now: upload box, drafts strip, and the listings
-  // manager live on one screen (openListings lands here).
+  // The two halves of what "Sell" used to be. `new` is List -- the upload box
+  // and the drafts it produces -- and keeps that id because it has always
+  // meant "start a listing". `manage` is the listings manager. "list" is
+  // spelled out as well so the id someone reaches for reads as the tab.
   new: NewListing,
+  list: NewListing,
+  manage: ManageView,
   shop: ShopMode,
   messages: MessagesView,
   settings: SettingsView,

@@ -168,6 +168,29 @@ const EBAY_CONNECT_ERRORS = {
   unknown: "eBay connection failed. Please try again.",
 };
 
+/** Which main-nav tab a lifecycle tab belongs to.
+ *
+ * "Sell" used to be one screen, so every deep link landed on it and scrolled.
+ * It is two tabs now: drafts are the List tab's business (they sit under the
+ * uploader that makes them), and everything with a lifecycle behind it —
+ * active, finds, inactive, all — is the Manage tab's.
+ *
+ * Exported because it is the whole routing rule for a dozen call sites
+ * (dashboard tiles, Shop Mode, the publish paths) and none of them says it
+ * out loud; getting it wrong sends a tile somewhere plausible and silent.
+ */
+export const viewForTab = (tab) => (tab === "drafts" ? "new" : "manage");
+
+/** The tabs that render the listing editor when a session is open.
+ *
+ * Both halves of the old Sell screen do, which is what lets a listing open
+ * where the seller already is — tap a live one on Manage and you stay on
+ * Manage, rather than being handed the photo uploader. Anywhere else (Home,
+ * Messages, the notifications bell) there is nothing to render the editor,
+ * so opening one has to go somewhere: List, as it always did.
+ */
+const EDITOR_VIEWS = ["new", "list", "manage"];
+
 export function AppProvider({ children }) {
   const { toast } = useToast();
 
@@ -185,13 +208,14 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
-  // Which tab of the listings pipeline is showing. Deep links (a dashboard
-  // tile, a task row) set it and jump: openListings("drafts"). The pipeline
-  // lives on the merged Sell screen now, so opening it clears any open
-  // editor session (same as the Sell nav's startNew always did) and records
-  // the requested tab so the screen can scroll to the right section.
+  // Which tab of the listings manager is showing. Deep links (a dashboard
+  // tile, a task row) set it and jump: openListings("active"). Opening the
+  // manager clears any open editor session, the same way the nav's own
+  // startNew always did.
   const [listingsTab, setListingsTab] = useState("active");
-  // Grid (the default) or list, for the listing grids on the Sell screen.
+  // Grid (the default) or list, for the listing grids. Drafts (List) and the
+  // manager (Manage) are two screens now but share this one preference: a
+  // seller who likes rows wants rows in both places.
   // It's a per-device viewing preference, not account data, so it rides
   // localStorage next to the theme rather than the server.
   const [listingsLayout, setLayout] = useState(() => {
@@ -220,23 +244,16 @@ export function AppProvider({ children }) {
   // and held here so opening a listing to fix it keeps the other ticks.
   const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
-  // Does the next uploader to mount open unfolded? The Sell screen's uploader
-  // is folded on arrival (see UploadPhase), because a seller coming to Sell is
-  // usually there for the lists. A seller who pressed "Create a listing" on
-  // the dashboard is not: they asked for the uploader by name, and handing
-  // them a one-line bar they have to press again is a step for nothing.
-  //
-  // A ref, not state: nothing renders from it, it is read once by the uploader
-  // as it mounts and cleared there, and every other door into Sell sets it
-  // false on the way through — so it can never turn into "open, like last
-  // time", which is exactly what the fold exists to stop.
-  const openUploaderRef = useRef(false);
   const openListings = useCallback((tab) => {
+    const t = tab || "active";
     if (tab) setListingsTab(tab);
-    listingsJumpRef.current = tab || "active";
-    openUploaderRef.current = false;
+    // The ref is a signal to the List screen alone (a batch in flight reads
+    // it to step aside for the lists -- see NewListing). Setting it on a jump
+    // that lands on Manage would leave it set with nobody to consume it, and
+    // the NEXT visit to List would hide a running batch queue for no reason.
+    listingsJumpRef.current = t === "drafts" ? t : null;
     setSession(null);
-    setView("new");
+    setView(viewForTab(t));
   }, []);
 
   // ---------- the listings filters ----------
@@ -750,10 +767,18 @@ export function AppProvider({ children }) {
   // stating something about the seller's account on the strength of having
   // failed to find out. See lib/listingsView.js; it is the same distinction
   // metricsStatus makes below for eBay's traffic numbers.
+  // The committed listings state, for the callbacks that must read it without
+  // going through a setState updater (see loadMoreListings for what that cost).
+  const listingsStateRef = useRef(null);
   const [listingsState, setListingsState] = useState({
     loaded: false, loading: false, authed: true, dbConfigured: true,
     error: "", items: [],
   });
+  // Kept in step during render rather than in an effect: a callback fired from
+  // the same commit that changed this state (a click on a button the new state
+  // just enabled -- "Load older listings" is exactly that) would otherwise read
+  // the previous value, which is the bug the ref exists to prevent.
+  listingsStateRef.current = listingsState;
   // eBay views/watchers per live listing, keyed by our listing record id.
   const [metricsById, setMetricsById] = useState(NO_METRICS);
   // Whether eBay's traffic report (views/impressions) was actually readable —
@@ -1174,16 +1199,36 @@ export function AppProvider({ children }) {
   // records were not on the page, not in the tabs, not findable and not
   // openable. The notice was honest about it and offered no way through.
   const loadMoreListings = useCallback(async () => {
-    let cursor = null;
+    // The cursor is read from a ref, not smuggled out of a setState updater.
+    //
+    // It used to be the latter -- `let cursor` assigned inside the updater,
+    // read on the line after. That only works when React runs the updater
+    // synchronously, which it does as an optimisation (the eager-state bailout
+    // check) and only while nothing else is already queued on this hook. With
+    // an update in flight the updater is deferred to the render phase, the
+    // read below still sees `null`, and the function returns having done
+    // nothing: the button clicks, no request goes out, and the notice keeps
+    // saying the store was cut. No error anywhere -- it looks like a dead
+    // button, which is exactly how it was found (the smoke test's "the rest of
+    // the store can be reached", once splitting Sell in two changed what else
+    // was rendering at the moment of the click).
+    //
+    // A ref always holds the committed state, so the read cannot miss. The
+    // updater below still guards the flag itself, which is what keeps two
+    // quick clicks from fetching and appending the same page twice.
+    const current = listingsStateRef.current;
+    if (current.loadingMore || !current.nextCursor) return;
+    const cursor = current.nextCursor;
+    let started = false;
     setListingsState((s) => {
-      // Guarded here, where the current state is: two clicks (or a click
+      // Guarded here too, where the current state is: two clicks (or a click
       // during the fetch) would otherwise ask for the same page twice and
       // append it twice.
       if (s.loadingMore || !s.nextCursor) return s;
-      cursor = s.nextCursor;
+      started = true;
       return { ...s, loadingMore: true };
     });
-    if (!cursor) return;
+    if (!started && listingsStateRef.current.loadingMore) return;
     try {
       const res = await api(`/api/listings?before=${encodeURIComponent(cursor)}`);
       setListingsState((s) => {
@@ -1210,14 +1255,14 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
-  // `opts` is an options object, never a click event: most call sites are
-  // `onClick={startNew}` and hand this a MouseEvent, which has no
-  // `openUploader` of its own — so the flag can only be turned on by a caller
-  // that actually asked for it, spelled out as startNew({ openUploader: true }).
-  // That is the dashboard's create-a-listing buttons and nothing else; the
-  // nav, the top bar and the listings screen land folded as before.
-  const startNew = useCallback((opts) => {
-    openUploaderRef.current = opts?.openUploader === true;
+  // Takes no options any more. It used to carry `{ openUploader: true }` from
+  // the dashboard's create-a-listing buttons (#333), so that one arrival
+  // landed on the open photo box while every other door stayed folded. The
+  // List tab opens on the box for every door now, so there is nothing left
+  // for a caller to ask for. Call sites that still pass something — including
+  // the `onClick={startNew}` ones that hand it a MouseEvent — are ignored, as
+  // they always were.
+  const startNew = useCallback(() => {
     setSession(null);
     setView("new");
   }, []);
@@ -1251,7 +1296,14 @@ export function AppProvider({ children }) {
       // reach eBay, and the editor is where the question gets asked.
       setSession({ sessionId: rec.id, listing: rec.listing, confidence: null,
                    status: rec.status, conflicts: rec.conflicts || [] });
-      setView("new");
+      // Stay put if this screen can show the editor, and only move if it
+      // cannot. Always forcing "new" is what would drag someone who tapped a
+      // live listing on Manage over to List, and drop them back on a screen
+      // they never asked for when they closed it. Never moving is worse: a
+      // draft opened from Home, the inbox or the notifications bell would
+      // set a session nothing on screen renders, and the tap would look
+      // like it did nothing at all.
+      setView((v) => (EDITOR_VIEWS.includes(v) ? v : "new"));
     } catch (e) {
       toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
     }
@@ -1551,7 +1603,6 @@ export function AppProvider({ children }) {
     setFilters(EMPTY_FILTERS);
     setSavedViews(NO_SAVED_VIEWS);
     listingsJumpRef.current = null;
-    openUploaderRef.current = false;
 
     // ...and land where signing back in is the obvious next move. There is no
     // separate /login route to send anyone to — the sign-in prompt IS a dialog
@@ -1758,7 +1809,6 @@ export function AppProvider({ children }) {
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
-    openUploaderRef,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     listingFilters, setListingFilters, clearListingFilters,

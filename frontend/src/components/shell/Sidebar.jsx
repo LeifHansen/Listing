@@ -1,20 +1,31 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, PlusCircle, Store, Settings, MessageCircle, ShieldCheck,
-  Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
+  LayoutDashboard, Camera, Tags, Store, Settings, MessageCircle,
+  ShieldCheck, Moon, Sun, PanelLeftClose, PanelLeftOpen, LogOut, LogIn,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
-// Sell IS the pipeline: the upload box, the drafts strip, and the listings
-// manager share one screen, so the old Drafts / Listing Manager entries are
-// gone and the drafts-waiting badge rides the Sell tab instead. The mobile
-// bottom bar shows the first word of each label.
+// Selling is two jobs, so it is two tabs. "Sell" used to be one screen with
+// the upload box, the drafts strip and the whole listings manager stacked on
+// it, which meant a seller came to it for one of those and scrolled past the
+// other two every time -- the uploader was even folded down to a one-line bar
+// to make room (see UploadPhase). List is where you MAKE something: photos in,
+// drafts out. Manage is where you look after what you already made. The
+// drafts-waiting badge rides List, where the drafts actually are.
+//
+// `new` is still List's id. It has always meant "start a listing" -- startNew,
+// openListing, the batch starters and the TopBar button all target it -- and
+// renaming it would churn a dozen call sites to say the same thing.
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
-  { id: "new", label: "Sell", icon: PlusCircle },
+  { id: "new", label: "List", icon: Camera },
+  // Tags, not another grid: the four-square icon Home already wears is
+  // indistinguishable from it at 19px, and two nav entries sharing one glyph
+  // make a nav that has to be read rather than glanced at.
+  { id: "manage", label: "Manage", icon: Tags },
   { id: "shop", label: "Shop", icon: Store },
   { id: "messages", label: "Messages", icon: MessageCircle },
   { id: "settings", label: "Settings", icon: Settings },
@@ -23,8 +34,7 @@ const NAV = [
 // The operator console — appended to the sidebar only for a superadmin
 // (the server re-checks the role on every /api/admin call, so this gates
 // what renders, never what is reachable). Deliberately NOT in BottomNav:
-// the console is a desktop tool, and the 4-slot-plus-FAB thumb bar has no
-// room for a fifth target.
+// the console is a desktop tool, and the thumb bar is full.
 const ADMIN_NAV = { id: "admin", label: "Admin", icon: ShieldCheck };
 
 const byId = (id) => NAV.find((n) => n.id === id);
@@ -99,8 +109,11 @@ export function Sidebar() {
     listingsState, ebay, messages, isSuperadmin } = useApp();
   const [collapsed, setCollapsed] = useState(false);
 
-  // Drafts live at the top of the Sell screen, so its badge is the
-  // drafts-waiting count.
+  // Drafts are the List tab's, so the drafts-waiting count badges List.
+  // Manage deliberately carries NO count: a seller with 355 live listings
+  // would get "355" in a pill built for two digits, and a number that never
+  // changes is not news. A badge there would have to mean something needs
+  // doing, which is a different count than "everything you have".
   const counts = {
     new: listingsState.items.filter(
       (i) => i.status === "draft" || i.status === "dry_run").length,
@@ -207,7 +220,11 @@ export function Sidebar() {
 export function BottomNav() {
   const { view, setView, startNew } = useApp();
   // Reference by id (not index) so reordering NAV never scrambles the bar.
-  const items = ["dashboard", "shop", "new", "settings"].map(byId);
+  // Five targets, and the FAB is one of them rather than an extra squeezed
+  // between four: Manage earns a slot because it is now half of what the
+  // single Sell tab used to be, and burying it behind Home would make the
+  // split worse on a phone than it was before.
+  const items = ["dashboard", "manage", "new", "shop", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"
@@ -229,7 +246,7 @@ export function BottomNav() {
             aria-current={active ? "page" : undefined}
             onClick={() => (isNew ? startNew() : setView(item.id))}
             className={cn(
-              "flex flex-col items-center justify-center gap-0.5 min-w-12 min-h-11 rounded-button",
+              "flex flex-col items-center justify-center gap-0.5 min-w-11 min-h-11 rounded-button",
               "text-[10px] font-semibold transition-colors duration-150 cursor-pointer",
               isNew
                 ? "text-on-accent bg-blue rounded-full size-12 -mt-5 shadow-float shrink-0"

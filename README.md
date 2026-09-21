@@ -1511,7 +1511,7 @@ that keeps dying from taking the machine with it.
 **A batch is reviewed in the drafts grid, not in a grid of its own.** The
 batch screen used to draw its own cards -- the title and the price as text
 boxes, its own columns, its own Publish / Delete / Merge buttons, its own
-selection -- beside the Sell screen's drafts grid, which draws the same
+selection -- beside the List tab's drafts grid, which draws the same
 listings as photo tiles with the AI's confidence, the review count and the
 price badge. Two grids of the same drafts, and the trip a seller actually
 takes goes through both: open one item from a batch, save it, and the app
@@ -2300,7 +2300,7 @@ listings have gone missing. The way to keep one is to name it.
 
 ## Taking the whole store with you (CSV export)
 
-**Export CSV**, on the Sell screen beside *Sync with eBay*, downloads every
+**Export CSV**, on the Manage tab beside *Sync with eBay*, downloads every
 listing on the account as a spreadsheet. It is the answer to "it's my
 inventory, let me have it": a backup, an insurance schedule, the file an
 accountant asks for, and the thing a seller leaves with.

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown,
+  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown, Camera,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -12,7 +12,7 @@ import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
 import { BulkBanner } from "@/components/BulkBanner";
-import { ListingsView } from "./ListingsView";
+import { PageHeader } from "@/components/ui/PageHeader";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
 import { BulkQueue } from "./listing/BulkMode";
@@ -260,7 +260,7 @@ function MoreDetails({ w, children }) {
   );
 }
 
-function Workflow() {
+export function Workflow() {
   const {
     session, startNew, setSession, setView, openListings, deleteListing, activeBulk,
   } = useApp();
@@ -304,8 +304,8 @@ function Workflow() {
     }
   };
 
-  // My drafts — the drafts strip lives on this same screen now, so getting
-  // there means closing the editor; confirm since unsaved edits are dropped.
+  // My drafts — the drafts grid is the List tab, so getting there means
+  // closing the editor; confirm since unsaved edits are dropped.
   const toDrafts = async () => {
     if (await confirm({
       title: "Close this listing?",
@@ -482,40 +482,55 @@ function Workflow() {
   );
 }
 
-// The merged Sell screen: upload box on top, then the drafts strip (one
-// click from Publish or Review & List), then the rest of the store below.
-function SellHome({ search }) {
-  const { listingsJumpRef } = useApp();
-  const managerRef = useRef(null);
-
-  // A deep link (dashboard tile, "View all") asked for a listings tab:
-  // drafts live right under the upload box, everything else scrolls down to
-  // the manager section, whose tab is already set via listingsTab.
-  useEffect(() => {
-    const tab = listingsJumpRef.current;
-    listingsJumpRef.current = null;
-    if (tab && tab !== "drafts") {
-      requestAnimationFrame(() =>
-        managerRef.current?.scrollIntoView({ behavior: "smooth" }));
-    }
-  }, [listingsJumpRef]);
+// The List screen: photos in at the top, the drafts they became underneath.
+// That is the whole tab — the listings manager it used to sit on top of is
+// its own screen now (ManageView), which is what lets the uploader be the
+// full drop zone again instead of a one-line bar apologising for the lists
+// below it. No scroll-to-a-section effect either: there is no section left
+// to scroll to, and a deep link asking for anything but drafts now lands on
+// Manage in the first place (see openListings).
+function ListHome({ search }) {
+  const { listingsState, listingsJumpRef } = useApp();
+  // The Drafts jump signal, spent. It asks for one thing — the lists, not a
+  // batch queue — and this component rendering IS that, so from here it has
+  // nothing left to say.
+  //
+  // No dep array on purpose. The signal can arrive while this screen is
+  // ALREADY up (a Drafts tile tapped from the List tab), which no mount
+  // effect and no dep list would see: the ref is a mutation, so it changes
+  // nothing React watches. Left set, it answers for the next batch as well,
+  // and the seller who starts one lands on the lists with their queue hidden
+  // behind a banner — the batch really is running and the screen really does
+  // work, so nothing about it looks wrong enough to report. Clearing it on
+  // every render of the state it asks for is the cheap, dull fix.
+  useEffect(() => { listingsJumpRef.current = null; });
+  // Whether the strip below will draw anything. DraftsStrip renders null with
+  // nothing to show, which is right — the uploader above IS the empty state —
+  // but a page that just stops has no floor, so an empty one gets a line.
+  const hasDrafts = (listingsState.items || []).some(
+    (i) => i.status === "draft" || i.status === "dry_run");
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-ink">Sell</h1>
-          <p className="text-sm text-ink-secondary mt-1">
-            Start with photos — the AI handles the boring parts.
+    <motion.div variants={stagger} initial="hidden" animate="show"
+      className="flex flex-col gap-6">
+      <motion.div variants={rise} className="flex flex-col gap-4">
+        <PageHeader
+          icon={Camera}
+          title="List an item"
+          subtitle="Start with photos — the AI writes the listing."
+        />
+        <UploadPhase defaultOpen />
+      </motion.div>
+      <motion.div variants={rise}>
+        {hasDrafts ? (
+          <DraftsStrip search={search} />
+        ) : (
+          <p className="text-sm text-ink-faint text-center py-6">
+            Drafts you start will collect here, ready to publish.
           </p>
-        </div>
-        <UploadPhase />
-      </div>
-      <DraftsStrip search={search} />
-      <div ref={managerRef} className="scroll-mt-4">
-        <ListingsView search={search} />
-      </div>
-    </div>
+        )}
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -544,6 +559,7 @@ export function NewListing({ search = "" }) {
   // trap useListingForm's re-seed guard documents). The ref is an imperative
   // navigation signal from openListings, not derivable state, so this stays an
   // effect that reads it once per batch change.
+  // (ListHome clears it once the lists are actually up — see there.)
   useEffect(() => {
     if (activeBulk && listingsJumpRef.current) setShowBulk(false);
   }, [activeBulk, listingsJumpRef]);
@@ -577,7 +593,7 @@ export function NewListing({ search = "" }) {
             onDismiss={clearBulk}
           />
         )}
-        <SellHome search={search} />
+        <ListHome search={search} />
       </>
     );
   }

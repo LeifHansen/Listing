@@ -64,9 +64,14 @@ function countHints(notes) {
 // The photo uploader — centerpiece of a new listing. Big friendly drop zone,
 // rounded photo cards, then one tap to let the AI take over. With several
 // photos it can also run in bulk mode: one pile, many listings.
-export function UploadPhase() {
+//
+// @param defaultOpen  start unfolded. The List tab passes it: the drop zone
+//                     is what that tab is FOR, so arriving to a one-line bar
+//                     would be the page hiding its own point. See the fold
+//                     below for why anywhere else still starts shut.
+export function UploadPhase({ defaultOpen = false }) {
   const { setSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings, openUploaderRef } = useApp();
+          invalidateListings } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -91,41 +96,32 @@ export function UploadPhase() {
   const [notes, setNotes] = useState(() => bulkRetry?.notes || "");
   const [bulk, setBulk] = useState(() => !!bulkRetry);
   const [drag, setDrag] = useState(false);
-  // Is the drop zone unfolded? Shut on every mount but one, and deliberately
-  // not remembered.
+  // Is the drop zone unfolded? Seeded from `defaultOpen` on every mount, and
+  // deliberately never remembered.
   //
-  // The uploader is a half-screen panel sitting at the top of Sell, above the
-  // drafts strip and the whole listing manager — so a seller who came to Sell
-  // to look at what they are already selling had to scroll past a box asking
-  // for photos first, every single visit. Folded, it is one line, and the
-  // lists are where the screen starts. "Open, like last time" would be the
-  // same trap the cutout toggle above documents: a decision made on another
-  // visit, re-applied to this one without being asked — and re-opening itself
-  // on arrival is precisely what this fold exists to stop.
+  // The fold was an answer to a screen that no longer exists. This panel used
+  // to sit at the top of "Sell", above the drafts strip AND the whole listing
+  // manager, so a seller who came to look at what they were already selling
+  // scrolled past a box asking for photos first, every single visit — folded,
+  // it was one line and the lists were where the screen started. Splitting
+  // Sell into List and Manage answers that properly: the lists have their own
+  // tab, so on List the box can be the box again, and `defaultOpen` says so.
   //
-  // The exception is the one arrival that asked for this panel and nothing
-  // else: the dashboard's create-a-listing buttons, which set the store's
-  // one-shot `openUploaderRef` on their way here (see startNew). That is a
-  // decision made seconds ago about THIS visit, not a remembered one — the
-  // seller pressed a button whose whole promise is a box to put photos in,
-  // and it opens showing them that box. Every other door into Sell — the nav,
-  // the top bar, a deep link into the lists — leaves the flag false and lands
-  // folded.
+  // This is where #333's `openUploaderRef` went. That flag existed to make
+  // ONE arrival open — the dashboard's create-a-listing buttons, whose whole
+  // promise is a box to put photos in — while the nav, the top bar and a deep
+  // link stayed folded. The List tab keeps that promise for every door now,
+  // so the flag had nothing left to decide: the only place this component
+  // renders passes `defaultOpen`, and a one-shot that can never change an
+  // outcome is just a comment insisting on an invariant that has stopped
+  // being true.
   //
-  // The read below is a mount-time snapshot, which is the one read of a ref
-  // during render that is not the bug react-hooks/refs describes: the flag
-  // cannot change while this component is mounted (the only writers are the
-  // navigation that mounted it, and the effect underneath), so there is no
-  // later value for a render to miss. Deriving the fold from context state
-  // instead would make it a preference that outlives its visit, which is the
-  // thing this must not become. The initializer is pure — it spends nothing,
-  // so StrictMode running it twice reads the same flag twice.
-  // eslint-disable-next-line react-hooks/refs -- deliberate: see the note above
-  const [open, setOpen] = useState(() => openUploaderRef.current === true);
-  // And spent here, once the panel is really on screen, rather than in the
-  // initializer above. What must not happen is the flag outliving the arrival
-  // that set it and unfolding some later visit the seller made for the lists.
-  useEffect(() => { openUploaderRef.current = false; }, [openUploaderRef]);
+  // The fold itself stays, for the seller who has scrolled or wants the
+  // drafts up — it is just no longer the arrival state. What must NOT come
+  // back is remembering it: "open, like last time" is the same trap the
+  // cutout toggle above documents, a decision made on another visit
+  // re-applied to this one without being asked.
+  const [open, setOpen] = useState(defaultOpen);
   const [busy, setBusy] = useState(false);
   // Select mode: pick several photos out of the pile and drop them in one go.
   // A per-tile trash is one tap for one wrong photo, and forty taps for the
