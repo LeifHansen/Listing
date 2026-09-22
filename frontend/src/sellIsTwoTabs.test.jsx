@@ -181,7 +181,7 @@ describe("the nav", () => {
     const thumb = bars[bars.length - 1];
     const labels = [...thumb.querySelectorAll("button")]
       .map((b) => b.getAttribute("aria-label"));
-    expect(labels).toEqual(["Home", "Manage", "List", "Shop", "Settings"]);
+    expect(labels).toEqual(["Home", "Shop", "List", "Manage", "Settings"]);
   });
 });
 
