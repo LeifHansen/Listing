@@ -13,12 +13,17 @@ class _Provider:
     key = "fake"
     label = "Fake"
 
-    def __init__(self, ready=True, pending=None, note=None):
+    def __init__(self, ready=True, pending=None, note=None,
+                 unverified=None, unverified_note=None):
         self._ready = ready
         if pending is not None:
             self.access_pending = pending
         if note is not None:
             self.access_pending_note = note
+        if unverified is not None:
+            self.access_unverified = unverified
+        if unverified_note is not None:
+            self.access_unverified_note = unverified_note
 
     def oauth_ready(self):
         return self._ready
@@ -62,3 +67,44 @@ def test_the_anonymous_caller_is_passed_through_to_the_provider():
     p = _Provider(pending=lambda uid: (seen.append(uid), True)[1], note="wait")
     assert marketplaces.access_pending(p, None) == (True, "wait")
     assert seen == [None]
+
+
+# --- "the marketplace decides, and we can't say which way" ------------------
+# The third answer: not pending (we have no grounds to refuse) and not
+# cleared either (nothing here knows who the marketplace accepts). It must
+# not turn into a refusal — the seller is usually the account that works —
+# but it must not stay silent either, because the refusal it precedes happens
+# off-site with no callback.
+
+def test_a_provider_that_does_not_opt_in_is_never_unverified():
+    assert marketplaces.access_unverified(_Provider()) == (False, "")
+
+
+def test_unverified_returns_the_note_the_seller_reads_before_leaving():
+    note = "Etsy may turn you away."
+    p = _Provider(unverified=lambda: True, unverified_note=note)
+    assert marketplaces.access_unverified(p) == (True, note)
+
+
+def test_unconfigured_beats_unverified():
+    """Same precedence as access_pending: with no credentials the Connect
+    button does nothing at all, and the missing-env explainer says so."""
+    p = _Provider(ready=False, unverified=lambda: True, unverified_note="w")
+    assert marketplaces.access_unverified(p) == (False, "")
+
+
+def test_unverified_is_asked_without_a_user():
+    """It exists precisely because the deployment cannot tell sellers apart,
+    so taking a uid would imply an answer it does not have."""
+    seen = []
+    p = _Provider(unverified=lambda: (seen.append(1), True)[1])
+    assert marketplaces.access_unverified(p) == (True, "")
+    assert seen == [1]
+
+
+def test_a_provider_can_be_pending_for_one_seller_and_never_unverified():
+    """The two are alternatives, not layers: a roster that can name a seller
+    as blocked is a roster, so there is nothing left to be unsure about."""
+    p = _Provider(pending=lambda uid: uid != "owner", note="wait")
+    assert marketplaces.access_pending(p, "stranger") == (True, "wait")
+    assert marketplaces.access_unverified(p) == (False, "")

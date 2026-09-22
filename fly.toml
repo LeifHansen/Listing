@@ -46,7 +46,10 @@ primary_region = 'sjc'
   # (OAUTH_ORIGIN + /api/etsy/callback, registered on the Etsy app exactly)
   # and ETSY_OWNER_EMAILS — the beta roster below. Missing any of the first
   # three, the Etsy card says which; missing the roster, the gate is inert
-  # and every seller is sent to Etsy's own refusal page.
+  # and every seller reaches Etsy's own refusal page. That last one is
+  # warned about rather than silent now (config_warnings, and a caution plus
+  # a confirm on the Etsy card) — but the warning is not the fix, the roster
+  # is.
   MARKETPLACES_ENABLED = 'ebay,etsy'
   # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
   # handful of shops (Etsy documents 4), not the unlimited Commercial Access

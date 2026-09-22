@@ -75,6 +75,36 @@ class EtsyProvider:
         user = db.get_user_by_id(uid) if uid else None
         return config.etsy_access_pending((user or {}).get("email", ""))
 
+    # The gap the gate above leaves behind. With no roster configured it
+    # stands down — rightly, since it cannot tell the owner from anyone else
+    # and guessing locks the operator out of their own shop — and the result
+    # is that Etsy's wall is still up while nothing here holds anyone back.
+    # Every seller walks into it, and Etsy's refusal never redirects back, so
+    # this app cannot even apologise afterwards.
+    #
+    # So the honest move is to spend the one moment we still have them: say
+    # what Etsy is about to do and what it means, then let them go anyway.
+    # Letting them go is the point — on a deploy with no roster the person
+    # pressing Connect is most likely the owner, for whom it simply works.
+    @property
+    def access_unverified_note(self) -> str:
+        if config.etsy_access_tier() == "personal":
+            return ("Etsy has approved this app for a limited number of "
+                    "shops, and nothing here records which — so we can't tell "
+                    "whether yours is one of them. If Etsy stops you with "
+                    "\u201cOnly the app owner may authorize a seller app\u201d, "
+                    "your shop isn't seated yet; there's nothing to fix on "
+                    "your side.")
+        return ("Etsy hasn't approved this app for other shops yet, so Etsy "
+                "only lets the account that registered it connect. If that's "
+                "you, make sure you're signed in to Etsy as that account "
+                "first. Anyone else is stopped on Etsy's own page with "
+                "\u201cOnly the app owner may authorize a seller app\u201d \u2014 "
+                "that's Etsy's wall, not a problem with your shop.")
+
+    def access_unverified(self) -> bool:
+        return config.etsy_access_unverified()
+
     # --- configuration / connection -------------------------------------
     def oauth_ready(self) -> bool:
         return config.etsy_oauth_ready()

@@ -146,3 +146,31 @@ def access_pending(provider: MarketplaceProvider,
     if not callable(check) or not check(uid):
         return False, ""
     return True, getattr(provider, "access_pending_note", "")
+
+
+def access_unverified(provider: MarketplaceProvider) -> tuple[bool, str]:
+    """(is the marketplace's wall still up with nobody here to vouch, note).
+
+    The third answer between access_pending()'s two. Pending means "we know
+    this seller is not allowed through"; not pending normally means "we know
+    they are". This is the case where the deployment knows neither: the
+    marketplace still restricts who may authorize, and nothing here records
+    who — so the seller is sent out to find out from the marketplace, on a
+    page that never redirects back.
+
+    Not a refusal, unlike access_pending(). The seller may well be the one
+    account that works (on a deploy with no roster they usually are), and
+    turning them away would be the worse guess. It drives a caution shown
+    before the redirect, so the marketplace's refusal arrives as a named
+    outcome with a next step instead of a dead end.
+
+    Not per-user either, for the same reason it exists: if the deployment
+    could tell these sellers apart, access_pending() would already be
+    answering. Providers opt in with an access_unverified() method.
+    """
+    if not provider.oauth_ready():
+        return False, ""     # "not set up" is a different story, told first
+    check = getattr(provider, "access_unverified", None)
+    if not callable(check) or not check():
+        return False, ""
+    return True, getattr(provider, "access_unverified_note", "")
