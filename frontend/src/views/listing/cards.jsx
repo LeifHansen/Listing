@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
   AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag, Eye,
+  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag,
   Video as VideoIcon,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
@@ -19,7 +19,7 @@ import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
-import { reviewAspectCount, specificRowIndex } from "./specifics";
+import { specificRowIndex } from "./specifics";
 import { WorkflowCard } from "./WorkflowCard";
 import { PhotoTile } from "./PhotoTile";
 import {
@@ -732,7 +732,6 @@ function AspectChecklist({ w, a }) {
     (s) => s.name.trim().toLowerCase() === a.name.trim().toLowerCase()
       && (s.value || "").trim());
   const row = rows.find((s) => s.confidence === "medium") || rows[0] || null;
-  const unreviewed = row?.confidence === "medium";
   const missing = a.required && selected.length === 0;
   // Values the listing holds that eBay doesn't offer here (a seller's own, or
   // a category change) still get a box — otherwise they'd be invisible and
@@ -760,16 +759,6 @@ function AspectChecklist({ w, a }) {
                 : "tick all that apply"}
           </span>
           <ConfidenceMark row={row} />
-          {unreviewed && (
-            <button
-              type="button"
-              onClick={() => w.confirmSpecific(a.name)}
-              title={`Confirm these ${a.name} selections are correct`}
-              className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning-soft px-1.5 py-px text-[11px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
-            >
-              <Check size={10} aria-hidden /> Looks right
-            </button>
-          )}
           {missing && (
             <span className="text-[12px] font-semibold text-warning">Required</span>
           )}
@@ -914,7 +903,6 @@ export function SpecificsCard({ w }) {
     || (a.name.trim().toLowerCase() === "brand" && (w.form.brand || "").trim()));
   const missingRequired = required.filter((a) => !isFilled(a)).length;
   const recommendedFilled = recommendedAll.filter(isFilled).length;
-  const reviewCount = reviewAspectCount(w.form.item_specifics);
 
   const setRow = (i, key, value) => {
     const specs = [...w.form.item_specifics];
@@ -984,23 +972,16 @@ export function SpecificsCard({ w }) {
     const refusedHere = refusedNames.has(a.name.trim().toLowerCase());
     const ringCls = refusedHere ? "ring-2 ring-error/70"
       : missing ? "ring-2 ring-warning/60" : undefined;
-    // An inference the seller hasn't looked at yet. This is the one thing in
-    // the card that can put a WRONG value on a live listing, so it gets the
-    // only interactive affordance on a field label: read it, tap ✓, done.
-    const unreviewed = row?.confidence === "medium" && (shown || "").trim();
+    // The ⚠ on an inferred value is a MARK, not a task. It used to carry a
+    // "Looks right" button beside it, and the button was the whole problem:
+    // a draft came out of generation with twenty of them, and clearing the
+    // flags meant twenty taps that changed nothing about the listing. The
+    // seller's job here is to read the fields and correct what's wrong —
+    // typing over a value is what says they looked, and it already clears
+    // the mark (see setRow).
     const badge = (
       <span className="inline-flex items-center gap-1.5">
         <ConfidenceMark row={row} />
-        {unreviewed && (
-          <button
-            type="button"
-            onClick={() => w.confirmSpecific(a.name)}
-            title={`Confirm "${shown}" is correct`}
-            className="inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning-soft px-1.5 py-px text-[11px] font-bold text-warning cursor-pointer hover:border-warning transition-colors"
-          >
-            <Check size={10} aria-hidden /> Looks right
-          </button>
-        )}
         {refusedHere ? (
           <span className="text-[12px] font-semibold text-error">
             {saidByEbay ? "eBay refused this" : "Fix this to publish"}
@@ -1079,8 +1060,7 @@ export function SpecificsCard({ w }) {
                 ? "worth filling so buyers' filters find it"
                 : "eBay blocks the publish until they're filled")
             : "")
-          + (reviewCount ? ` · ${reviewCount} AI guess${reviewCount === 1 ? "" : "es"} to check (doesn't block publishing)` : "")
-          + ". A wrong specific is worse than a missing one, so check anything flagged."
+          + ". Change anything that's wrong — a ⚠ marks a value the AI inferred rather than read."
         : "Details buyers filter by — only the required ones gate publishing"}
       state={w.completion.specifics} flagged={w.fixTarget === "specifics"}
       expand={refused.length > 0}
@@ -1114,16 +1094,15 @@ export function SpecificsCard({ w }) {
             ))}
           </div>
         )}
-        {/* What still needs a human, in two banners rather than one.
+        {/* One banner, and it is about the one thing that stops a publish.
 
-            These are the card's two jobs and they are NOT the same job: an
-            empty required aspect stops the listing reaching eBay, while an
-            unreviewed AI guess publishes perfectly well and is merely likely
-            to be wrong. They shared one amber box, which made "eBay will
-            reject this" and "give this a glance" indistinguishable — the
-            seller either treated both as urgent or learned to ignore both.
-            Amber is now reserved for the blocker; the review nudge is blue,
-            and says out loud that it isn't holding anything up. */}
+            There used to be a second, blue one counting the AI's guesses and
+            offering "I've read them all" — a button whose entire effect was
+            to clear its own count. A draft arrives here filled in end to
+            end, and a seller cannot un-see what the fields say; asking them
+            to declare that they looked was bookkeeping, and every tap of it
+            was a tap that changed nothing about the listing. The ⚠ mark on
+            an inferred value stayed, because that one is information. */}
         {missingRequired > 0 && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-warning/40 bg-warning-soft px-3.5 py-2.5">
             <AlertTriangle size={16} className="text-warning shrink-0" aria-hidden />
@@ -1138,32 +1117,6 @@ export function SpecificsCard({ w }) {
                 : " — eBay won't accept the listing until "
                   + (missingRequired === 1 ? "it's filled in" : "they're filled in")}
             </span>
-          </div>
-        )}
-        {reviewCount > 0 && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-blue/35 bg-blue-soft px-3.5 py-2.5">
-            <Eye size={16} className="text-blue shrink-0" aria-hidden />
-            <span className="text-[13px] text-ink flex-1 min-w-0">
-              <strong className="font-bold">{reviewCount} AI {reviewCount === 1 ? "guess" : "guesses"}</strong>
-              {" to check — nothing blocking, but a wrong specific is worse than a missing one"}
-            </span>
-            {reviewCount > 1 && (
-              // Still offered LAST, and still worded as a claim the seller is
-              // making rather than an instruction — one tap that accepts
-              // everything is how a wrong value reaches a live listing. What
-              // it is no longer is hard to find: it was a grey underlined
-              // link at the end of a sentence, which read as a footnote on
-              // the banner it sits in, and a seller who has genuinely read
-              // twelve guesses should not have to hunt for the way to say so.
-              // Solid against the banner's soft blue, so it is unmistakably
-              // the control here without becoming the page's primary action.
-              <Button
-                variant="primary" size="sm" className="shrink-0"
-                onClick={w.confirmAllSpecifics}
-              >
-                <Check aria-hidden /> I've read them all
-              </Button>
-            )}
           </div>
         )}
 
@@ -1271,25 +1224,18 @@ export function SpecificsCard({ w }) {
 
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-0.5">
           <span className="inline-flex flex-wrap items-center gap-2">
-            {/* No "Fill N with AI" here. The AI reads this listing's photos
-                against eBay's whole aspect list at generation — required and
-                recommended alike (useListingForm's autofill effect, and the
-                server's own pass behind it) — so by the time this card is on
-                screen the fill has already happened and the fields it left
-                blank are the ones the photos could not answer. A button
-                offering to do it again read as "N fields are waiting for the
-                AI", which was never true: it charged a token to re-run the
-                same vision pass and came back "nothing new to add".
-                What IS left for the seller here is checking the guesses — the
-                ⚠ flags, "Looks right" on one, "I've read them all" for the
-                lot — and writing in what the photos couldn't answer.
-
-                A listing the fill genuinely hasn't run on (imported from eBay,
-                drafted before its category was settled, a run that errored) or
-                a category change that brings a whole new aspect set still has
-                a way back: "Finish up" runs the same pass over the listing and
-                says what it costs BEFORE spending it, which this button never
-                did. */}
+            {/* No AI button in this card, of any kind. The AI reads this
+                listing's photos against eBay's whole aspect list while the
+                listing is being drafted — required and recommended alike
+                (backend _fill_what_is_left, and useListingForm's autofill
+                effect behind it for the category that only arrives here) —
+                so by the time this card is on screen the fill has already
+                happened, and a field still blank is one the photos could not
+                answer. Both buttons that used to sit here were about work
+                the app had already done: "Fill N with AI" charged a token to
+                re-run the same vision pass, and "I've read them all" cleared
+                its own count. What is left for the seller is reading the
+                fields, changing what's wrong, and publishing. */}
             <Button
               variant="ghost"
               onClick={() => w.set("item_specifics", [...w.form.item_specifics, { name: "", value: "" }])}
@@ -1305,7 +1251,7 @@ export function SpecificsCard({ w }) {
                 <Check size={13} className="text-green" aria-hidden /> AI read it off the item
               </span>
               <span className="inline-flex items-center gap-1">
-                <AlertTriangle size={13} className="text-warning" aria-hidden /> AI guessed — check it
+                <AlertTriangle size={13} className="text-warning" aria-hidden /> AI inferred it
               </span>
             </span>
           )}

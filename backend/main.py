@@ -41,6 +41,7 @@ from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
                objstore, ratelimit, redact, storage)
 from .config import log
 from .marketplaces import ebay_provider
+from .marketplaces import mapping_etsy
 from .marketplaces import state as marketplace_state
 from .marketplaces.base import PublishContext, PublishOutcome
 from .marketplaces.state import STICKY_STATUSES
@@ -1797,6 +1798,101 @@ def _resolve_category_after_research(listing: Listing) -> None:
     if listing.category_id:
         return
     _resolve_category(listing)
+
+
+def _fill_etsy_fields(listing: Listing, uid: Optional[str]) -> None:
+    """Etsy's own three boxes, answered from the item rather than left for a
+    seller to open a dropdown over: its category, when it was made, and who
+    made it.
+
+    Only for a seller who HAS an Etsy shop connected. For everyone else these
+    fields are not unanswered, they are irrelevant — and the category lookup
+    behind them is a model call that would be spent on every draft in the app
+    to fill a card the seller never sees.
+
+    `when_made` is READ, never assumed: crosspost.when_made_from finds a
+    decade or a year in the item's own specifics and title, and answers ""
+    when the listing does not say. `who_made` follows it, and only when the
+    answer is vintage. Etsy allows handmade, vintage (20+ years) and craft
+    supplies and nothing else, so "someone else made it" on an item that is
+    NOT vintage is an attestation that the listing breaks Etsy's rules
+    (mapping_etsy.needs_production_partner spells that out) — which is
+    precisely the silent default EtsyFields was written to avoid. An item the
+    photos cannot date leaves both blank for the seller, who owns it and
+    knows.
+
+    Never raises and never overwrites: everything here fills a blank.
+    """
+    if not uid or (listing.etsy.taxonomy_id and listing.etsy.when_made):
+        return
+    try:
+        provider = marketplaces.get("etsy")
+        if provider is None or not provider.creds_for(uid):
+            return
+    except Exception as exc:  # noqa: BLE001 - a shop lookup is not the draft
+        log.info("etsy fill skipped (no shop read): %s", exc)
+        return
+    if not listing.etsy.when_made:
+        listing.etsy.when_made = crosspost.when_made_from(listing)
+    if not listing.etsy.who_made and mapping_etsy.is_vintage(listing.etsy.when_made):
+        listing.etsy.who_made = "someone_else"
+    if not listing.etsy.taxonomy_id:
+        try:
+            listing.etsy.taxonomy_id = int(
+                etsy_service.suggest_taxonomy(listing).get("taxonomy_id") or 0)
+        except Exception as exc:  # noqa: BLE001 - best-effort, like every fill here
+            log.info("etsy category fill skipped: %s", exc)
+    log.info("etsy fill: taxonomy=%s when_made=%s who_made=%s",
+             listing.etsy.taxonomy_id, listing.etsy.when_made or "-",
+             listing.etsy.who_made or "-")
+
+
+def _fill_what_is_left(listing: Listing, image_paths: list,
+                       uid: Optional[str] = None, tags: list = None,
+                       progress=None) -> Optional[int]:
+    """The last pass of drafting: fill every field still blank that the item
+    itself can answer, so the draft that reaches the editor is finished.
+
+    This used to be a button. "Finish up" sat above Publish offering to read
+    the listing's photos and fill in what eBay asks for -- a second pass the
+    seller had to know to press, over a draft the app had just spent a minute
+    and several model calls making. Nobody wants a listing that is nearly
+    drafted. So the pass runs HERE, at the end of drafting, where nothing is
+    in its way: the photos are on the volume, the research has settled the
+    title, and the category lookup has had its second attempt at a number.
+
+    Two things are left by then, and they are left for the same reason --
+    they need the category, and the category may only have arrived a moment
+    ago (`_resolve_category_after_research`):
+
+      * the category's item specifics and the maker check. The first
+        enrichment ran BEFORE research and returns None when there was no
+        category to ask eBay about, which is exactly the draft whose
+        specifics all stayed blank. Run again, it fills them; run on a draft
+        that was already enriched, `enriched_at` stands it down and nothing
+        is spent twice.
+      * Etsy's category and attribution, for a seller who sells there.
+
+    Returns what the enrichment added (None when it did not run), so the
+    caller can report whether the draft reached the editor filled in.
+    NEVER raises: a draft that is merely incomplete must still be a draft.
+    """
+    added = None
+    try:
+        if not listing.enriched_at and listing.category_id:
+            added = _enrich_listing(listing, image_paths, tags=tags,
+                                    progress=progress)
+            if added is not None:
+                _drop_answered_missing_info(listing)
+                log.info("late enrich: category %s arrived after research, "
+                         "added=%d", listing.category_id, added)
+    except Exception as exc:  # noqa: BLE001 - the draft matters, this does not
+        log.warning("late enrich failed: %s", exc)
+    try:
+        _fill_etsy_fields(listing, uid)
+    except Exception as exc:  # noqa: BLE001 - ditto
+        log.warning("etsy fill failed: %s", exc)
+    return added
 
 
 def _tag_text_for(paths: list, aspects: list[dict]) -> str:
@@ -6574,80 +6670,6 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
             "added": added, "enriched_at": listing.enriched_at}
 
 
-@app.post("/api/enrich/{session_id}")
-def enrich_listing(session_id: str, req: PublishRequest, request: Request) -> dict:
-    """Fill in everything this ONE listing can still be filled in with, from
-    its own photos — the last step before it is published.
-
-    This is "Enrich all" (the dashboard's bulk fill, /api/listings/enrich)
-    applied to a single draft, and deliberately on THIS side of the publish.
-    There, the same work has to land on a listing eBay is already showing:
-    the record has to carry a category eBay agrees with, its photos have to
-    still be on the server (an imported listing's live on eBay and have to be
-    downloaded first), the seller has to be connected, and the fill then has
-    to survive a ReviseItem — every one of which is a way for it to come back
-    "skipped" with the blanks still blank. A draft has none of those
-    problems: nothing is live yet, the photos are right here, and the answer
-    is saved locally.
-
-    What it fills, in one pass:
-      * an eBay category, when the draft has none (specifics are per
-        category, so nothing else can run until this is settled);
-      * every category item specific the photos can answer — required ones
-        first — chosen from eBay's own allowed values;
-      * the maker/brand, double-checked against the photos.
-    Anything the seller already wrote is left exactly as it is: this only
-    ever fills blanks.
-
-    Takes the listing in the request body rather than reading the saved copy,
-    so edits still open in the editor are enriched (and are not overwritten
-    by an older save).
-
-    Runs as a JOB, like identify and the dashboard's bulk fill, and for the
-    same reason: one vision call over up to eight photos plus a maker check
-    is routinely longer than the 90 seconds the client waits on a request,
-    and longer than the proxy in front of this server holds one open. Run in
-    the request, the fill kept finishing and saving on the server after the
-    editor had already reported "Couldn't fill in the details" -- which is
-    how a working feature came to be reported as one that does not work.
-    Everything that can refuse does so here, before the charge; the answer
-    -- the whole listing for the form to adopt, plus what was filled -- is
-    the job's result, polled at /api/bulk/status/{job_id}.
-    """
-    if not config.anthropic_ready():
-        raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    _assert_session_owner(session_id, request)
-    listing = req.listing
-    # A missing category is a blocker the seller would otherwise have to go
-    # and clear by hand before this could do anything — and the same
-    # best-effort resolve a fresh draft gets can usually settle it. Done
-    # BEFORE the charge: an enrichment with no category has nothing to fill
-    # and must not be billed for finding that out.
-    if not listing.category_id:
-        _resolve_category(listing)
-    if not listing.category_id:
-        raise HTTPException(
-            400, "Pick an eBay category first — the details eBay asks for "
-                 "depend on it.")
-    paths = _photos_for_fill(session_id, listing)
-    if not paths:
-        raise HTTPException(400, _NO_PHOTOS)
-    spent = _charge_ai(request, "specifics")
-    uid = _uid(request)
-    job_id = storage.new_session_id()
-    jobstore.register(job_id, {
-        "id": job_id, "kind": "enrich_one", "phase": "specifics", "done": False,
-        "error": None, "session_id": session_id,
-        # The charge, while it is outstanding: a restart mid-fill pays it
-        # back the way it does for every other job (see _settle_interrupted_jobs).
-        "_refunds": tokens.receipts(spent) if spent else None,
-    }, uid=uid)
-    threading.Thread(target=_run_single_enrich_job,
-                     args=(job_id, session_id, listing, paths, uid, spent),
-                     daemon=True).start()
-    return {"job_id": job_id, "running": True}
-
-
 def _specifics_filled(before: list[tuple[str, str]], before_brand: str,
                       listing: Listing) -> list[dict]:
     """What a fill actually wrote: the name/value pairs on the listing now
@@ -6665,65 +6687,6 @@ def _specifics_filled(before: list[tuple[str, str]], before_brand: str,
     if brand and brand.lower() != (before_brand or "").strip().lower():
         out.insert(0, {"name": "Brand", "value": brand})
     return out[:40]
-
-
-def _run_single_enrich_job(job_id: str, session_id: str, listing: Listing,
-                           paths: list, uid: Optional[str], spent) -> None:
-    """Background worker for the editor's "Fill in details" -- the body the
-    route above used to run in the request. Saves the way every other save
-    saves and reports the whole listing back, plus what it filled."""
-    try:
-        before = [(s.name, s.value) for s in listing.item_specifics]
-        before_brand = listing.brand or ""
-        try:
-            added = _enrich_listing(listing, paths)
-        except Exception as exc:  # noqa: BLE001 - the charge must not outlive it
-            tokens.refund(spent)
-            _code, message = claude_ai.ai_error_message(exc)
-            log.warning("enrich failed (session=%s): %s", session_id, exc)
-            _bulk_set(job_id, _refunds=None, done=True, phase="failed",
-                      error=message)
-            return
-        if added is None:
-            # Never ran -- no taxonomy, no model, or no aspects published for
-            # this category. `_enrich_listing` swallows its own failures, so
-            # this is the return value rather than an exception, and nothing
-            # was earned.
-            tokens.refund(spent)
-            _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
-                "The AI couldn't read eBay's details for that category -- "
-                "nothing was filled in, and nothing was charged."))
-            return
-        # Blanks the fill has now answered stop asking. Same rule the bulk
-        # enrich applies, so a draft filled here and one filled from the
-        # dashboard end up in the same state.
-        settled = _drop_answered_missing_info(listing)
-        filled = _specifics_filled(before, before_brand, listing)
-        # Saved the way every other save saves. _restore_server_state is not
-        # optional bookkeeping here: it keeps the client's copy of the
-        # server-owned publish state from erasing the real one, and it marks
-        # what changed. A listing that is ALREADY live is revised with only
-        # its dirty fields, so specifics filled in here and left unmarked
-        # would be saved locally and never reach eBay when the seller presses
-        # Update -- the exact silence _enrich_one had to mark_dirty around,
-        # avoided by going through the same path a save does.
-        prev = _restore_server_state(session_id, listing)
-        storage.save_listing(session_id, listing)
-        db.upsert_listing(session_id, listing.model_dump(),
-                          status=_sticky_status(prev), user_id=uid)
-        log.info("enrich: session=%s added=%d settled=%d filled=%s", session_id,
-                 added, settled, ", ".join(f["name"] for f in filled) or "-")
-        _bulk_set(job_id, _refunds=None, done=True, phase="done", result={
-            "listing": listing.model_dump(), "added": added,
-            "settled": settled, "filled": filled})
-    except Exception as exc:  # noqa: BLE001 - the job must always answer
-        tokens.refund(spent)
-        reference = _support_reference()
-        log.warning("enrich job %s failed for session=%s [%s]: %s",
-                    job_id, session_id, reference, exc)
-        _bulk_set(job_id, _refunds=None, done=True, phase="failed", error=(
-            "We couldn't finish filling this in. Try again in a moment -- if "
-            f"it keeps happening, quote {reference} to support."))
 
 
 def _taxonomy_guard(request: Request) -> None:
@@ -7014,176 +6977,6 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
         raise errors.StorageUnavailable(
             "Couldn't save that change just now. Try again in a moment.")
     return {"ok": True, "listing": data}
-
-
-def _confirm_specific_aspects(listing: Listing, aspects: list) -> int:
-    """Accept the AI's guess at each named aspect, on the rows stored HERE.
-
-    The browser's specifics.js draws the ⚠ review flag per ASPECT and clears
-    it per aspect (reviewAspectCount / confirmSpecificRows); this is the same
-    two rules on the server, applied to whatever rows the listing is holding
-    at the moment the seller pressed ✓:
-
-      - clearing the flag means `confidence = ""` on EVERY row with that
-        name, because one aspect can own several (eBay's multi-selects are
-        tick boxes, so four ticked values are one thing to look at);
-      - a value sent with the aspect is the seller correcting the guess, and
-        it lands on the aspect's ANSWER row — the first one carrying a value,
-        not simply the first one with the name. Empty leftovers accumulate
-        beside a real answer (a cleared field leaves its row behind), and a
-        writer that stopped at the first row would fill the leftover and
-        leave the answer it meant to replace sitting underneath it.
-
-    Names that match no stored row are appended only when they carry a value:
-    a ✓ on an aspect this listing no longer has is nothing to record.
-
-    Returns how many aspects actually changed.
-    """
-    changed = 0
-    for entry in aspects:
-        name = str((entry or {}).get("name") or "").strip()
-        if not name:
-            continue
-        key = name.lower()
-        value = str((entry or {}).get("value") or "").strip()
-        rows = [i for i, s in enumerate(listing.item_specifics)
-                if s.name.strip().lower() == key]
-        if not rows:
-            if value:
-                listing.item_specifics.append(
-                    ItemSpecific(name=name, value=value, confidence=""))
-                changed += 1
-            continue
-        touched = False
-        if value:
-            # The answer row, by the same rule specificRowIndex uses.
-            answer = next((i for i in rows
-                           if (listing.item_specifics[i].value or "").strip()),
-                          rows[0])
-            if (listing.item_specifics[answer].value or "").strip() != value:
-                listing.item_specifics[answer].value = value
-                touched = True
-        for i in rows:
-            if (listing.item_specifics[i].confidence or "").strip():
-                listing.item_specifics[i].confidence = ""
-                touched = True
-        if touched:
-            changed += 1
-    return changed
-
-
-@app.post("/api/listings/{session_id}/specifics/confirm")
-def confirm_specifics(session_id: str, payload: dict, request: Request) -> dict:
-    """Mark AI-guessed item specifics as read — from wherever the seller is.
-
-    The draft cards carry a "N to review" chip: the specifics the AI inferred
-    rather than read off the item, which publish perfectly well and are merely
-    the ones most likely to be wrong. Clearing that chip meant opening the
-    listing, and a seller working a grid of twenty fresh drafts was making
-    twenty round trips into the editor to answer twenty times that the guess
-    was fine. This is that answer, given from the card.
-
-    The payload names ASPECTS, never the specifics list:
-
-        {"aspects": [{"name": "Brand"}, {"name": "Colour", "value": "Navy"}]}
-
-    which is the same discipline as PATCH /api/listings/{id} above and for
-    the same reason. A card holds the copy of the listing that the last
-    /api/listings load handed it. Were it to send `item_specifics` back
-    wholesale, every row the AI filled in since — an "Enrich all" running in
-    the background, an edit made in the editor in another tab — would be
-    erased by that older copy the moment somebody pressed ✓ on one aspect.
-    Naming the aspects lets the server apply the ✓ to the rows it is holding
-    NOW, so there is no stale copy anywhere in the exchange.
-
-    Written under the row lock (db.mutate_listing_data) rather than the
-    read-edit-write patch_listing does, because the background writer this
-    races is a real one: "Enrich all" fills specifics on drafts in a worker
-    thread, which is precisely the listing whose guesses the seller is
-    reading. Whichever plain write landed second would erase the other's.
-    """
-    _assert_session_owner(session_id, request)
-    rec = db.get_listing(session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
-        raise HTTPException(404, "Listing not found")
-
-    aspects = [a for a in ((payload or {}).get("aspects") or [])
-               if isinstance(a, dict) and str(a.get("name") or "").strip()]
-    if not aspects:
-        raise HTTPException(
-            400, "Nothing to confirm. Send the aspects you've read, as "
-                 '{"aspects": [{"name": "Brand"}]}.')
-
-    # `read` is the part that matters, and it is NOT "did anything change".
-    # mutate_listing_data answers None for three different things — no
-    # database, no such row, and a write that failed — and _apply adds a
-    # fourth by returning None when there is nothing to change. Only the
-    # first two mean "the locked row was never read", and only those may
-    # fall through to the copy this request loaded. Without the flag, a ✓ on
-    # an aspect the row had already had cleared (by the enrichment thread,
-    # by another tab) came back None, fell through, found the flag still set
-    # on our older copy, and wrote that copy back — reintroducing the lost
-    # update the lock is here to stop, on the one path least likely to be
-    # noticed.
-    state = {"read": False, "changed": 0}
-
-    def _apply(data: dict) -> Optional[dict]:
-        try:
-            listing = Listing(**data)
-        except Exception:  # noqa: BLE001 - a blob we can't parse, we can't edit
-            return None
-        state["read"] = True
-        state["changed"] = _confirm_specific_aspects(listing, aspects)
-        if not state["changed"]:
-            return None
-        # So a revise actually carries a corrected value: eBay is only sent
-        # the fields the seller is known to have edited, and a listing that
-        # goes live later publishes everything anyway.
-        listing.mark_dirty("item_specifics")
-        return listing.model_dump()
-
-    data = (db.mutate_listing_data(
-        session_id, _apply, status=_sticky_status(rec), user_id=_uid(request))
-        if db.enabled() else None)
-    if data is None and state["read"]:
-        # The row WAS read under the lock. Either there was nothing left to
-        # confirm — an answer, not a failure — or the write itself did not
-        # land, which is, and has to be said rather than reported as a save.
-        if state["changed"]:
-            raise errors.StorageUnavailable(
-                "Couldn't save that just now. Try again in a moment.")
-        return {"ok": True, "listing": dict(rec.get("listing") or {}),
-                "confirmed": 0}
-    if data is None:
-        # No database, or no row to lock: the on-disk draft is the listing,
-        # and the copy this request read is the only one there is.
-        merged = dict(rec.get("listing") or {})
-        try:
-            listing = Listing(**merged)
-        except Exception as exc:  # noqa: BLE001 - a bad value is the record's
-            raise HTTPException(
-                400, "That value isn't valid: " + _validation_summary(exc)) from exc
-        state["changed"] = _confirm_specific_aspects(listing, aspects)
-        if state["changed"]:
-            listing.mark_dirty("item_specifics")
-        data = listing.model_dump()
-        if state["changed"]:
-            storage.save_listing(session_id, listing)
-            if db.enabled() and not db.upsert_listing(
-                    session_id, data, status=_sticky_status(rec),
-                    user_id=rec.get("user_id")):
-                raise errors.StorageUnavailable(
-                    "Couldn't save that just now. Try again in a moment.")
-    else:
-        # Keep the on-disk draft in step with the row that was just written.
-        try:
-            storage.save_listing(session_id, Listing(**data))
-        except Exception as exc:  # noqa: BLE001 - the DB row is the truth
-            log.warning("specifics: disk mirror not updated for %s: %s",
-                        session_id, exc)
-    return {"ok": True, "listing": data, "confirmed": state["changed"]}
 
 
 def _listing_image_order(session_id: str,
@@ -8437,6 +8230,11 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
         _resolve_category_after_research(listing)
+        # Same last pass the single-item chain runs, and for the same reason:
+        # the category that only arrived with the researched title still owes
+        # this draft its item specifics, and forty drafts the seller has to
+        # finish one by one is forty times the reason not to leave them.
+        _fill_what_is_left(listing, paths, uid=ctx.uid, tags=result.tags)
         market: dict = {}
         _price_against_comps(listing, ctx.uid, ctx.prefs, market_out=market)
         _price_against_retail(listing, market)
@@ -9289,9 +9087,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # empty. This was `added is not None`, which reported an empty pass as
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
-        result.specifics_autofilled = _specifics_were_filled(added)
         # See the bulk path: a note the fill answered stops being asked here,
-        # not on the next "Fill in details" press.
+        # rather than outliving the pass that answered it.
         _drop_answered_missing_info(result.listing)
         _beat("artwork")
         _lookup_artwork(result.listing, [opt_dir / n for n in names],
@@ -9304,6 +9101,26 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
         _resolve_category_after_research(result.listing)
+        # ...and with a number at last, the specifics pass that had nothing to
+        # ask eBay about gets its turn, along with Etsy's own boxes. The draft
+        # that lands in the editor is FINISHED — there is no second pass for
+        # the seller to find and press.
+        _beat("finishing")
+        # `is not None`, not `or`: the late pass answers 0 for "ran and filled
+        # nothing", which is a different fact from the first pass's None for
+        # "never ran" — and `0 or None` would quietly turn the first back into
+        # the second.
+        late = _fill_what_is_left(result.listing, [opt_dir / n for n in names],
+                                  uid=uid, tags=result.tags, progress=_beat)
+        if late is not None:
+            added = late
+        # Tell the editor whether the server-side fill actually FILLED
+        # anything, so its own autofill effect doesn't re-run (and re-charge)
+        # work that is already done — and does run when every pass came back
+        # empty. This was `added is not None`, which reported an empty pass as
+        # filled and stood the fallback down over a draft with every required
+        # specific still blank.
+        result.specifics_autofilled = _specifics_were_filled(added)
         market: dict = {}
         _price_against_comps(result.listing, uid, prefs, market_out=market)
         _price_against_retail(result.listing, market)

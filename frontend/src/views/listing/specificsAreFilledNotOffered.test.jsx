@@ -1,19 +1,20 @@
 /**
- * The Item specifics card asks the seller to CHECK, never to fill.
+ * The Item specifics card has nothing for the seller to press.
  *
- * The card used to end in "Fill 8 with AI". It read as "eight fields are
- * waiting for the AI", and it was never true: the AI reads this listing's
- * photos against eBay's whole aspect list — required and recommended
- * together — at generation, so by the time the card is on screen the fill has
+ * It used to end in "Fill 8 with AI", which read as "eight fields are waiting
+ * for the AI" and was never true: the AI reads this listing's photos against
+ * eBay's whole aspect list — required and recommended together — while the
+ * listing is being drafted, so by the time the card is on screen the fill has
  * happened and the fields still blank are the ones the photos could not
  * answer. Pressing it spent a token, re-ran the same vision pass, and came
- * back "nothing new to add". It also spent that token with no confirmation at
- * all, which "Finish up" — the card directly below, running the same pass over
- * the same photos — has always asked for first.
+ * back "nothing new to add".
  *
- * What is genuinely left here is review: the AI's guesses carry a ⚠, and the
- * seller clears them one at a time with "Looks right" or in one go with "I've
- * read them all". Those are the card's actions now, and the only ones.
+ * The review controls that replaced it are gone for the mirror-image reason.
+ * "Looks right" on a field and "I've read them all" on the lot cleared a ⚠
+ * and changed nothing else about the listing — bookkeeping the seller had to
+ * click through before a draft felt finished. A draft arrives finished. The
+ * ⚠ stays as a mark on a value the AI inferred rather than read, and the
+ * seller's answer to it is to correct the value or leave it.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -50,8 +51,6 @@ function stub(over = {}) {
     getSpecificValues: () => [],
     set: () => {},
     upsertSpecific: () => {},
-    confirmSpecific: () => {},
-    confirmAllSpecifics: () => {},
     autofillSpecifics: () => {},
     ...over,
   };
@@ -93,8 +92,7 @@ describe("the Item specifics card", () => {
   it("offers nothing to press even when every aspect is blank", async () => {
     // A blank grid is not evidence the AI has not looked — it is what a
     // listing whose photos cannot answer its category looks like AFTER it
-    // has. The way back for one the fill genuinely never reached is "Finish
-    // up", which says what it costs first.
+    // has.
     const text = await mount(stub({ item_specifics: [] }));
     expect(text()).not.toMatch(/with AI/);
   });
@@ -104,17 +102,21 @@ describe("the Item specifics card", () => {
     expect(text()).toContain("Add specific");
   });
 
-  it("asks them to check the guesses instead, all at once...", async () => {
+  it("never asks the seller to declare that they read the guesses", async () => {
     const text = await mount(stub({ item_specifics: AFTER_GENERATION }));
-    expect(text()).toContain("2 AI guesses");
-    expect(text()).toContain("I've read them all");
+    expect(text()).not.toContain("I've read them all");
+    expect(text()).not.toContain("AI guesses");
   });
 
-  it("...or one at a time", async () => {
+  it("...not one at a time either", async () => {
     const text = await mount(stub({
       item_specifics: [{ name: "Colour", value: "Blue", confidence: "medium" }],
     }));
-    expect(text()).toContain("Looks right");
+    expect(text()).not.toContain("Looks right");
+    // The mark itself stays: it is what tells the seller which of the filled
+    // values to look hardest at.
+    expect(host.querySelector('[aria-label="Inferred by the AI — worth a glance"]'))
+      .toBeTruthy();
   });
 
   it("says what a blank box means, now that nothing offers to fill it", async () => {

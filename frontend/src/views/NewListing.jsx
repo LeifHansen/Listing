@@ -21,7 +21,6 @@ import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
 import { ConflictBanner } from "./listing/ConflictBanner";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
-import { FinishUpCard } from "./listing/FinishUpCard";
 import {
   PhotosCard, VideoCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
   ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
@@ -460,10 +459,15 @@ export function Workflow() {
           <ShippingCard w={w} />
           <PromoteCard w={w} />
         </MoreDetails>
-        {/* The last step before Publish: one pass that fills in everything
-            the photos can still answer. (A sold record never reaches here —
-            it returns as a SoldArchive well above.) */}
-        <FinishUpCard w={w} />
+        {/* No "Finish up" card between the details and Publish. It offered
+            one pass over the photos to fill in everything eBay still asks
+            for — over a draft the app had just spent a minute and several
+            model calls making. A listing that arrives nearly finished, with
+            a button admitting it, is not a listing the seller asked for: the
+            pass runs at the end of drafting now (backend
+            _fill_what_is_left), and what reaches this page is filled in.
+            What is left here is reading it, changing what's wrong, and
+            publishing. */}
         <PublishCard w={w} />
       </motion.div>
 

@@ -26,7 +26,6 @@ import { isDraft, keptWhenEnded, listingsView, recentListings, storeTotal }
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
-import { DraftSpecificsReview } from "@/views/listing/SpecificsQuickReview";
 import { storeMirrorView } from "@/lib/storeMirror";
 
 // The signed-out / no-suggestions list. A shared frozen constant so clearing
@@ -944,13 +943,6 @@ export function Dashboard() {
   // it off the end. Same rule, same function, as the grid on the Sell screen.
   const recent = recentListings(items, metricsById);
 
-  // Which of those four has its AI-guess review open — at most one, like the
-  // drafts strip and the listings manager.
-  const [reviewingId, setReviewingId] = useState(null);
-  const toggleReview = useCallback((it) => {
-    setReviewingId((open) => (open === it.id ? null : it.id));
-  }, []);
-
   const quickActions = [
     { label: "Take Photos", icon: Camera, onClick: openUploader, tone: "bg-blue-soft text-blue" },
     { label: "Upload Images", icon: Upload, onClick: openUploader, tone: "bg-green-soft text-green" },
@@ -1212,14 +1204,7 @@ export function Dashboard() {
                   metrics={metricsById[item.id]}
                   /* Rotate a draft's photo from here too — the same control
                      the drafts strip and the listings manager carry. */
-                  onRotate={isDraft(item) ? rotateListingPhoto : undefined}
-                  /* And read off its AI-guessed specifics from here too. */
-                  onReview={isDraft(item) ? toggleReview : undefined}
-                  reviewing={reviewingId === item.id} />
-                {/* What the chip on the card was counting, opened by it. */}
-                {isDraft(item) && reviewingId === item.id && (
-                  <DraftSpecificsReview item={item} className="mt-1.5" />
-                )}
+                  onRotate={isDraft(item) ? rotateListingPhoto : undefined} />
                 {/* The category, on the face of the card and one tap from
                     being fixed — the same control the drafts strip and the
                     bulk queue carry. A wrong category is the AI misfire that
