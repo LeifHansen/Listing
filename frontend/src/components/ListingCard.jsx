@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/badges";
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
-import { reviewAspectCount } from "@/views/listing/specifics";
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
 import { buyerWaiting, keptWhenEnded } from "@/lib/listingsView";
 
@@ -234,52 +233,6 @@ function NeedsInfoChip({ className, title }) {
   );
 }
 
-// The count of AI-inferred specifics still waiting for a glance — a label on
-// its own, and a CONTROL wherever the caller gave it somewhere to go
-// (`onReview`, below). It was the one number on a draft card that named work
-// the seller could only do somewhere else: read it here, answer it two
-// screens away, come back. As a button it opens that answer on the card.
-function ReviewChip({ count, className, onClick, open, compact }) {
-  const chip = cn(
-    "inline-flex items-center gap-1 rounded-full bg-yellow-soft border border-warning/30",
-    "px-2 py-0.5 text-[11px] font-bold text-warning whitespace-nowrap", className);
-  const inside = (
-    <>
-      <AlertTriangle size={11} className="shrink-0" aria-hidden />
-      <span>{count}</span>
-      {/* `compact` is the list row's controls, where this chip shares a
-          phone's width with the rotate, skip and start-over buttons: the
-          words are dropped below sm so the row keeps its title, and the
-          accessible name below carries them at every width regardless. */}
-      <span className={cn(compact && "hidden sm:inline")}>to review</span>
-    </>
-  );
-  if (!onClick) {
-    return (
-      <span className={chip}
-        title="AI-inferred item specifics worth a glance before publishing">
-        {inside}
-      </span>
-    );
-  }
-  return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); onClick(); }}
-      aria-expanded={!!open}
-      aria-label={`Review ${count} AI-inferred item specific${count === 1 ? "" : "s"}`}
-      title={open
-        ? "Hide the AI's guesses"
-        : "Read the AI's guesses and tick them off — right here, without opening the listing"}
-      className={cn(chip, "cursor-pointer transition-colors duration-150",
-        "hover:border-warning/60 hover:bg-warning-soft",
-        open && "border-warning/70 bg-warning-soft")}
-    >
-      {inside}
-    </button>
-  );
-}
-
 // What it actually went for. An accepted offer settles BELOW the asking price
 // and eBay never moves the listing's own price, so a sold card showing `price`
 // was showing what was asked. The ask stays visible, struck through, with how
@@ -376,11 +329,6 @@ function turnStyle(spin, square) {
 // not happen. Callers pass it for drafts: the corner it takes on the tile is
 // the origin badge's once a listing has been on eBay, and a live listing's
 // photos are already eBay's copy anyway.
-// `onReview(item)` turns the "N to review" chip into a button: the caller
-// opens its own review panel (views/listing/SpecificsQuickReview) under the
-// card and reports back through `reviewing`. A sibling of the card button
-// like every other control here, never nested in it — a button inside a
-// button is invalid HTML and drops out of the tab order.
 // `needsInfo` paints the whole card amber: this listing will not reach eBay
 // until something on it is filled in. See the cardClass comment below.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
@@ -391,25 +339,17 @@ function turnStyle(spin, square) {
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
-  onReview, reviewing,
   showEbayChip = false,
   layout = "grid", className,
 }) {
   const list = layout === "list";
   const l = item.listing || {};
   const draft = item.status === "draft" || item.status === "dry_run";
-  // Drafts with AI-inferred specifics awaiting a glance get a ⚠ count chip —
-  // review those fields and the draft is publish-ready.
-  const reviewCount = draft ? reviewAspectCount(l.item_specifics) : 0;
-  // One or the other, never both: "3 to review" is advice, and it must not
-  // sit next to (or in place of) the reason eBay is refusing the listing
-  // outright. Held here so the tile, the row and the overlay below cannot
-  // come to three different answers about which chip this card is showing.
-  const showReview = reviewCount > 0 && !needsInfo;
-  // ...and whether that chip is a button. When it is, it has to leave the
-  // card's own button and be rendered beside it (see the wrapper below), so
-  // the in-card chip stands down rather than drawing a second copy.
-  const reviewControl = showReview && !!onReview;
+  // No "N to review" chip here any more. It counted the item specifics the
+  // AI had inferred rather than read, and every one of them was already on
+  // the draft and already publishable — so the number named no work, only a
+  // round trip to tick it away. A draft arrives filled in; what the seller
+  // does with it is publish it or change it.
   // How sure the AI was of what this IS when it drafted it (see
   // badges.ConfidenceChip). Drafts only: once a listing is live the seller
   // has stood behind it, and the AI's doubts about the first draft are not
@@ -588,22 +528,9 @@ export const ListingCard = memo(function ListingCard({
     </button>
   );
 
-  // The review chip as a control, for wherever the layout puts it. In the
-  // grid it keeps the photo corner it already had; in a list row it joins the
-  // row's controls, exactly like the rotate button above and for the same
-  // reason — the badge line it used to sit on is inside the card's button,
-  // and nothing interactive can live in there.
-  const reviewButton = reviewControl && (
-    <ReviewChip count={reviewCount} open={!!reviewing} compact={list}
-      onClick={() => onReview(item)}
-      className={cn("shadow-card",
-        !list && "absolute bottom-3 left-3 pointer-events-auto")} />
-  );
-
   const actions = (onDelete || onEnd || onStartOver || onSkip
-    || (list && (rotatable || reviewControl))) && (
+    || (list && rotatable)) && (
     <>
-      {list && reviewButton}
       {list && rotateButton}
       {/* Skip: set this draft aside. It stays in Drafts, but the queue
           after a publish stops offering it as the next one to work on. */}
@@ -786,15 +713,9 @@ export const ListingCard = memo(function ListingCard({
           )}
           {showOrigin && <OriginBadge item={item} />}
           {stale && <StaleChip />}
-          {/* One or the other, never both (see showReview above). The review
-              chip is missing from this line only when it is a button, and
-              then it is in the row's controls at the end — the same move the
-              rotate button makes, for the same reason. */}
-          {needsInfo
-            ? <NeedsInfoChip title={needsInfoWhy} />
-            : showReview && !reviewControl && <ReviewChip count={reviewCount} />}
-          {/* After the blockers and the review count: those say what to
-              fix, this says how far to trust the rest. */}
+          {needsInfo && <NeedsInfoChip title={needsInfoWhy} />}
+          {/* After the blockers: they say what to fix, this says how far to
+              trust the rest. */}
           {confidence && <ConfidenceChip level={confidence} />}
           <MarketplaceChips listing={l} status={item.status} showEbay={showEbayChip} />
           {(hasMetrics || watchers != null) && (
@@ -848,11 +769,9 @@ export const ListingCard = memo(function ListingCard({
           )}
         </div>
         {stale && <StaleChip className="absolute bottom-3 left-3 shadow-card" />}
-        {needsInfo ? (
+        {needsInfo && (
           <NeedsInfoChip title={needsInfoWhy}
             className="absolute bottom-3 left-3 shadow-card" />
-        ) : showReview && !reviewControl && (
-          <ReviewChip count={reviewCount} className="absolute bottom-3 left-3 shadow-card" />
         )}
         {showOrigin && (
           <OriginBadge item={item}
@@ -890,19 +809,17 @@ export const ListingCard = memo(function ListingCard({
   return (
     <div className={cn("relative group", list && "flex items-center gap-2", className)}>
       {body}
-      {/* The photo's own controls — rotate in its bottom-right corner, the
-          review chip in its bottom-left, where the card already drew it as a
-          label. Siblings of the card button like every other control here (a
-          button inside a button is invalid HTML and drops out of the tab
-          order), laid over the card in a box the exact shape of the photo —
-          the card's width, inside its border, at the photo's 4:3 — so
+      {/* The photo's own control — rotate, in its bottom-right corner. A
+          sibling of the card button like every other control here (a button
+          inside a button is invalid HTML and drops out of the tab order),
+          laid over the card in a box the exact shape of the photo — the
+          card's width, inside its border, at the photo's 4:3 — so
           "bottom-right of the photo" is a place the wrapper can name without
           knowing how tall the photo is. The box itself lets clicks through to
-          the card; each control takes its own back. */}
-      {!list && (rotateButton || reviewButton) && (
+          the card; the control takes its own back. */}
+      {!list && rotateButton && (
         <div className="absolute inset-x-px top-px aspect-[4/3] z-10 pointer-events-none">
           {rotateButton}
-          {reviewButton}
         </div>
       )}
       {/* The tick that puts this listing into a bulk action. Standing, not a

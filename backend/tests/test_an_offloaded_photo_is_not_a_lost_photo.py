@@ -6,9 +6,9 @@ the local copy (main._offload_to_r2), because the volume only needs a photo
 while someone is working on the listing. /media has always known this and
 redirects to the bucket, so VIEWING an offloaded photo never broke.
 
-The AI fills did not know it. All three — the dashboard's "Finish all"
-(_enrich_one), /api/enrich and /api/autofill-specifics — built their file list
-with a bare `is_file()` filter and, finding nothing, answered:
+The AI fills did not know it. Both — the dashboard's "Finish all"
+(_enrich_one) and /api/autofill-specifics — built their file list with a bare
+`is_file()` filter and, finding nothing, answered:
 
     This listing's photos aren't on the server anymore.
 
@@ -271,28 +271,6 @@ def test_the_bucket_is_tried_before_ebay(seller, monkeypatch):
 
 # --------------------------------------------------------- the single fills
 
-def test_the_single_listing_fill_rehydrates_too(seller, monkeypatch):
-    """/api/enrich is the same edit on one draft, and refused the same
-    listings for the same wrong reason."""
-    client, dbmod, uid = seller
-    assert dbmod.upsert_listing("offload-aged", _record("offload-aged"),
-                                status="draft", user_id=uid)
-    _photo("offload-aged")
-    _offload("offload-aged")
-    _bucket_holding(monkeypatch, "offload-aged")
-    seen: list = []
-    monkeypatch.setattr(main, "_enrich_listing", _fills_one(seen))
-
-    res = client.post("/api/enrich/offload-aged",
-                      json={"session_id": "offload-aged",
-                            "listing": _record("offload-aged")})
-    assert res.status_code == 200, res.text
-    result = _finish(client, res.json()["job_id"])
-
-    assert seen == [["img_000.jpg"]]
-    assert result.get("added") == 1
-
-
 def test_autofill_specifics_rehydrates_too(seller, monkeypatch):
     """The third door onto the same work, opened automatically when the editor
     loads a listing — so this one refused without anybody pressing anything."""
@@ -327,8 +305,11 @@ def test_the_single_fill_says_what_to_do_when_there_is_truly_nothing(
     assert dbmod.upsert_listing("offload-bare", _record("offload-bare"),
                                 status="draft", user_id=uid)
     _empty_bucket(monkeypatch)
+    monkeypatch.setattr(main.config, "taxonomy_ready", lambda: True)
+    monkeypatch.setattr(main.taxonomy, "item_aspects",
+                        lambda cid: {"aspects": [{"localizedAspectName": "Size"}]})
 
-    res = client.post("/api/enrich/offload-bare",
+    res = client.post("/api/autofill-specifics/offload-bare",
                       json={"session_id": "offload-bare",
                             "listing": _record("offload-bare")})
     assert res.status_code == 400

@@ -15,7 +15,6 @@ import { ViewToggle } from "@/components/ui/ViewToggle";
 import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { DraftFormatEdit } from "./FormatQuickPick";
 import { DraftPriceEdit } from "./PriceQuickEdit";
-import { DraftSpecificsReview } from "./SpecificsQuickReview";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
@@ -139,10 +138,6 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   // may already be live.)
   const [refused, setRefused] = useState({});        // id -> reason
   const [startingOver, setStartingOver] = useState(null);
-  // Which draft has its AI-guess review open, at most one: the panel lists
-  // values to read, and a strip with twenty of them open is the grid the
-  // chip exists to keep scannable.
-  const [reviewingId, setReviewingId] = useState(null);
   // The send-off a card gets on its way live (see publishCelebration): a
   // burst of confetti, then it lifts off the grid. What is left when a batch
   // finishes is exactly the drafts that still need the seller.
@@ -636,11 +631,6 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                 /* A sideways photo is the one thing on a draft card the
                    seller could see but not fix without opening the editor. */
                 onRotate={rotateListingPhoto}
-                /* And the other thing a draft card could show but not
-                   answer: the AI's guesses at its item specifics. */
-                onReview={leaving ? undefined : () => setReviewingId(
-                  (open) => (open === item.id ? null : item.id))}
-                reviewing={reviewingId === item.id}
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}
@@ -693,15 +683,6 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                           : `Last publish refused: ${refusal}`}
                       </span>
                     </p>
-                  )}
-                  {/* What the "N to review" chip was counting, opened by
-                      it — the guesses read and ticked off here rather than
-                      two screens away in the editor. Ahead of the always-on
-                      controls below because this one was asked for. */}
-                  {reviewingId === item.id && (
-                    <div className={cn(list && "min-w-0 w-full")}>
-                      <DraftSpecificsReview item={item} className={cn(!list && "mt-1.5")} />
-                    </div>
                   )}
                   {/* Category and shipping stay reachable in both layouts —
                       a wrong category is the AI misfire that costs most, and

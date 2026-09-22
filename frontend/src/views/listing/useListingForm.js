@@ -12,7 +12,7 @@ import {
 } from "./publishShared";
 import { blockersFor, weightOz } from "./blockers";
 import {
-  confirmSpecificRows, specificRowIndex, specificValues,
+  specificRowIndex, specificValues,
   toggleSpecificValue as toggleValue,
 } from "./specifics";
 
@@ -273,31 +273,6 @@ export function useListingForm() {
       else if (value) specs.push({ name, value, confidence: "" });
       return { ...f, item_specifics: specs };
     });
-  }, []);
-
-  // Accept an AI-inferred value as-is. The point of the ⚠ flag is that a
-  // wrong specific is worse than a missing one, so the seller has to actually
-  // look at every inference — but "I looked, it's right" needed a gesture
-  // that wasn't retyping the value it already holds. Clearing the flag (not
-  // the value) is that gesture, and it makes the review count fall as they go.
-  const confirmSpecific = useCallback((name) => {
-    setForm((f) => {
-      // Every row for the aspect, not just the first: a multi-select aspect
-      // shows one flag for the whole group, so one ✓ has to clear the group.
-      const specs = confirmSpecificRows(f.item_specifics, name);
-      return specs === f.item_specifics ? f : { ...f, item_specifics: specs };
-    });
-  }, []);
-
-  // Accept every outstanding inference at once. Deliberately NOT offered as a
-  // headline action — see the comment at its call site; it exists for the
-  // seller who has already read the list.
-  const confirmAllSpecifics = useCallback(() => {
-    setForm((f) => ({
-      ...f,
-      item_specifics: f.item_specifics.map(
-        (s) => (s.confidence === "medium" ? { ...s, confidence: "" } : s)),
-    }));
   }, []);
 
   // ---------- category-driven fields ----------
@@ -1038,77 +1013,6 @@ export function useListingForm() {
     }
   }), [form.category_id, sessionId, collect, setForm, invalidateListings, toast]);
 
-  // ---------- fill in everything, one step before publishing ----------
-  // The last thing worth doing to a listing before it goes live: one pass
-  // that settles the eBay category if it is still missing, fills every item
-  // specific the photos can answer, and double-checks the maker.
-  //
-  // This is the same enrichment the dashboard's "Enrich all" runs, moved to
-  // where it can actually land. There it has to reach a listing eBay is
-  // already showing — which means a resolvable category, photos still on the
-  // server (an imported listing's live on eBay), a connected account, and a
-  // ReviseItem that eBay accepts — and any one of those missing comes back
-  // as "skipped" with the blanks still blank. Here the listing has not been
-  // published yet: nothing to revise, the photos are right there, and the
-  // answer is saved locally.
-  //
-  // It fills BLANKS. Anything already written is left exactly as it is, so
-  // this is safe to press on a listing that is nearly finished.
-  const fillInDetails = useMemo(() => once("enrich-listing", async () => {
-    const before = collect();
-    setAiBusy([
-      "Reading your photos for everything eBay asks for…",
-      "Filling in the details buyers filter by…",
-      "Double-checking the maker…",
-    ]);
-    try {
-      // A job, not a request: the fill is a vision call over every photo
-      // plus a maker check, which routinely outlives the request deadline.
-      // It used to finish and save on the server AFTER this had reported
-      // "Couldn't fill in the details" -- a working feature reported broken.
-      const start = await postJson(`/api/enrich/${sessionId}`, {
-        session_id: sessionId, listing: before, mode: "draft",
-      });
-      const res = start.job_id ? await pollJob(start.job_id) : start;
-      // The server merged onto the copy we just sent, so its answer is this
-      // form plus the fills — adopting it whole cannot lose an edit.
-      if (res.listing) {
-        setSession((s) => (s ? { ...s, listing: res.listing } : s));
-        setForm(fromListing(res.listing));
-      }
-      const gotCategory = !before.category_id.trim()
-        && !!(res.listing?.category_id || "");
-      const parts = [];
-      if (gotCategory) parts.push("picked the eBay category");
-      // Name what was filled. "Filled 3 details" is a count; the seller's
-      // question is whether anything happened, and "Color: Blue, Size: M"
-      // answers it where a number does not.
-      const filled = (res.filled || []).map((f) => `${f.name}: ${f.value}`);
-      if (filled.length) {
-        const more = filled.length > 4 ? ` and ${filled.length - 4} more` : "";
-        parts.push(`filled ${filled.slice(0, 4).join(", ")}${more}`);
-      } else if (res.added) {
-        parts.push(`filled ${res.added} detail${res.added === 1 ? "" : "s"}`);
-      }
-      toast(parts.length
-        ? `${parts.join(" and ")} from your photos.`
-            .replace(/^./, (c) => c.toUpperCase())
-        // A pass that ran and found nothing is a real answer, not a failure —
-        // and it is the seller's cue that the rest is theirs to write.
-        : "Nothing more the photos could answer — anything still blank needs you.",
-        { kind: res.added || gotCategory ? "success" : "info" });
-      invalidateListings();
-      return true;
-    } catch (e) {
-      // Warning, not error: the listing is untouched and still publishable
-      // by hand. Nothing was lost and nothing is broken.
-      toast(`Couldn't fill in the details: ${e.message}`, { kind: "warning" });
-      return false;
-    } finally {
-      setAiBusy(null);
-    }
-  }), [collect, sessionId, setSession, setForm, invalidateListings, toast]);
-
   // Auto-populate item specifics right after a fresh AI identify (session has a
   // confidence score), so listings come SEO-ready with no manual step. Runs
   // once per session, and NOT when reopening a saved listing or a bulk item
@@ -1131,9 +1035,11 @@ export function useListingForm() {
   //
   // Still exactly one call per session: `once` plus the ref below. And still
   // only on a FRESH identify — a later category change brings a whole new
-  // aspect set, but auto-spending a token on a listing the seller merely
-  // reopened and re-filed is not ours to decide. "Finish up" runs the same
-  // pass there and asks first.
+  // aspect set, and re-reading the photos every time a seller re-files a
+  // listing they merely reopened would spend a token on every visit. The
+  // draft that arrives here has already been filled in end to end (backend
+  // _fill_what_is_left); this catches the one case that pass could not,
+  // where the category was only settled once the editor asked eBay for it.
   const autoFilledFor = useRef(null);
   useEffect(() => {
     const aspects = categoryMeta.aspects || [];
@@ -1235,12 +1141,12 @@ export function useListingForm() {
     publish, publishResult, runPreflight,
     fixTarget, setFixTarget, fixLevel,
     refine,
-    autofillSpecifics, fillInDetails,
+    autofillSpecifics,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData,
     categoryMeta, loadCategoryMeta,
     getSpecific, getSpecificValues, upsertSpecific,
-    toggleSpecificValue, confirmSpecific, confirmAllSpecifics,
+    toggleSpecificValue,
     deleteImage, rotateImage, reorderImages, addImages, addingPhotos, addingStatus,
     videos, addVideo, removeVideo, addingVideo,
     imageVersions, imageBase, bumpImageVersion,

@@ -944,53 +944,49 @@ the answer through the same `priceView` split the editor and Shop Mode use, so
 "we couldn't check" never arrives as "no comparable listings, try a simpler
 title".
 
-### The "N to review" chip is the review
+### A draft arrives finished
 
-The chip counts the item specifics the AI **inferred** rather than read off the
-item (`confidence: "medium"` — see `views/listing/specifics.reviewAspects`,
-which the chip and the panel share so a chip saying 3 cannot open a list of
-two). Those block nothing: a draft publishes with every one of them
-outstanding. The chip exists only because a *wrong* specific is worse than a
-missing one — and until now the only place to answer it was the full editor's
-Item specifics card. A seller working a grid of twenty fresh drafts made twenty
-round trips to say twenty times that the guess was fine, which is how a warning
-becomes something you publish past.
+There is no second pass for the seller to find and press. The listing that
+reaches the editor has had everything the item itself can answer written into
+it while it was being drafted, and what is left on that screen is reading it,
+changing what is wrong, and publishing.
 
-So the chip is a **button**, on every draft card there is — the drafts strip,
-the dashboard's recent cards and the listings manager, in both layouts — and it
-opens the editor's two gestures under the card it belongs to
-(`views/listing/SpecificsQuickReview`): **✓** to take a guess as it stands, or
-type over it and take the correction in one move. Multi-select aspects (eBay's
-tick boxes) are read there and changed in the editor: a text box holds one
-answer, and offering one for four ticked values would quietly drop three.
-"I've read them all" keeps the editor's terms exactly — offered last, only past
-one outstanding guess, and worded as a claim the seller is making — because a
-button that clears twenty flags without showing twenty values is how a wrong
-value reaches a live listing.
+Two surfaces used to say otherwise, and both are gone.
 
-Two things it does *not* do. It never sits where a **blocker** belongs: a card
-that needs info before eBay will take it shows that instead, because "eBay will
-reject this" and "give this a glance" being the same chip is what taught
-sellers to ignore both. And it is **drafts only**, like the chip itself — once
-a listing is live the seller has stood behind it.
+**"Finish up"** sat above Publish offering one pass over the listing's own
+photos: the eBay category if it was still blank, every item specific the
+photos could answer, the maker. The right pass in the wrong place — the seller
+had just watched the app spend a minute and several model calls drafting the
+listing, and the last thing it said was that it had not finished. It runs at
+the end of drafting now (`main._fill_what_is_left`, on both the polled job
+behind the uploader and the bulk worker), where nothing is in its way: the
+photos are on the volume, research has settled what the item is, and the
+category lookup has had its second attempt at a number off the researched
+title.
 
-The chip is a sibling of the card's button, never nested in it. The whole card
-is one `<button>`, and a button inside a button is invalid HTML: the browser
-closes the outer one early and the chip drops out of the tab order. Every other
-control on the card is laid over it for the same reason (rotate, the bulk tick,
-delete/end/skip), so in the grid the chip keeps the photo corner it already had
-and in a list row it joins the row's controls.
+That second attempt is the whole reason the step exists separately from the
+enrichment earlier in the chain. Item specifics are per **category**, so a
+draft with no category number when the first pass ran got no specifics at all
+— and that draft, the hard one, is precisely the draft the seller was then
+asked to finish by hand. The pass is stood down by `enriched_at` on a listing
+the earlier one already read, so a draft is never charged for the same vision
+calls twice. It also fills Etsy's own boxes for a seller who has a shop
+connected: the category, and the age read off the item's own details. Who made
+it stays blank unless the item dates as **vintage** — Etsy takes handmade,
+vintage (20+ years) and craft supplies and nothing else, so "someone else made
+it" on an item that is not vintage is an attestation that the listing breaks
+Etsy's rules, and that is the seller's to make.
 
-What it sends is the point of the route behind it. A card holds whatever the
-last `/api/listings` load handed it, and a draft has a guaranteed concurrent
-writer — "Enrich all" fills specifics in a worker thread, on exactly the
-listing whose guesses the seller is reading. So the panel posts **aspect
-names**, never `item_specifics`, and `POST /api/listings/{id}/specifics/confirm`
-applies the ✓ to the rows the server is holding now, under the row lock
-(`db.mutate_listing_data`). Same discipline as `PATCH /api/listings/{id}`,
-with a sharper reason: a panel that sent the array back would erase every row
-that landed since it loaded, at the exact moment the seller was telling us the
-listing looked right.
+**The review click-through** — a "N to review" chip on every draft card, a
+"Looks right" button on each inferred field, and "I've read them all" for the
+lot — counted the item specifics the AI inferred rather than read
+(`confidence: "medium"`). Every one of them was already on the draft and
+already publishable, so the number named no work: clearing the flags changed
+nothing about the listing, and a seller with twenty fresh drafts was clicking
+through bookkeeping before a finished draft felt finished. The **⚠** mark on
+the field stayed, because that one is information — it says which of the
+filled values to look hardest at — and the seller's answer to it is to correct
+the value or leave it. Typing over a value clears the mark on its own.
 
 
 ## API endpoints
@@ -1026,7 +1022,6 @@ listing looked right.
 | `PUT`  | `/api/listing-views` | Replace the strip. Stores the *question* and never the listings it matched, so a view called "Needs photos" empties as the photos get taken |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
-| `POST` | `/api/listings/{id}/specifics/confirm` | Accept the AI's guesses at the **named** item specifics — clears the ⚠ review flag on every row of each aspect, and writes a corrected value where one is sent. Names aspects, never the specifics list, so the ✓ lands on the rows the server holds rather than the copy the card loaded |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
@@ -1047,7 +1042,6 @@ listing looked right.
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
-| `POST` | `/api/enrich/{session_id}` | Fill ONE listing's blanks from its own photos — category if missing, the category's item specifics, the maker. The last step of the editor before Publish; fills blanks only, never overwrites |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
 | `GET`  | `/api/tokens` | AI-token balance, feature costs, packs, next free reset |

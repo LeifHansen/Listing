@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  confirmSpecificRows, reviewAspectCount, reviewAspects, specificRowIndex,
-  specificValue,
-  specificValues, toggleSpecificValue,
+  specificRowIndex, specificValue, specificValues, toggleSpecificValue,
 } from "./specifics";
 
 /* eBay's multi-select item specifics — the tick boxes (Features, Style,
@@ -90,88 +88,5 @@ describe("toggleSpecificValue", () => {
     const specs = rows(["Features", "Pockets"], ["Fit", "Slim"]);
     const next = toggleSpecificValue(specs, "Features", "Pockets", false);
     expect(next).toEqual(rows(["Fit", "Slim"]));
-  });
-});
-
-describe("confirmSpecificRows", () => {
-  it("clears the review flag on every row of the aspect", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"]);
-    const next = confirmSpecificRows(specs, "Features");
-    expect(next.map((s) => s.confidence)).toEqual(["", "", "medium"]);
-  });
-
-  it("returns the same list when the aspect has no rows", () => {
-    const specs = rows(["Fit", "Slim", "medium"]);
-    expect(confirmSpecificRows(specs, "Features")).toBe(specs);
-  });
-});
-
-describe("reviewAspectCount", () => {
-  // The regression this exists for: a multi-select aspect holds one row per
-  // ticked value but shows ONE review flag, so counting rows told the seller
-  // there were four things to check when there was one.
-  it("counts a multi-value aspect once, not once per tick", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"], ["Features", "Hooded", "medium"]);
-    expect(reviewAspectCount(specs)).toBe(1);
-  });
-
-  it("counts each unreviewed aspect separately", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"]);
-    expect(reviewAspectCount(specs)).toBe(2);
-  });
-
-  it("counts an aspect with any unreviewed tick, however many are confirmed", () => {
-    const specs = rows(["Features", "Pockets", "high"],
-      ["Features", "Lined", "medium"]);
-    expect(reviewAspectCount(specs)).toBe(1);
-  });
-
-  it("ignores confirmed, high-confidence and empty rows", () => {
-    const specs = rows(["Features", "Pockets", ""], ["Fit", "Slim", "high"],
-      ["Style", "", "medium"]);
-    expect(reviewAspectCount(specs)).toBe(0);
-  });
-
-  it("drops to zero once one click clears the whole group", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"]);
-    expect(reviewAspectCount(confirmSpecificRows(specs, "Features"))).toBe(0);
-  });
-
-  it("survives a missing list", () => {
-    expect(reviewAspectCount(undefined)).toBe(0);
-  });
-});
-
-describe("reviewAspects", () => {
-  // The chip counts these and the review panel lists them, off one function,
-  // so a chip saying 3 can never open a list of two.
-  it("names each outstanding aspect once, carrying every value it holds", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"]);
-    expect(reviewAspects(specs)).toEqual([
-      { name: "Features", values: ["Pockets", "Lined"] },
-      { name: "Fit", values: ["Slim"] },
-    ]);
-  });
-
-  it("leaves out anything the count leaves out", () => {
-    const specs = rows(["Features", "Pockets", ""], ["Fit", "Slim", "high"],
-      ["Style", "", "medium"]);
-    expect(reviewAspects(specs)).toEqual([]);
-  });
-
-  it("agrees with the count it is derived from", () => {
-    const specs = rows(["Features", "Pockets", "medium"],
-      ["Features", "Lined", "medium"], ["Fit", "Slim", "medium"],
-      ["Brand", "Levi's", ""]);
-    expect(reviewAspects(specs)).toHaveLength(reviewAspectCount(specs));
-  });
-
-  it("survives a missing list", () => {
-    expect(reviewAspects(undefined)).toEqual([]);
   });
 });
