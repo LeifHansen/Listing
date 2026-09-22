@@ -21,12 +21,12 @@ import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 // renaming it would churn a dozen call sites to say the same thing.
 const NAV = [
   { id: "dashboard", label: "Home", icon: LayoutDashboard },
+  { id: "shop", label: "Shop", icon: Store },
   { id: "new", label: "List", icon: Camera },
   // Tags, not another grid: the four-square icon Home already wears is
   // indistinguishable from it at 19px, and two nav entries sharing one glyph
   // make a nav that has to be read rather than glanced at.
   { id: "manage", label: "Manage", icon: Tags },
-  { id: "shop", label: "Shop", icon: Store },
   { id: "messages", label: "Messages", icon: MessageCircle },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -223,8 +223,10 @@ export function BottomNav() {
   // Five targets, and the FAB is one of them rather than an extra squeezed
   // between four: Manage earns a slot because it is now half of what the
   // single Sell tab used to be, and burying it behind Home would make the
-  // split worse on a phone than it was before.
-  const items = ["dashboard", "manage", "new", "shop", "settings"].map(byId);
+  // split worse on a phone than it was before. The order tracks the sidebar's
+  // with one constraint of its own -- `new` holds the middle slot, because the
+  // FAB is drawn as the raised centre of the bar and is lopsided anywhere else.
+  const items = ["dashboard", "shop", "new", "manage", "settings"].map(byId);
   return (
     <nav
       aria-label="Main"
