@@ -99,7 +99,17 @@ function server(state) {
       return json({ checked: 0, changed: 0,
                     removed: before - state.listings.length });
     }
-    if (path === "/api/ebay/import-listings") return json({ imported: 0 });
+    // The store mirror, as a background job when the state asks for one: the
+    // real route answers with a job id and the counts arrive from the poll.
+    if (path === "/api/ebay/import-listings") {
+      return json(state.importJob ? { job_id: "job-1", running: true }
+                                  : { imported: 0 });
+    }
+    if (path.startsWith("/api/ebay/import-status/")) {
+      // The import settles the endings eBay reports, so its removals are as
+      // real as the sweep's — and they come back through this poll.
+      return json({ done: true, phase: "done", ...state.importJob });
+    }
     const key = Object.keys(BASE).find((k) => path.startsWith(k));
     return key ? json(BASE[key]) : json({});
   };
@@ -111,8 +121,8 @@ function Probe({ onValue }) {
   return null;
 }
 
-async function mount(listings) {
-  const state = { listings, loads: 0 };
+async function mount(listings, importJob = null) {
+  const state = { listings, loads: 0, importJob };
   vi.stubGlobal("fetch", vi.fn(server(state)));
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -234,6 +244,26 @@ describe("a listing that ended on eBay's side", () => {
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
+
+  it("says how many the store mirror removed, rather than 'already in sync'",
+    async () => {
+      // The import settles what eBay reports as ended — a mirror of an eBay
+      // listing goes there and then — so a run that removed cards must say so.
+      // The count was on the wire all along and the client dropped it, so a
+      // sync that cleared a pile of blank cards said nothing about them.
+      markAutoSynced(7);
+      const ui = await mount(
+        [mine("l1", "Levi's 527 Boot Cut")],
+        { found: 6, imported: 0, updated: 1, deduped: 0, failed: 0, removed: 2 });
+
+      let pending;
+      await act(async () => { pending = ui.app().syncStore({ force: true }); });
+      await ui.settle(3000);
+      const res = await pending;
+
+      expect(res.removed).toBe(2);
+      await act(async () => { ui.root.unmount(); });
+    });
 
   it("leaves the grid on the quiet re-check, with nothing clicked", async () => {
     // The store mirror was rebuilt recently, so no import runs on mount and
