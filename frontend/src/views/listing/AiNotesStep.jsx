@@ -116,14 +116,26 @@ function PhotoRow({ item, onDelete, deleted }) {
   );
 }
 
+// An item's identity, as opposed to its slot. `gi` is where the server will
+// look an answer up, and it is renumbered when an item above it is removed;
+// `key` never is. Notes are held against the key so a removal cannot slide
+// one item's words under its neighbour. (A server that predates removal sends
+// no key, and there the slot never moves, so it serves as one.)
+const idOf = (item) => item.key ?? item.gi;
+
 export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
-                              onDeletePhoto }) {
-  // Keyed by the item's index in `pending_items` (`gi`), which is what the
-  // server matches them back to — never by position in this array.
+                              onDeletePhoto, onDeleteItem }) {
   const notes = values || {};
-  const rows = items || [];
+  // The rows as the last delete left them, once there has been one. While
+  // the job is paused a delete is the ONLY thing that changes them, so its
+  // answer is never older than a poll — but a poll already in the air when
+  // it landed is, and would put a removed item back on screen.
+  const [latest, setLatest] = useState(null);
+  // Items this seller has removed, by identity. Optimistic, like `deleted`.
+  const [goneItems, setGoneItems] = useState(() => new Set());
+  const rows = (latest || items || []).filter((it) => !goneItems.has(idOf(it)));
   const single = rows.length === 1;
-  const typed = Object.values(notes).filter((t) => t && t.trim()).length;
+  const typed = rows.filter((it) => (notes[idOf(it)] || "").trim()).length;
   // Photo URLs this seller has dropped, by the exact string the status gave
   // them. Optimistic: see the note above the component.
   const [deleted, setDeleted] = useState(() => new Set());
@@ -134,10 +146,23 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
   // hands of a seller who is clearly pruning. Queueing costs nothing: the
   // thumb is already gone at the tap, and the wait is behind it.
   const queue = useRef(Promise.resolve());
+  // What the server last said the rows are, readable from inside the queue.
+  // A removal renumbers every item after it, so the `gi` a tap saw can be out
+  // of date by the time its turn comes — each queued request looks its item
+  // up again here, by the photo or key it was aimed at, when it goes out.
+  const known = useRef(null);
+  const now = () => known.current || items || [];
 
-  const set = (gi, value) => onChange(gi, value.slice(0, MAX_ITEM_NOTES_CHARS));
+  const set = (key, value) => onChange(key, value.slice(0, MAX_ITEM_NOTES_CHARS));
 
-  const drop = (gi, src) => {
+  const settle = (res) => {
+    if (Array.isArray(res?.pending_items)) {
+      known.current = res.pending_items;
+      setLatest(res.pending_items);
+    }
+  };
+
+  const drop = (key, src) => {
     const forget = () => setDeleted((cur) => {
       const next = new Set(cur);
       next.delete(src);
@@ -148,7 +173,35 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
     // server refused has to put the thumb back, or the seller submits a pile
     // believing a photo is out of it that isn't. The caller says why.
     queue.current = queue.current
-      .then(() => onDeletePhoto(gi, src))
+      .then(() => {
+        const row = now().find((it) => idOf(it) === key);
+        return onDeletePhoto(row ? row.gi : key, src);
+      })
+      .then(settle)
+      .catch(forget);
+  };
+
+  // A whole item out of the batch. The same bargain as a photo: it goes at
+  // the tap and comes back if the server says no, and since nothing has been
+  // drafted from it there is nothing to confirm or to undo.
+  const dropItem = (key) => {
+    const forget = () => setGoneItems((cur) => {
+      const next = new Set(cur);
+      next.delete(key);
+      return next;
+    });
+    setGoneItems((cur) => new Set(cur).add(key));
+    queue.current = queue.current
+      .then(() => {
+        const row = now().find((it) => idOf(it) === key);
+        // Sent with one of its photos: the server checks the slot still
+        // holds this item, rather than removing whatever is there now.
+        const photo = (row?.photos || []).find((p) => !deleted.has(p))
+          || row?.photos?.[0];
+        if (!row || !photo) throw new Error("gone");
+        return onDeleteItem(row.gi, photo);
+      })
+      .then(settle)
       .catch(forget);
   };
 
@@ -162,10 +215,13 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
     // Only what was actually typed. A box opened and left blank is the same
     // as one never touched, and the server drops empties anyway — this just
     // keeps the request honest about what the seller said.
+    //
+    // Read off the rows as the server now has them, not this render's: a
+    // removal the await just waited out has renumbered the slots it sends.
     const out = {};
-    rows.forEach(({ gi }) => {
-      const text = (notes[gi] || "").trim();
-      if (text) out[gi] = text;
+    now().forEach((it) => {
+      const text = (notes[idOf(it)] || "").trim();
+      if (text) out[it.gi] = text;
     });
     onSubmit(out);
   };
@@ -202,11 +258,11 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
       </Card>
 
       {rows.map((item, i) => {
-        const value = notes[item.gi] || "";
+        const value = notes[idOf(item)] || "";
         return (
-          <Card key={item.gi} className="flex flex-col gap-3.5">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <p className="text-sm font-bold text-ink">
+          <Card key={idOf(item)} className="flex flex-col gap-3.5">
+            <div className="flex items-baseline gap-2">
+              <p className="text-sm font-bold text-ink shrink-0">
                 {single ? "Your item" : `Item ${i + 1}`}
               </p>
               {/* The name the grouping pass gave it. Useful and not
@@ -217,12 +273,29 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                   the AI thinks: {item.name}
                 </p>
               )}
+              {/* Not on the last one: an empty batch is a stopped batch,
+                  and the screen already has a button for that. */}
+              {onDeleteItem && !busy && rows.length > 1 && item.photos?.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => dropItem(idOf(item))}
+                  aria-label={`Remove item ${i + 1}`}
+                  title="Leave this one out — nothing is drafted or charged for it"
+                  className="ml-auto self-center shrink-0 inline-flex items-center gap-1
+                    rounded-full px-2.5 py-1 text-xs font-semibold text-ink-faint
+                    border border-line cursor-pointer transition-colors duration-150
+                    hover:text-error hover:border-error/40"
+                >
+                  <Trash2 size={12} aria-hidden />
+                  Remove item
+                </button>
+              )}
             </div>
             <PhotoRow
               item={item}
               deleted={deleted}
               onDelete={onDeletePhoto && !busy
-                ? (src) => drop(item.gi, src) : undefined}
+                ? (src) => drop(idOf(item), src) : undefined}
             />
             <Field
               label="Notes for the AI"
@@ -241,7 +314,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                 // already in the box. With forty, it would be one scroll
                 // position chosen for them out of forty.
                 autoFocus={single}
-                onChange={(e) => set(item.gi, e.target.value)}
+                onChange={(e) => set(idOf(item), e.target.value)}
                 // The pile can be long, and reaching for the button at the
                 // bottom of forty cards is the wrong ending to typing.
                 onKeyDown={(e) => {

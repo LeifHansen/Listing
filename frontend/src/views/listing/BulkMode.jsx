@@ -144,7 +144,8 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // the next poll lands, and leaving the question up for that second and a
   // half invites a second answer over the batch that is already drafting.
   const [notesBusy, setNotesBusy] = useState(false);
-  // What the seller has typed at that step, keyed by item index. Held HERE
+  // What the seller has typed at that step, keyed by item (its `key`, which
+  // outlives the renumbering a removed item causes — see AiNotesStep). Held HERE
   // rather than inside the step, which the progress card replaces the moment
   // the answer is sent — see AiNotesStep: a failed submit has to come back to
   // forty boxes still full of what they wrote, not to forty empty ones.
@@ -335,9 +336,22 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // or the seller presses on believing it is out of that item.
   const deletePhoto = useCallback(async (gi, photo) => {
     try {
-      await postJson(`/api/bulk/notes/${jobId}/delete-photo`, { gi, photo });
+      return await postJson(`/api/bulk/notes/${jobId}/delete-photo`, { gi, photo });
     } catch (e) {
       toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  }, [jobId, toast]);
+
+  // Take a whole item out of the batch at the same moment, for the same
+  // price: nothing. `photo` is one of its own, which is how the server knows
+  // the slot still holds the item the seller tapped. Throws like the above,
+  // which is what puts the card back.
+  const deleteItem = useCallback(async (gi, photo) => {
+    try {
+      return await postJson(`/api/bulk/notes/${jobId}/delete-item`, { gi, photo });
+    } catch (e) {
+      toast(`Couldn't remove that item: ${e.message}`, { kind: "error" });
       throw e;
     }
   }, [jobId, toast]);
@@ -461,9 +475,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           <AiNotesStep
             items={job.pending_items}
             values={itemNotes}
-            onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
+            onChange={(key, text) => setItemNotes((cur) => ({ ...cur, [key]: text }))}
             onSubmit={submitNotes}
             onDeletePhoto={deletePhoto}
+            onDeleteItem={deleteItem}
           />
           {/* Still the way off a batch the seller has changed their mind
               about. Nothing has been drafted at this point, so stopping here
