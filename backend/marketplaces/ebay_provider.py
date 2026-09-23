@@ -782,12 +782,12 @@ class EbayProvider:
     def creds_for(self, uid: Optional[str]) -> Optional[dict]:
         return creds_for(uid)
 
-    def disconnect(self, uid: str) -> None:
+    def disconnect(self, uid: str) -> bool:
         # Forget the "checked recently" mark too: the next connect may be a
         # different seller, and trusting the previous account's pass is exactly
         # how another account's policy ids survive a switch.
         ebay_account.forget_verified(uid)
-        db.disconnect_ebay_account(uid)
+        return db.disconnect_ebay_account(uid)
 
     # --- listing lifecycle -----------------------------------------------
     def supports(self) -> dict:

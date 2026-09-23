@@ -133,3 +133,107 @@ def test_a_settings_id_that_is_not_a_number_is_refused_before_the_write(app):
     assert resp.status_code == 400
     assert "readiness_state_id" in resp.json()["detail"]
     assert not calls, "nothing should have been written"
+
+
+# ------------------------------------------- and the other direction, later
+# The same rule, unapplied to disconnect until a seller reported that reset
+# did nothing. `db.disconnect_*` swallowed every failure and returned None,
+# all four providers declared `-> None`, and all three routes answered
+# `{"ok": true}` unconditionally — so a disconnect that never touched the
+# row was indistinguishable from one that did, at every layer. The seller
+# got a success toast and a card that still said connected.
+#
+# Worse than the save case in one way: the seller reaching for disconnect is
+# usually already stuck, so the reset they are told worked is the thing they
+# keep retrying instead of reporting.
+
+
+@pytest.fixture()
+def disconnects(monkeypatch, every_marketplace):
+    from backend import main
+
+    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+
+    def _with(landed: bool):
+        calls: list[str] = []
+
+        def _drop(user_id, marketplace):
+            calls.append(marketplace)
+            return landed
+
+        def _drop_ebay(user_id):
+            calls.append("ebay")
+            return landed
+
+        monkeypatch.setattr(main.db, "disconnect_marketplace_account", _drop)
+        monkeypatch.setattr(main.db, "disconnect_ebay_account", _drop_ebay)
+        return TestClient(main.app), calls
+    return _with
+
+
+@pytest.mark.parametrize("path,marketplace", [
+    ("/api/etsy/disconnect", "etsy"),
+    ("/api/ebay/disconnect", "ebay"),
+    ("/api/easypost/disconnect", "easypost"),
+])
+def test_a_disconnect_that_did_not_land_is_not_reported_as_done(
+        disconnects, path, marketplace):
+    api, calls = disconnects(landed=False)
+    resp = api.post(path)
+
+    assert calls, "it should still have tried"
+    assert resp.status_code != 200, "a disconnect that did not land answered ok"
+    assert resp.status_code == 503          # a storage outage, not a mistake
+    assert "ok" not in resp.json(), resp.text
+    # The seller has to know the state is unchanged, not half-dropped.
+    assert "nothing changed" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("path", [
+    "/api/etsy/disconnect",
+    "/api/ebay/disconnect",
+    "/api/easypost/disconnect",
+])
+def test_a_disconnect_that_landed_still_says_so(disconnects, path):
+    api, calls = disconnects(landed=True)
+    resp = api.post(path)
+
+    assert calls
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_the_provider_reports_the_row_not_its_own_cache():
+    """Etsy drops its cached token and refresh lock either way — they are
+    this process's copy of a link the seller asked to drop, and keeping them
+    because the write failed would publish to a shop they believe is gone.
+    What it RETURNS is the row, which is what `connected` is read from."""
+    from unittest.mock import patch
+
+    from backend import db
+    from backend.marketplaces import etsy_provider
+
+    provider = etsy_provider.EtsyProvider()
+    etsy_provider._ACCESS_CACHE["u1"] = (9_999_999_999, "token")
+
+    with patch.object(db, "disconnect_marketplace_account", lambda *_a: False):
+        assert provider.disconnect("u1") is False
+    assert "u1" not in etsy_provider._ACCESS_CACHE, \
+        "kept a cached token for a connection the seller asked to drop"
+
+    with patch.object(db, "disconnect_marketplace_account", lambda *_a: True):
+        assert provider.disconnect("u1") is True
+
+
+def test_nothing_to_disconnect_is_not_a_failed_disconnect():
+    """No row means nothing is connected, which is the state asked for.
+    Reporting that as a failure would 503 the seller for succeeding."""
+    from backend import config, db
+
+    saved = config.DATABASE_URL
+    try:
+        config.DATABASE_URL = ""
+        assert db.disconnect_marketplace_account("u1", "etsy") is True
+        assert db.disconnect_ebay_account("u1") is True
+    finally:
+        config.DATABASE_URL = saved

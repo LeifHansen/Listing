@@ -129,9 +129,10 @@ class DepopProvider:
                                   fresh["access_token"])
             return {"access_token": fresh["access_token"], "_uid": uid}
 
-    def disconnect(self, uid: str) -> None:
-        db.disconnect_marketplace_account(uid, "depop")
+    def disconnect(self, uid: str) -> bool:
+        gone = db.disconnect_marketplace_account(uid, "depop")
         _ACCESS_CACHE.pop(uid, None)
+        return gone
 
     def forget_cached_creds(self, uid: str) -> None:
         """Reconnect invalidates the uid-keyed cache — see the Etsy provider."""

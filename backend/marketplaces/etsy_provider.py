@@ -255,11 +255,17 @@ class EtsyProvider:
         return {"access_token": access, "shop_id": shop_id,
                 "settings": settings, "_uid": uid}
 
-    def disconnect(self, uid: str) -> None:
-        db.disconnect_marketplace_account(uid, "etsy")
+    def disconnect(self, uid: str) -> bool:
+        # The cached token and lock go either way: they are this process's
+        # copy of a link the seller has asked to drop, and keeping them
+        # because the write failed would publish to a shop they believe is
+        # disconnected. The return value reports the row, which is what
+        # "connected" is actually read from.
+        gone = db.disconnect_marketplace_account(uid, "etsy")
         _ACCESS_CACHE.pop(uid, None)
         with _LOCKS_GUARD:
             _REFRESH_LOCKS.pop(uid, None)
+        return gone
 
     def forget_cached_creds(self, uid: str) -> None:
         """Reconnect invalidates the cache: the entry is keyed by user id, so

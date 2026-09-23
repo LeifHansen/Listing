@@ -129,7 +129,15 @@ def test_rates_without_a_key_point_at_settings(client, monkeypatch):
 
 def test_disconnecting_forgets_the_key(saved, client, monkeypatch):
     dropped = {}
-    monkeypatch.setattr(main.db, "disconnect_marketplace_account",
-                        lambda uid, m: dropped.update(uid=uid, m=m))
+
+    # Returns True because that is what the real one now answers when the
+    # row is gone — `{"ok": true}` here is a claim about a write that landed,
+    # and a stub that says nothing about landing would be testing the route
+    # against a promise it no longer makes.
+    def _drop(uid, m):
+        dropped.update(uid=uid, m=m)
+        return True
+
+    monkeypatch.setattr(main.db, "disconnect_marketplace_account", _drop)
     assert client.post("/api/easypost/disconnect", json={}).json() == {"ok": True}
     assert dropped == {"uid": "u1", "m": "easypost"}

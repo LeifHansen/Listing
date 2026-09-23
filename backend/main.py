@@ -5419,7 +5419,9 @@ def ebay_disconnect(request: Request) -> dict:
     # them; a different account overwrites them on connect (see the callback).
     ebay_account.forget_verified(uid)
     _forget_store_categories(uid)
-    db.disconnect_ebay_account(uid)
+    if not db.disconnect_ebay_account(uid):
+        raise HTTPException(503, "Couldn't disconnect eBay just now — nothing "
+                                 "changed. Try again in a moment.")
     return {"ok": True}
 
 
@@ -12406,7 +12408,9 @@ def easypost_disconnect(request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    db.disconnect_marketplace_account(uid, _EASYPOST)
+    if not db.disconnect_marketplace_account(uid, _EASYPOST):
+        raise HTTPException(503, "Couldn't disconnect EasyPost just now — "
+                                 "nothing changed. Try again in a moment.")
     return {"ok": True}
 
 
@@ -13299,7 +13303,13 @@ def marketplace_disconnect(marketplace: str, request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    provider.disconnect(uid)
+    # A disconnect that did not land is a failed disconnect, and saying so
+    # is the whole point: the seller is told nothing changed and can retry,
+    # instead of reloading onto a card that still says connected after being
+    # told it was not. The write failure is logged with its cause.
+    if not provider.disconnect(uid):
+        raise HTTPException(503, f"Couldn't disconnect {provider.label} just "
+                                 f"now — nothing changed. Try again in a moment.")
     return {"ok": True}
 
 
