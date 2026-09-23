@@ -949,9 +949,21 @@ function MarketplaceConnections() {
                 )}
               </div>
               {m.connected && m.needs_reconnect && m.oauth_ready ? (
-                <Button variant="primary" onClick={() => connect(m)}>
-                  <Link2 aria-hidden /> Reconnect {m.label}
-                </Button>
+                // Half-linked: a token is stored but the shop behind it is
+                // not, so reconnecting is the fix and leads. Disconnect sits
+                // BESIDE it rather than being replaced by it — this branch
+                // used to win over the Disconnect below, which is the only
+                // way to be connected, so a seller stuck here had no way out
+                // of the state at all. Getting out is the one thing a stuck
+                // connection must always allow.
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="primary" onClick={() => connect(m)}>
+                    <Link2 aria-hidden /> Reconnect {m.label}
+                  </Button>
+                  <Button variant="danger" onClick={() => disconnect(m)}>
+                    <Unlink aria-hidden /> Disconnect
+                  </Button>
+                </div>
               ) : m.connected ? (
                 <Button variant="danger" onClick={() => disconnect(m)}>
                   <Unlink aria-hidden /> Disconnect
