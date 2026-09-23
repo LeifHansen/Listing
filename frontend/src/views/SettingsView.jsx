@@ -857,6 +857,29 @@ function MarketplaceConnections() {
     .sort((a, b) => waiting(a) - waiting(b));
   if (!others.length) return null;
 
+  // Connecting, with one stop on the way out. When the marketplace still
+  // restricts who may authorize and nothing on the server knows whether THIS
+  // seller is allowed (m.access_unverified — Etsy before Commercial Access,
+  // with no roster configured), the refusal happens on the marketplace's own
+  // page after we have handed the browser over, and nothing comes back for us
+  // to explain. So the explaining happens here, while we still have them.
+  // They are let through either way: on a deployment with no roster the
+  // person pressing Connect is usually the one account that works, and
+  // turning them away would be the worse guess.
+  const connect = async (m) => {
+    if (m.access_unverified && !(await confirm({
+      title: `${m.label} may not let you connect yet`,
+      message: m.access_unverified_note
+        || `${m.label} only lets certain accounts authorize this app, and we can't tell from here whether yours is one. You can try — if ${m.label} turns you away, it's their restriction, not a problem with your shop.`,
+      confirmLabel: `Continue to ${m.label}`,
+    }))) return;
+    try {
+      await startConnect(`/api/${m.key}/connect`);
+    } catch (e) {
+      toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" });
+    }
+  };
+
   const disconnect = async (m) => {
     if (!(await confirm({
       title: `Disconnect ${m.label}?`,
@@ -926,13 +949,21 @@ function MarketplaceConnections() {
                 )}
               </div>
               {m.connected && m.needs_reconnect && m.oauth_ready ? (
-                <Button
-                  variant="primary"
-                  onClick={() => startConnect(`/api/${m.key}/connect`).catch((e) =>
-                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
-                >
-                  <Link2 aria-hidden /> Reconnect {m.label}
-                </Button>
+                // Half-linked: a token is stored but the shop behind it is
+                // not, so reconnecting is the fix and leads. Disconnect sits
+                // BESIDE it rather than being replaced by it — this branch
+                // used to win over the Disconnect below, which is the only
+                // way to be connected, so a seller stuck here had no way out
+                // of the state at all. Getting out is the one thing a stuck
+                // connection must always allow.
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="primary" onClick={() => connect(m)}>
+                    <Link2 aria-hidden /> Reconnect {m.label}
+                  </Button>
+                  <Button variant="danger" onClick={() => disconnect(m)}>
+                    <Unlink aria-hidden /> Disconnect
+                  </Button>
+                </div>
               ) : m.connected ? (
                 <Button variant="danger" onClick={() => disconnect(m)}>
                   <Unlink aria-hidden /> Disconnect
@@ -942,11 +973,7 @@ function MarketplaceConnections() {
                   <Clock aria-hidden /> Connect {m.label}
                 </Button>
               ) : m.oauth_ready ? (
-                <Button
-                  variant="primary"
-                  onClick={() => startConnect(`/api/${m.key}/connect`).catch((e) =>
-                    toast(`Couldn't open the connect screen: ${e.message}`, { kind: "error" }))}
-                >
+                <Button variant="primary" onClick={() => connect(m)}>
                   <Link2 aria-hidden /> Connect {m.label}
                 </Button>
               ) : m.coming_soon ? (
@@ -973,6 +1000,20 @@ function MarketplaceConnections() {
                       </span>
                     ))}
                     {" "}(e.g. <code className="text-ink font-semibold">fly secrets set …</code>).
+                  </p>
+                </div>
+              </div>
+            )}
+            {!m.connected && m.access_unverified && (
+              <div className="rounded-tile bg-warning-soft border border-warning/30 p-4 flex gap-3 mt-3">
+                <AlertTriangle size={18} className="text-warning shrink-0 mt-0.5" aria-hidden />
+                <div className="text-sm min-w-0">
+                  <p className="font-bold text-ink">
+                    {m.label} decides whether this connect goes through
+                  </p>
+                  <p className="text-ink-secondary mt-0.5">
+                    {m.access_unverified_note
+                      || `${m.label} only lets certain accounts authorize this app, and we can’t tell from here whether yours is one. Pressing Connect is how you find out — ${m.label} answers on its own page.`}
                   </p>
                 </div>
               </div>

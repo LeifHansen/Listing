@@ -2081,23 +2081,31 @@ def count_unowned_ebay_listings(user_id: str) -> int:
         return 0
 
 
-def disconnect_ebay_account(user_id: str) -> None:
+def disconnect_ebay_account(user_id: str) -> bool:
     """Disconnect the live link (clear the refresh token) but KEEP the saved
     policy/location preferences and which account they belonged to, so
     reconnecting the SAME account restores them instead of reverting to
-    auto-picked defaults (e.g. eBay Standard Envelope). Never raises."""
+    auto-picked defaults (e.g. eBay Standard Envelope). Never raises.
+
+    Returns whether the link is gone, on the same reasoning as
+    disconnect_marketplace_account below: a disconnect the seller is told
+    succeeded, and which did not, leaves them stuck with no way to tell.
+    """
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            return True          # nothing stored, so nothing connected
         with Session(eng) as s:
             acct = s.get(EbayAccount, user_id)
-            if acct is not None:
-                acct.refresh_token = ""  # 'connected' checks this; prefs stay
-                acct.updated_at = _now()
-                s.commit()
+            if acct is None:
+                return True
+            acct.refresh_token = ""  # 'connected' checks this; prefs stay
+            acct.updated_at = _now()
+            s.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: disconnect_ebay_account failed: {exc}")
+        return False
 
 
 # --- marketplace accounts (everything except eBay) -------------------------
@@ -2186,21 +2194,40 @@ def get_marketplace_account_best_effort(user_id: str,
         return None
 
 
-def disconnect_marketplace_account(user_id: str, marketplace: str) -> None:
+def disconnect_marketplace_account(user_id: str, marketplace: str) -> bool:
     """Clear the live link but keep settings, mirroring the eBay behavior:
-    reconnecting the same account restores its saved defaults. Never raises."""
+    reconnecting the same account restores its saved defaults. Never raises.
+
+    Returns whether the link is GONE — the same reasoning
+    save_marketplace_account spells out, applied to the other direction. A
+    swallowed failure here used to be indistinguishable from success: the
+    route answered ok, the card said "disconnected", and the next reload
+    showed the connection still there with nothing to explain it. A seller
+    who cannot disconnect and cannot reconnect is stuck, and being told the
+    reset worked is what keeps them pressing the same button.
+
+    No row is True, not False: there is nothing to disconnect and nothing
+    left connected, which is the state the caller asked for. Only a write
+    that did not land, or a database that could not be reached, is False.
+    """
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            # No database configured: nothing is stored, so nothing is
+            # connected. Consistent with the read side, which reports the
+            # same deployment as having no account rather than failing.
+            return True
         with Session(eng) as s:
             acct = s.get(MarketplaceAccount, (user_id, marketplace))
-            if acct is not None:
-                acct.refresh_token = ""  # 'connected' checks this; settings stay
-                acct.updated_at = _now()
-                s.commit()
+            if acct is None:
+                return True
+            acct.refresh_token = ""  # 'connected' checks this; settings stay
+            acct.updated_at = _now()
+            s.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: disconnect_marketplace_account failed: {exc}")
+        return False
 
 
 def get_listing(listing_id: str) -> Optional[dict]:

@@ -122,7 +122,12 @@ class MarketplaceProvider(Protocol):
         token refresh failed (publishing then falls back to dry-run)."""
         ...
 
-    def disconnect(self, uid: str) -> None: ...
+    def disconnect(self, uid: str) -> bool:
+        """Clear this user's link to the marketplace. Returns whether it is
+        gone — a disconnect reported as done and not done strands the seller
+        in a state they cannot leave, since reconnecting is the thing that
+        was already failing. Never raises."""
+        ...
 
     def forget_cached_creds(self, uid: str) -> None:
         """Drop any cached access token for this user.

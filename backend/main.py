@@ -910,6 +910,12 @@ def _diagnostics() -> dict:
         "etsy_seats": config.etsy_seat_ceiling(),
         "etsy_roster": len(config.ETSY_OWNER_EMAILS),
         "etsy_gate_active": config.etsy_gate_active(),
+        # True when the two above disagree about who is protected: the tier
+        # still restricts who may authorize, and an empty roster leaves the
+        # gate inert — so every seller reaches Etsy's refusal page. Carries
+        # its own config_warnings() line; reported here too because this is
+        # the endpoint an operator opens when a seller says Connect is broken.
+        "etsy_access_unverified": config.etsy_access_unverified(),
         # Photo storage: is the R2 bucket wired up — and if not, exactly which
         # pieces are missing (four credentials sat deployed for a week while a
         # bare `false` here hid that two more vars were expected) — plus how
@@ -5509,7 +5515,9 @@ def ebay_disconnect(request: Request) -> dict:
     # them; a different account overwrites them on connect (see the callback).
     ebay_account.forget_verified(uid)
     _forget_store_categories(uid)
-    db.disconnect_ebay_account(uid)
+    if not db.disconnect_ebay_account(uid):
+        raise HTTPException(503, "Couldn't disconnect eBay just now — nothing "
+                                 "changed. Try again in a moment.")
     return {"ok": True}
 
 
@@ -12217,7 +12225,9 @@ def easypost_disconnect(request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    db.disconnect_marketplace_account(uid, _EASYPOST)
+    if not db.disconnect_marketplace_account(uid, _EASYPOST):
+        raise HTTPException(503, "Couldn't disconnect EasyPost just now — "
+                                 "nothing changed. Try again in a moment.")
     return {"ok": True}
 
 
@@ -12552,6 +12562,11 @@ def marketplace_roster(request: Request) -> dict:
         # marketplace itself won't let THIS seller authorize it (Etsy's
         # seller-app wall). Per-user, so it can't be folded into coming_soon.
         pending, pending_note = marketplaces.access_pending(p, uid)
+        # And the case neither of those covers: the marketplace's wall is up
+        # and nothing here knows who gets past it, so the Connect button is
+        # live but its outcome is the marketplace's to decide, off-site, with
+        # no callback. The UI says so before the seller leaves.
+        unverified, unverified_note = marketplaces.access_unverified(p)
         out.append({
             "key": p.key,
             "label": p.label,
@@ -12561,6 +12576,8 @@ def marketplace_roster(request: Request) -> dict:
             "coming_soon_note": soon_note,
             "access_pending": pending,
             "access_pending_note": pending_note,
+            "access_unverified": unverified,
+            "access_unverified_note": unverified_note,
             "connected": bool(status.get("connected")),
             "needs_reconnect": bool(status.get("needs_reconnect")),
             "username": status.get("username", ""),
@@ -13103,7 +13120,13 @@ def marketplace_disconnect(marketplace: str, request: Request) -> dict:
     uid = _uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    provider.disconnect(uid)
+    # A disconnect that did not land is a failed disconnect, and saying so
+    # is the whole point: the seller is told nothing changed and can retry,
+    # instead of reloading onto a card that still says connected after being
+    # told it was not. The write failure is logged with its cause.
+    if not provider.disconnect(uid):
+        raise HTTPException(503, f"Couldn't disconnect {provider.label} just "
+                                 f"now — nothing changed. Try again in a moment.")
     return {"ok": True}
 
 

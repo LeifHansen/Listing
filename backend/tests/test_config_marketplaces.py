@@ -217,6 +217,60 @@ def test_etsy_gate_is_off_until_an_owner_is_named(fresh_config):
     assert cfg.etsy_access_pending("") is False
 
 
+def test_an_empty_roster_is_reported_as_the_dead_end_it_makes(fresh_config):
+    """The gate standing down is right (see the test above) and is NOT the
+    same as Etsy being open: the wall is still there, and now nothing here
+    holds anyone back from walking into it. Config says so, and says it to
+    the operator too — this is the one Etsy misconfiguration that looks like
+    success from in here."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback")
+    assert cfg.etsy_gate_active() is False        # nothing to gate with
+    assert cfg.etsy_access_unverified() is True   # and a wall still standing
+    warning = [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]
+    assert warning and "seller" in warning[0]
+
+
+def test_a_named_roster_settles_the_question_either_way(fresh_config):
+    """With a roster the app knows the answer for every seller — blocked or
+    cleared — so there is nothing left to be unsure about."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback",
+                       ETSY_OWNER_EMAILS="owner@example.com")
+    assert cfg.etsy_access_unverified() is False
+    assert cfg.config_warnings() == []
+
+
+def test_commercial_access_settles_it_without_a_roster(fresh_config):
+    """The other way out: no wall left, so an empty roster gates nobody and
+    strands nobody. The warning must retire with the gate."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback",
+                       ETSY_ACCESS_TIER="commercial")
+    assert cfg.etsy_access_unverified() is False
+    assert cfg.config_warnings() == []
+
+
+def test_an_unconfigured_etsy_is_not_warned_about_its_roster(fresh_config):
+    """No credentials means no Connect button to walk anyone off a cliff.
+    The missing-variable explainer is the story there, and stacking a roster
+    warning on top of it trains the operator to skim past both."""
+    cfg = fresh_config()
+    assert cfg.etsy_access_unverified() is True    # true, and not yet anyone's problem
+    assert [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w] == []
+
+
+def test_the_empty_roster_warning_names_the_tier_the_seller_will_meet(fresh_config):
+    """An approved personal app and an unapproved seller app strand sellers
+    for different reasons, and the operator's next move differs: seat the
+    shops Etsy approved, versus apply to Etsy at all."""
+    cfg = fresh_config(ETSY_CLIENT_ID="key123", ETSY_SHARED_SECRET="s3cret",
+                       ETSY_REDIRECT_URI="https://app.example/api/etsy/callback",
+                       ETSY_ACCESS_TIER="personal")
+    warning = [w for w in cfg.config_warnings() if "ETSY_OWNER_EMAILS" in w]
+    assert warning and "personal" in warning[0]
+
+
 def test_etsy_owner_connects_while_everyone_else_waits(fresh_config):
     cfg = fresh_config(ETSY_OWNER_EMAILS="owner@example.com")
     assert cfg.etsy_gate_active() is True

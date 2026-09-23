@@ -808,6 +808,30 @@ def etsy_access_pending(email: Optional[str]) -> bool:
     return (email or "").strip().lower() not in ETSY_OWNER_EMAILS
 
 
+def etsy_access_unverified() -> bool:
+    """Is Etsy's wall still up with nothing here that knows who gets past it?
+
+    The one state the gate above cannot act on: Etsy has not granted
+    Commercial Access, so all but a handful of accounts are refused on Etsy's
+    own page — and no roster names which. etsy_gate_active() is therefore
+    false, etsy_access_pending() says "not pending" to everyone, and every
+    seller is redirected into "Only the app owner may authorize a seller app"
+    with nothing redirected back for this app to explain. That is the dead end
+    the gate exists to prevent, reached by leaving the gate unconfigured.
+
+    Deliberately NOT a reason to refuse the connect: with no roster there is
+    no way to tell the owner from anyone else, and a guess in that direction
+    locks the operator out of their own shop — which is exactly why
+    etsy_gate_active() stands down here. What this drives instead is a caution
+    the seller reads BEFORE leaving the site, so Etsy's page arrives as a named
+    outcome with a next step rather than as a wall the app walked them into.
+
+    Config-only, so the roster build can read it without a user lookup; the
+    per-user question next to it is etsy_access_pending().
+    """
+    return etsy_access_tier() != "commercial" and not ETSY_OWNER_EMAILS
+
+
 # --- Depop -----------------------------------------------------------------
 # Depop's official Selling API is partner-gated (partnerapi.depop.com): the
 # endpoints below become known once Depop grants partner credentials, so the
@@ -1021,6 +1045,27 @@ def config_warnings() -> list[str]:
             f"ETSY_APP_SEATS={_ETSY_APP_SEATS!r} is not a seat count (a whole "
             f"number, 0 for no ceiling), so the ceiling for the "
             f"{etsy_access_tier()} tier is used instead.")
+    # The same dead end, reached from the other side: the roster left empty
+    # while Etsy's wall is still up. Naming nobody does not open Etsy to
+    # everyone, it stands the gate down (there is no way to tell the owner
+    # from anyone else, and guessing locks the operator out of their own
+    # shop) — so every seller is waved past this app and refused on Etsy's
+    # page instead. Worth a line because it is the one Etsy misconfiguration
+    # that looks like success from in here: credentials set, card offered,
+    # Connect button live, and a wall nobody here can see.
+    if etsy_oauth_ready() and etsy_access_unverified():
+        tier = etsy_access_tier()
+        who = ("the single Etsy account that registered the keystring"
+               if tier == "seller" else
+               f"the shops Etsy seated on the {tier} tier")
+        warnings.append(
+            f"ETSY_OWNER_EMAILS is empty while Etsy is on the {tier} tier, so "
+            f"the seller-app gate is inert: everyone is sent to Etsy, and all "
+            f"but {who} stop on \"Only the app owner may authorize a seller "
+            f"app\" with nothing redirected back. Sellers are warned before "
+            f"they leave, but the fix is to name the roster — or to set "
+            f"ETSY_ACCESS_TIER=commercial once Etsy grants it.")
+
     # And the one that puts sellers back in front of Etsy's error page. Naming
     # more sellers than Etsy seats does not seat them: it waves the overflow
     # past THIS app's gate, and Etsy refuses them on its own page, off-site,
