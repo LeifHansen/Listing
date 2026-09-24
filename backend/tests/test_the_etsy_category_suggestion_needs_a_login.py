@@ -32,7 +32,7 @@ def api(monkeypatch, every_marketplace):
     ratelimit.reset()
 
     def _as(uid):
-        monkeypatch.setattr(main, "_uid", lambda _r: uid)
+        monkeypatch.setattr(main.deps, "uid", lambda _r: uid)
         return TestClient(main.app), asked
     return _as
 

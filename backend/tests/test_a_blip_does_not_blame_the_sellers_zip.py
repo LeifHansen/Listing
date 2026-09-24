@@ -39,7 +39,7 @@ URL_LEAK = ("Client error '401 Unauthorized' for url "
 @pytest.fixture
 def client(monkeypatch):
     from backend import main
-    monkeypatch.setattr(main, "_uid", lambda *a, **k: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda *a, **k: {"access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main.db, "save_ebay_account", lambda *a, **k: True)

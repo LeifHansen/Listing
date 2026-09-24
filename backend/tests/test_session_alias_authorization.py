@@ -49,7 +49,7 @@ def app_client(monkeypatch, tmp_path):
                      if sid == VICTIM else None))
     monkeypatch.setattr(db, "get_listing", lambda sid: None)
     # The caller is anonymous — no account at all.
-    monkeypatch.setattr(main, "_uid", lambda _r: "")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "")
 
     victim_dir = storage.ensure_session(VICTIM)
     photo = victim_dir / "optimized" / "img_000.jpg"

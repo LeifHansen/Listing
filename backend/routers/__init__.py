@@ -18,11 +18,11 @@ to memory:
   reads every module in this package as well as main.py, so a handler scoped
   to one seller's listing is held to the same check wherever it lives.
 - Many tests steer handlers by patching a name on main
-  (`monkeypatch.setattr(main, "_uid", ...)`). A moved handler reads its own
-  module's names, so such a patch would stop reaching it without failing.
-  tests/test_a_patch_on_main_never_silently_misses.py refuses a router that
-  binds a name the tests patch on main; move those tests' patches to the
-  router's module along with the code.
+  (`monkeypatch.setattr(main, "_ebay_creds_for", ...)`). A moved handler
+  reads its own module's names, so such a patch would stop reaching it
+  without failing. tests/test_a_patch_on_main_never_silently_misses.py
+  refuses a router that binds a name the tests patch on main; move those
+  tests' patches to the router's module along with the code.
 
 Within a router, import modules rather than functions (`from .. import db`,
 then `db.get_listing(...)`): a patch on a module attribute reaches every

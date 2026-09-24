@@ -454,7 +454,7 @@ def api(monkeypatch, tmp_path):
                                "listing": {"title": "Vintage tee"}}})
     monkeypatch.setattr(main, "db", fake)
     monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda *a, **k: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
     monkeypatch.setattr(main, "_in_background", lambda fn, *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "load_listing", lambda sid: None)

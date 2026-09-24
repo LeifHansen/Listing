@@ -54,7 +54,7 @@ def client(monkeypatch, tmp_path):
     written: dict[str, dict] = {}
 
     monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     monkeypatch.setattr(db, "get_listing", lambda sid: rows.get(sid))
     monkeypatch.setattr(main.db, "get_listing", lambda sid: rows.get(sid))
 

@@ -51,7 +51,7 @@ def api(monkeypatch, every_marketplace):
     store = {rid: _record(rid) for rid in ("a", "b", "c")}
     published: list[str] = []
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda key: _Etsy() if key == "etsy" else None)
     monkeypatch.setattr(main.db, "get_listings",

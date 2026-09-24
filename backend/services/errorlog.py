@@ -273,7 +273,7 @@ def note_user(user_id: str) -> None:
     """Attach the signed-in seller to the current request, if there is one.
 
     The id, never the email: the id finds the account in the console and is
-    not itself personal data the way an address is. Called from main._uid,
+    not itself personal data the way an address is. Called from deps.uid,
     the one place the id is already in hand — resolving it here instead would
     add a database read to every request, and auth.current_user now RAISES on
     a database blip, which would turn one Neon hiccup into a failing health

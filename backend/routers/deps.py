@@ -1,8 +1,8 @@
 """Request helpers shared by main.py and the route modules beside this one.
 
-What a handler needs from the request that belongs to no one area: where the
-caller is, the sign-in rate limit, the opaque page cursor, and the superadmin
-gate with its audit trail. They live here, not in main.py, because a route
+What a handler needs from the request that belongs to no one area: who and
+where the caller is, the sign-in rate limit, the opaque page cursor, and the
+superadmin gate with its audit trail. They live here, not in main.py, because a route
 module cannot import main.py — main includes the routers, so the reverse is
 an import cycle.
 """
@@ -16,6 +16,19 @@ from fastapi import HTTPException, Request
 
 from .. import auth, db, ratelimit
 from ..config import log
+from ..services import errorlog
+
+
+def uid(request: Request) -> Optional[str]:
+    """The signed-in seller's id, or None for an anonymous caller."""
+    user = auth.current_user(request)
+    # The one choke point where the seller's id is already resolved. Doing
+    # this in the request middleware instead would add a database read to
+    # every asset fetch — and auth.current_user RAISES StorageUnavailable on
+    # a database blip, which would turn one Neon hiccup into a failing
+    # liveness probe on the only machine.
+    errorlog.note_user(user["id"] if user else "")
+    return user["id"] if user else None
 
 
 def client_ip(request: Request) -> str:

@@ -33,7 +33,7 @@ def connected(monkeypatch):
     # route reads it the same way.
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda request: {"access_token": "tok", "_uid": "u1"})
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     return TestClient(main.app)
 
 

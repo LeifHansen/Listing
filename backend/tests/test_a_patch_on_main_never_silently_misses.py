@@ -1,16 +1,17 @@
 """A test that patches `main` has to still be patching something.
 
-Nearly a hundred test files steer the app by replacing a name on
-backend.main — `monkeypatch.setattr(main, "_uid", lambda _r: "u1")` — and
-over fifty names are patched that way. It works because the handlers live in
-main.py and look those names up in main's globals each time they run.
+Some ninety test files steer the app by replacing a name on backend.main,
+as in `monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)`,
+and fifty-odd names are patched that way. It works because the handlers live
+in main.py and look those names up in main's globals each time they run.
 
 Moving a handler out of main.py breaks that without breaking anything loud.
 The moved code reads its OWN module's binding — the function it imported, or
 the copy it was moved with — so the patch still succeeds, the handler runs
 the real thing, and the test goes on passing about code it no longer
-controls. A stubbed `_uid` becomes the real one, which answers "anonymous",
-and a test that a stranger is refused keeps passing for the wrong reason.
+controls. A stub that says "someone else" becomes the real lookup, which
+says "nobody", and a test that a stranger is refused keeps passing for the
+wrong reason.
 
 So the split into backend/routers/ is held to these rules, read off the
 source alone (no app is booted, so this runs in the light CI job too):

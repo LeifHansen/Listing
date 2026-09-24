@@ -106,7 +106,7 @@ def ending(monkeypatch):
         purged: list[str] = []
         monkeypatch.setattr(main.auth, "current_user",
                             lambda request: {"id": "u1"})
-        monkeypatch.setattr(main, "_uid", lambda request: "u1")
+        monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
         monkeypatch.setattr(main, "_ebay_creds_for",
                             lambda request: {"access_token": "tok",
                                              "ebay_username": "seller"})

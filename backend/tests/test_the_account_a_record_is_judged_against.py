@@ -109,7 +109,7 @@ def _endable(monkeypatch, owner: str):
            "listing": {"title": "Simon Pearce Hand Blown Glass Heart",
                        "source": "ebay", "ebay_listing_id": "123456789012",
                        "ebay_account": owner}}
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.auth, "current_user", lambda _r: {"id": "u1"})
     monkeypatch.setattr(main, "_ebay_creds_for", lambda _r: dict(CREDS))
     monkeypatch.setattr(main.db, "get_listing", lambda _i: rec)

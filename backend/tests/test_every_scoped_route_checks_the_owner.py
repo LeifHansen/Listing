@@ -47,7 +47,14 @@ WHERE = {n.name: where for where, n in DEFINED}
 OWNERSHIP = re.compile(r"_assert_session_owner|\['user_id'\] != |\.get\('user_id'\) != ")
 
 # How this file spells "who is asking".
-IDENTITY = re.compile(r"_uid\(request\)|user\['id'\]|creds\['_uid'\]")
+IDENTITY = re.compile(r"deps\.uid\(request\)|run_in_threadpool\(deps\.uid, request\)"
+                      r"|user\['id'\]|creds\['_uid'\]")
+
+# Calls that only RECORD who is asking. note_user tags the error log with the
+# caller; it sits inside the helper every handler calls to learn who that is,
+# so counting it as a scoped lookup made every such handler look checked.
+RECORDS_ONLY = ("debug", "info", "warning", "error", "exception", "critical",
+                "note_user")
 
 # Every identifier namespace a route can be scoped by — not just the listing
 # ids P0-01 was about. A bulk job holds a seller's drafts and photos, and a
@@ -101,21 +108,27 @@ def _routes(node) -> list[tuple[str, str]]:
 
 def _scopes_a_call(node) -> bool:
     """Is the caller's identity passed INTO a call — i.e. does the lookup
-    itself filter by owner (`db.delete_listing(id, _uid(request))`)?
+    itself filter by owner (`db.delete_listing(id, deps.uid(request))`)?
+    Directly, or through the local it was put in first
+    (`uid = deps.uid(request)` ... `jobstore.internal(job_id, uid)`).
 
     An argument, deliberately, not a substring of the function: a handler that
-    only logs `_uid(request)` has checked nothing, and that is exactly what
+    only logs `deps.uid(request)` has checked nothing, and that is exactly what
     `delete_listing` also does one line below its real check.
     """
+    held = {t.id for a in ast.walk(node) if isinstance(a, ast.Assign)
+            and IDENTITY.search(ast.unparse(a.value))
+            for t in a.targets if isinstance(t, ast.Name)}
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
         target = ast.unparse(call.func)
-        if target.split(".")[-1] in ("debug", "info", "warning", "error",
-                                     "exception", "critical"):
+        if target.split(".")[-1] in RECORDS_ONLY:
             continue
         args = call.args + [k.value for k in call.keywords]
-        if any(IDENTITY.search(ast.unparse(a)) for a in args):
+        if any(IDENTITY.search(ast.unparse(a))
+               or any(isinstance(n, ast.Name) and n.id in held for n in ast.walk(a))
+               for a in args):
             return True
     return False
 
@@ -159,6 +172,20 @@ def test_the_scan_found_the_routes_it_is_meant_to_guard():
                      "relist_listing", "upload_more", "bulk_status",
                      "import_status", "easypost_refund"):
         assert expected in SCOPED, f"{expected} is no longer being scanned"
+
+
+def test_asking_who_is_asking_is_not_a_check():
+    """Resolving the caller's id checks it against nothing. The resolver hands
+    the id to the error log, and the scan used to follow a handler into it
+    and read that as a lookup scoped by owner — so any handler that so much
+    as asked who was calling passed, whatever it then did with the id."""
+    assert "uid" in FUNCS, "the resolver is no longer in the scan's call graph"
+    handler = ast.parse(
+        "def peek(listing_id, request):\n"
+        "    who = uid(request)\n"
+        "    log.info('peek by %s', who)\n"
+        "    return db.get_listing(listing_id)\n").body[0]
+    assert not _guarded(handler)
 
 
 def test_no_function_name_is_defined_in_two_scanned_modules():
@@ -206,7 +233,7 @@ def test_the_delete_is_scoped_in_the_query_itself():
         "db.delete_listing no longer refuses a listing owned by someone else"
     # And the route still hands it a uid rather than defaulting to None.
     route = ast.unparse(FUNCS["delete_listing"])
-    assert "db.delete_listing(listing_id, _uid(request))" in route
+    assert "db.delete_listing(listing_id, deps.uid(request))" in route
 
 
 def test_the_job_readers_actually_use_the_uid_they_are_given():

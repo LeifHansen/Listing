@@ -43,7 +43,7 @@ def store(monkeypatch, tmp_path):
 
 @pytest.fixture
 def client(store, monkeypatch):
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     return TestClient(main.app)
 
 

@@ -36,7 +36,7 @@ def client(monkeypatch):
            "listing": {"title": "A jacket", "images": list(PHOTOS)}}
 
     monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     monkeypatch.setattr(db, "get_listing", lambda sid: row if sid == "s1" else None)
 
     def _mutate(sid, fn, status=None, user_id=None):
@@ -124,7 +124,7 @@ def diskonly(monkeypatch):
     saved: list[list[str]] = []
 
     monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     monkeypatch.setattr(db, "get_listing", lambda sid: None)
     monkeypatch.setattr(db, "mutate_listing_data", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "load_listing",

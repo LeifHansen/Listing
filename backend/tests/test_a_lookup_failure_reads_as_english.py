@@ -49,7 +49,7 @@ def client(monkeypatch):
     from backend import main
     monkeypatch.setattr(main.config, "taxonomy_ready", lambda: True)
     monkeypatch.setattr(main, "_taxonomy_guard", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda *a, **k: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda *a, **k: {"access_token": "tok", "_uid": "u1"})
     return main, TestClient(main.app, raise_server_exceptions=False)

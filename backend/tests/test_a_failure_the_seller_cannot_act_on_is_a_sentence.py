@@ -78,7 +78,7 @@ def test_a_value_that_fails_validation_keeps_the_field_and_the_rule(monkeypatch)
     monkeypatch.setattr(db, "get_listing", lambda lid: dict(stored) if lid == "lst1" else None)
     monkeypatch.setattr(db, "enabled", lambda: True)
     monkeypatch.setattr(db, "upsert_listing", lambda *a, **k: True)
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
     client = TestClient(main.app)
 

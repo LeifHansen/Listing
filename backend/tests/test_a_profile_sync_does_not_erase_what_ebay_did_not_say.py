@@ -23,7 +23,7 @@ from backend import main  # noqa: E402
 @pytest.fixture
 def sync(monkeypatch):
     saved: dict = {}
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda request: {"access_token": "t", "_uid": "u1"})
     monkeypatch.setattr(main.ebay_auth, "fetch_policies_and_location",
