@@ -305,10 +305,12 @@ Ordered by what it costs a seller.
   `backend/routers/` holds the operator console, sign-in and the inbox, and
   `routers/deps.py` holds the caller's id, the ownership check and the eBay
   credentials. 59 more routes can move as they are. The other 64 read
-  helpers that tests patch on `main` — `_support_reference` pins 23 of
-  them, `_in_background` 16, the token charge (`_charge_uid`, `_charge_ai`)
-  most of the rest — so move each helper into `routers/deps.py` and repoint
-  its patches in the same change, the way `_uid` moved
+  something tests patch on `main`: helpers shared across areas
+  (`_support_reference` pins 23 of them, `_in_background` 16, the token
+  charge 12) and each area's own helpers and limits (`LIST_CAP` pins 9,
+  then `_purge_session_images`, `_easypost_key`, `_finish_connect`). Move a
+  shared helper into `routers/deps.py`, and an area's own into its router,
+  repointing the patches in the same change, the way `_uid` moved
   (`test_a_patch_on_main_never_silently_misses.py` explains why a patch left
   on `main` would stop reaching the moved code without failing). Then
   `cards.jsx` / `BulkMode.jsx` / `useListingForm.js` (1–2k lines each), with
