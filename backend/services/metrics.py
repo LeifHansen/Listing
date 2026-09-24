@@ -24,6 +24,7 @@ explain the blank numbers instead of showing every listing 0 views.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -64,6 +65,15 @@ _TRAFFIC_TTL = 60 * 60
 
 # How many sellers either cache holds before it evicts.
 _CACHE_MAX = 200
+
+# One computation per cache key at a time. The dashboard's insights and the
+# store's metrics load fire in the same render, and both used to MISS the short
+# cache together -- each then walked the account's active listings, asked about
+# up to 25 pending offers, and read the traffic report, the whole set twice,
+# which is exactly what the cache exists to prevent. The second caller now
+# waits for the first and is answered from what it cached.
+_INFLIGHT: dict[str, threading.Lock] = {}
+_INFLIGHT_GUARD = threading.Lock()
 
 
 def _make_room(cache: dict, ttl: float, cap: int = _CACHE_MAX) -> None:
@@ -495,7 +505,27 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         if status is not None:
             status.update(hit[2])
         return hit[1]
+    with _INFLIGHT_GUARD:
+        lock = _INFLIGHT.setdefault(cache_key, threading.Lock())
+    try:
+        with lock:
+            # Whoever held the lock may have just answered this very question.
+            # A `fresh` read (the seller pressing Sync) still asks eBay itself.
+            hit = _CACHE.get(cache_key)
+            if hit and not fresh and time.time() - hit[0] < _TTL:
+                if status is not None:
+                    status.update(hit[2])
+                return hit[1]
+            return _compute(creds, token, ids, cache_key, status)
+    finally:
+        with _INFLIGHT_GUARD:
+            if _INFLIGHT.get(cache_key) is lock and not lock.locked():
+                _INFLIGHT.pop(cache_key, None)
 
+
+def _compute(creds: dict, token: str, ids: list[str], cache_key: str,
+             status: Optional[dict]) -> dict[str, dict]:
+    """listing_metrics' eBay reads, run by the one caller holding its key."""
     out: dict[str, dict] = {}
     st = {"traffic_ok": True, "needs_reconnect": False}
     # The ids eBay actually answered a report for. Not `ids`: a store bigger
