@@ -6411,17 +6411,19 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     # back down, and the rotation is simply gone. Worse, eBay is handed the R2
     # public URL at publish, so the sideways photo is the one that goes live.
     # A rotate is not done until the copy the world sees is rotated too.
+    #
+    # Read off the RETURN value, like edit-image and restore-original beside
+    # it: objstore.upload never raises -- it logs and answers None -- so the
+    # try/except this used to be wrapped in could not fire, a failed push
+    # answered 200, and every consequence described above still happened.
     if objstore.enabled():
-        try:
-            await run_in_threadpool(
-                objstore.upload, path, objstore.key_for(session_id, name))
-        except Exception as exc:  # noqa: BLE001 - the local file IS rotated
-            log.warning("rotate: R2 push failed for %s/%s: %s",
-                        session_id, name, exc)
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("rotate: R2 push failed for %s/%s", session_id, name)
             raise HTTPException(
                 502, "The photo was rotated here but the copy we publish from "
-                     "didn't update. Try the rotation again in a moment."
-            ) from exc
+                     "didn't update. Try the rotation again in a moment.")
     _in_background(db.touch_listing, session_id, what="rotate touch")
     # The rotated file's own timestamp, for the client's cache-buster. Its
     # per-open counter restarted at 0 on every open of the editor, and a
