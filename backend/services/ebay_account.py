@@ -407,9 +407,16 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                 (priv or {}).get("registration_complete", "unknown"),
                 (priv or {}).get("selling_limit"))
 
+    # `every_listing` marks the findings that are about the ACCOUNT and so
+    # decide every other publish the same way. A bulk publish stops at the
+    # first one (DraftsStrip.publishRun): the next nineteen drafts would each
+    # spend a real AddItem call, this whole diagnosis again, and a refusal
+    # card, to learn the same sentence. The unexplained placeholder, and the
+    # probe's "account_words" (account OR something the listing carries), are
+    # deliberately not marked -- only a verdict that names the account is.
     if status and status != "OPTED_IN":
         found.append({
-            "target": "account", "level": "error",
+            "target": "account", "level": "error", "every_listing": True,
             "title": "This eBay account hasn't finished payments setup",
             "fix": ("eBay reports the account as “" + status.replace("_", " ").lower()
                     + "” for managed payments, and it won't accept new listings "
@@ -420,7 +427,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
 
     if priv is not None and not priv.get("registration_complete"):
         found.append({
-            "target": "account", "level": "error",
+            "target": "account", "level": "error", "every_listing": True,
             "title": "eBay hasn't finished setting this account up to sell",
             "fix": ("eBay reports this account's seller registration as "
                     "incomplete, and it won't accept listings until that's "
@@ -432,7 +439,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
     limit = (priv or {}).get("selling_limit") or {}
     if limit and _limit_is_exhausted(limit):
         found.append({
-            "target": "account", "level": "error",
+            "target": "account", "level": "error", "every_listing": True,
             "title": "This account is at its eBay selling limit",
             "fix": ("eBay caps what a new account may list — this one is at "
                     + _limit_words(limit) + ". New listings are refused until "
@@ -727,7 +734,7 @@ def _scope_issue(scope: str) -> dict:
         }
     if scope == "account":
         return {
-            "target": "account", "level": "error",
+            "target": "account", "level": "error", "every_listing": True,
             "title": "eBay is refusing every listing from this account",
             "fix": ("We asked eBay to check this same listing with a plain "
                     "title and description, then again with no business "

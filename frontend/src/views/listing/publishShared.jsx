@@ -207,6 +207,15 @@ export function allIssues(res) {
   ].filter(Boolean);
 }
 
+// A refusal that decides every other publish the same way: the server marks
+// a finding `every_listing` only when it names the ACCOUNT as the cause
+// (payments or registration unfinished, a spent selling limit, or eBay
+// refusing the listing with everything in it stripped away). A run of
+// publishes stops at the first one -- see DraftsStrip.publishRun.
+export function blocksEveryListing(res) {
+  return allIssues(res).some((i) => i.every_listing);
+}
+
 // The errors that point at ONE card's fields — what that card has to show,
 // and show without being asked, when a publish came back refused.
 export function issuesFor(res, target) {
