@@ -26,11 +26,28 @@ import { Select } from "@/components/ui/fields";
  * handed a policy from a store they'd disconnected.
  */
 
+// One request for the page, however many ask. Every draft card mounts this
+// hook through its shipping dropdown, and each one asked on its own while
+// nothing had answered yet -- a grid of thirty drafts sent thirty identical
+// /api/ebay/policies requests on its first paint, and every one of those is a
+// live round of eBay account calls (list_business_policies), against the same
+// app-wide allowance everything else here spends carefully. The editor's
+// PublishCard asks through here too. Cleared when it settles, so a later ask
+// (a reconnect, a retry after a failure) goes out fresh.
+let policiesInFlight = null;
+export function loadPolicies() {
+  if (!policiesInFlight) {
+    policiesInFlight = api("/api/ebay/policies")
+      .finally(() => { policiesInFlight = null; });
+  }
+  return policiesInFlight;
+}
+
 export function useFulfillmentPolicies() {
   const { ebay, policiesData, setPoliciesData } = useApp();
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
+    loadPolicies().then(setPoliciesData).catch(() => {});
   }, [ebay.connected, policiesData, setPoliciesData]);
   return {
     connected: ebay.connected,
