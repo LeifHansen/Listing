@@ -226,7 +226,9 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
         // with a second poll before believing it: a status check can 404 on a
         // blip (an auth hiccup mid-batch does it) while the batch itself is
         // still running, and declaring it dead is not something we can undo.
-        const gone = (e.message || "").includes("(404)");
+        // `e.status`, not the message: api() carries the server's sentence
+        // there, never the number.
+        const gone = e.status === 404;
         notFound.current = gone ? notFound.current + 1 : 0;
         if (gone && notFound.current < 2) {
           timer = setTimeout(poll, 3000);
@@ -368,7 +370,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     try {
       await api(`/api/listings/${it.session_id}`, { method: "DELETE" });
     } catch (e) {
-      if (!(e.message || "").includes("(404)")) {
+      if (e.status !== 404) {
         toast(`Couldn't dismiss that: ${e.message}`, { kind: "error" });
         setDismissing((d) => ({ ...d, [it.session_id]: false }));
         return;

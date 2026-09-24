@@ -1032,7 +1032,11 @@ export function AppProvider({ children }) {
       try {
         job = await api(`/api/ebay/import-status/${jobId}`);
       } catch (e) {
-        const gone = (e.message || "").includes("(404)");
+        // `e.status`, never the message: api() words the message from the
+        // server's own `detail`, which never carries the number, so a check
+        // for "(404)" in it could not match and a forgotten job read as a
+        // run of blips until the forty-minute deadline.
+        const gone = e.status === 404;
         // A 404 twice over means the server really has no such job (a restart
         // that predates the mirror, say). Anything else is a blip worth
         // retrying — the import itself is still running server-side.
@@ -1481,7 +1485,11 @@ export function AppProvider({ children }) {
         // must not declare a running batch finished. Everything else is worth
         // retrying — the batch is still running, and this heartbeat is the only
         // thing that will notice it finish while the queue screen is closed.
-        if ((e.message || "").includes("(404)")) misses += 1;
+        // `e.status`, not the message, which carries the server's sentence
+        // and never the number: read off the message, a forgotten job never
+        // settled, and the banner said "processing" for as long as the tab
+        // stayed open.
+        if (e.status === 404) misses += 1;
         fails += 1;
         if (misses >= 2) {
           if (!stopped) bulkSettled();
