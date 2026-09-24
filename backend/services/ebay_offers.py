@@ -48,6 +48,7 @@ from typing import Optional
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from .ebay import rest_headers as _headers
 
 log = logging.getLogger("thryft.offers")
@@ -166,13 +167,6 @@ def validate_discount(percent) -> float:
     return float(round(value))
 
 
-def _is_scope_error(resp: httpx.Response) -> bool:
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return ("insufficient" in body and "scope" in body) or "access_denied" in body
-
-
 def _first_error(resp: httpx.Response) -> tuple[int, str]:
     """(errorId, message) from eBay's error envelope — (0, "") when unreadable.
 
@@ -232,7 +226,7 @@ def eligible_items(creds: Optional[dict], client: Optional[httpx.Client] = None
         if r.status_code == 204:
             return set()
         if r.status_code != 200:
-            if _is_scope_error(r):
+            if is_scope_error(r):
                 raise ScopeError()
             raise RuntimeError(
                 f"eligible items failed ({r.status_code}): {r.text[:200]}")
@@ -291,7 +285,7 @@ def send_offer(creds: Optional[dict], listing_id: str, percent: float,
             first = offers[0] if offers and isinstance(offers[0], dict) else {}
             return {"offer_id": str(first.get("offerId") or ""),
                     "status": str(first.get("offerStatus") or "")}
-        if _is_scope_error(r):
+        if is_scope_error(r):
             raise ScopeError()
         raise _refusal(r)
     finally:

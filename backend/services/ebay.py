@@ -37,6 +37,21 @@ def rest_headers(token: str) -> dict:
     }
 
 
+def is_scope_error(resp) -> bool:
+    """A Sell API refusal the seller fixes by RECONNECTING eBay: the token
+    predates a scope the call needs (refreshes keep the scopes first
+    granted), as opposed to a transient blip worth retrying.
+
+    One definition for every Sell API client. There were five, and two had
+    already drifted -- ebay_orders and ebay_messages missed eBay's
+    `access_denied` body, so the same refusal read as "reconnect" to the
+    offers, metrics and promotions code and as an outage to those two."""
+    if resp.status_code in (401, 403):
+        return True
+    body = resp.text.lower()
+    return ("insufficient" in body and "scope" in body) or "access_denied" in body
+
+
 def sku_for(session_id: str) -> str:
     # Must be STABLE for the life of the listing: republishing the same session
     # reuses the SKU so we update the existing offer instead of creating a

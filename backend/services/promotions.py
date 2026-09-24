@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from ..models import Listing
 from . import ebay
 
@@ -51,13 +52,6 @@ class _ScopeError(Exception):
 from .ebay import rest_headers as _headers  # noqa: E402
 
 
-def _is_scope_error(resp: httpx.Response) -> bool:
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return ("insufficient" in body and "scope" in body) or "access_denied" in body
-
-
 def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: str) -> str:
     cache_key = f"{marketplace}:{token[-12:]}"
     if cache_key in _CAMPAIGN_CACHE:
@@ -70,7 +64,7 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
             if c.get("campaignName") == CAMPAIGN_NAME and c.get("campaignId"):
                 _CAMPAIGN_CACHE[cache_key] = c["campaignId"]
                 return c["campaignId"]
-    elif _is_scope_error(r):
+    elif is_scope_error(r):
         raise _ScopeError()
     # Otherwise create it (COST_PER_SALE = pay only when it sells).
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -88,7 +82,7 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
         if cid:
             _CAMPAIGN_CACHE[cache_key] = cid
             return cid
-    if _is_scope_error(r):
+    if is_scope_error(r):
         raise _ScopeError()
     raise RuntimeError(f"campaign create failed ({r.status_code}): {r.text[:200]}")
 
@@ -107,7 +101,7 @@ def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
         headers=_headers(token), json={"requests": [req]})
     if r.status_code in (200, 201, 207) and "error" not in r.text.lower():
         return {"ok": True}
-    if _is_scope_error(r):
+    if is_scope_error(r):
         raise _ScopeError()
     # Already advertised (a re-publish or a second promote) → move its bid.
     u = client.post(
@@ -130,7 +124,7 @@ def _create_or_update_ad(client: httpx.Client, base: str, token: str,
         headers=_headers(token), json=payload)
     if r.status_code in (200, 201, 207):
         return {"ok": True}
-    if _is_scope_error(r):
+    if is_scope_error(r):
         raise _ScopeError()
     # Ad already exists (re-publish) → update its bid to the new rate instead.
     if r.status_code == 409 or "already" in r.text.lower():

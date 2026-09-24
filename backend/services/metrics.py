@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from . import ebay_trading
 
 log = logging.getLogger("thryft.metrics")
@@ -163,14 +164,6 @@ def _quota_reset_time(now: Optional[datetime] = None) -> float:
     return reset.timestamp()
 
 
-def _is_scope_error(resp: httpx.Response) -> bool:
-    """A refusal the seller can fix by reconnecting, vs. a transient API blip."""
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return ("insufficient" in body and "scope" in body) or "access_denied" in body
-
-
 def _metric_keys(data: dict) -> list[str]:
     """The metric name of each metricValues column, in order.
 
@@ -220,7 +213,7 @@ def _traffic_page(token: str, listing_ids: list[str], start, end) -> dict[str, d
     )
     if r.status_code != 200:
         raise TrafficUnavailable(f"traffic_report {r.status_code}: {r.text[:160]}",
-                                 needs_reconnect=_is_scope_error(r),
+                                 needs_reconnect=is_scope_error(r),
                                  quota=r.status_code == 429)
     data = r.json()
     keys = _metric_keys(data)

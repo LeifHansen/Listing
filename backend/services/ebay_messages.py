@@ -45,6 +45,7 @@ from typing import Optional
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from ..config import log
 
 _TIMEOUT = 30
@@ -125,19 +126,12 @@ def _headers(token: str) -> dict:
             "Content-Type": "application/json"}
 
 
-def _scope_missing(resp: httpx.Response) -> bool:
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return "insufficient" in body and "scope" in body
-
-
 _RECONNECT = ("eBay didn't allow reading your messages — reconnect eBay in "
               "Settings to grant the new permission, then try again.")
 
 
 def _raise_for(resp: httpx.Response, verb: str) -> None:
-    if _scope_missing(resp):
+    if is_scope_error(resp):
         raise MessagesError(_RECONNECT, needs_reconnect=True)
     raise MessagesError(f"eBay returned {resp.status_code} {verb} messages.")
 
