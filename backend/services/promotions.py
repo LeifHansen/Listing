@@ -46,6 +46,27 @@ class _ScopeError(Exception):
     """The token can't use the Marketing API — the seller must reconnect."""
 
 
+class _EbayFailed(RuntimeError):
+    """eBay's Marketing API failed on its OWN side creating the campaign (a
+    5xx; production has seen errorId 35001, eBay's generic internal error)."""
+
+
+# When creating the campaign last failed on eBay's side, per account. Nothing
+# about the seller's listing or account can fix a 5xx, and every promoted
+# publish after one asked again -- a GET and a POST each, a refusal row in the
+# error feed each (x13 in two days), and, in a bulk run, the same failure once
+# per listing. For _CREATE_BACKOFF after one, promotion on that account waits.
+_CREATE_FAILED: dict[str, float] = {}
+_CREATE_BACKOFF = 30 * 60
+
+# What the seller reads instead of eBay's JSON error envelope, which is what
+# "Couldn't start the promotion: {exc}" used to put on their screen.
+_EBAY_FAILED_MESSAGE = ("eBay couldn't set up the promotion just now — the "
+                        "problem is on eBay's side, and the listing itself is "
+                        "live. Turn Promote on again in a little while to "
+                        "retry.")
+
+
 # Same JSON+language headers every Sell API call wants; ebay.py owns the one
 # definition so a change (an added header, a marketplace id) lands everywhere
 # instead of in whichever copy someone happened to edit.
@@ -84,6 +105,8 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
             return cid
     if is_scope_error(r):
         raise _ScopeError()
+    if r.status_code >= 500:
+        raise _EbayFailed(f"campaign create failed ({r.status_code}): {r.text[:200]}")
     raise RuntimeError(f"campaign create failed ({r.status_code}): {r.text[:200]}")
 
 
@@ -150,6 +173,12 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
                 "message": "Connect your eBay account to run promotions."}
     base = config.EBAY_API_BASE
     marketplace = config.EBAY_MARKETPLACE_ID
+    account = f"{marketplace}:{(creds or {}).get('_uid') or token[-12:]}"
+    failed_at = _CREATE_FAILED.get(account)
+    if failed_at and time.time() - failed_at < _CREATE_BACKOFF:
+        log.info("promote skipped (session=%s): eBay failed to create the "
+                 "campaign %.0fs ago", session_id, time.time() - failed_at)
+        return {"promoted": False, "message": _EBAY_FAILED_MESSAGE}
     # Which handle eBay knows this listing by: a Trading-published (or
     # imported) listing is addressed by item id; an Inventory-API listing by
     # the SKU we gave its inventory item.
@@ -167,6 +196,12 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
         return {"promoted": False, "needs_reconnect": True,
                 "message": "Reconnect your eBay account to grant ad permissions, "
                            "then republish to start the promotion."}
+    except _EbayFailed as exc:
+        if len(_CREATE_FAILED) >= 200:
+            _CREATE_FAILED.pop(min(_CREATE_FAILED, key=_CREATE_FAILED.get), None)
+        _CREATE_FAILED[account] = time.time()
+        log.warning("promote failed (session=%s): %s", session_id, exc)
+        return {"promoted": False, "message": _EBAY_FAILED_MESSAGE}
     except Exception as exc:  # noqa: BLE001 - promotion must never break publish
         log.warning("promote failed (session=%s): %s", session_id, exc)
         return {"promoted": False, "message": f"Couldn't start the promotion: {exc}"}
