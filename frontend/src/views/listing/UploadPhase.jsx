@@ -369,8 +369,8 @@ export function UploadPhase({ defaultOpen = false }) {
   const deletePhoto = async (gi, photo) => {
     if (!pending) return;
     try {
-      await postJson(`/api/bulk/notes/${pending.jobId}/delete-photo`,
-                     { gi, photo });
+      return await postJson(`/api/bulk/notes/${pending.jobId}/delete-photo`,
+                            { gi, photo });
     } catch (e) {
       toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
       throw e;

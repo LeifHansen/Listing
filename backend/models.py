@@ -798,6 +798,22 @@ class PendingPhotoRequest(BaseModel):
     photo: str
 
 
+class PendingItemRequest(BaseModel):
+    """One whole item to take out of a batch at the guidance step — see POST
+    /api/bulk/notes/{job_id}/delete-item.
+
+    `photo` is any one of the item's photo URLs, exactly as the paused job
+    published it. It is not what gets deleted; it is the proof of WHICH item
+    the seller was looking at. `gi` alone is a position, and positions move
+    the moment another item is removed — so a tap that crossed with a
+    renumbering is refused rather than taking out the item that slid into
+    the slot.
+    """
+
+    gi: int
+    photo: str
+
+
 class PublishRequest(BaseModel):
     session_id: SessionId
     listing: Listing

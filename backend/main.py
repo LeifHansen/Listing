@@ -48,8 +48,8 @@ from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
-                     MarketplaceState, PendingPhotoRequest, PublishRequest,
-                     RefineRequest, SessionOnlyRequest)
+                     MarketplaceState, PendingItemRequest, PendingPhotoRequest,
+                     PublishRequest, RefineRequest, SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, easypost, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
@@ -7634,13 +7634,19 @@ def _pending_items(session_id: str, names: list[str],
     the volume -- the pause is what stops it being purged) and from the
     listing's own session for a single upload, which is why the id is passed
     in rather than looked up.
+
+    `key` is the item's identity, where `gi` is only its slot: the slot is
+    renumbered when the seller removes an item above it, the key never is
+    (see delete_pending_item). A client holds what was typed against the key,
+    so a removal cannot slide one item's notes under its neighbour.
     """
     rows: list[dict] = []
     for gi, group in enumerate(groups):
         photos = [f"/media/{session_id}/optimized/{names[i]}"
                   for i in (group.get("indices") or [])
                   if 0 <= i < len(names)]
-        rows.append({"gi": gi, "name": group.get("name") or "",
+        rows.append({"gi": gi, "key": group.get("key", gi),
+                     "name": group.get("name") or "",
                      "photos": photos[:_PENDING_PHOTOS_PER_ITEM],
                      "photo_count": len(photos)})
     return rows
@@ -9025,6 +9031,109 @@ def delete_pending_photo(job_id: str, req: PendingPhotoRequest,
              "%d in the pile)", job_id, req.gi,
              len(regrouped[req.gi]["indices"]), len(left))
     return {"ok": True, "pending_items": pending}
+
+
+@app.post("/api/bulk/notes/{job_id}/delete-item")
+def delete_pending_item(job_id: str, req: PendingItemRequest,
+                        request: Request) -> dict:
+    """Take a whole item out of a batch, while the batch is still asking.
+
+    The photo delete's bigger sibling, for the same moment and the same
+    reason: the pile is sorted and nothing has been drafted, so the thing the
+    seller decided not to sell after all — or the stray group the model made
+    out of three shots of the tablecloth — costs nothing to drop here, and a
+    draft, a charge and a delete to drop anywhere later.
+
+    Same rules as the photo delete: the job stays PAUSED (revise, not claim),
+    and the item is checked against its own photos rather than trusted as an
+    index, so a tap from a tab that has not seen the last removal is refused
+    instead of taking out whichever item slid into that slot.
+
+    Batches only. A single upload has one item, and removing it is not an
+    edit to the question — it is walking away, which the uploader already
+    offers. The last item of a batch stays for the same reason; stopping the
+    batch is the honest way to drop that one.
+
+    The photos go with the item — out of `_names`, with every index
+    renumbered — except one the model also put under another item, which
+    that item still needs.
+    """
+    uid = _uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    if seen.get("done") or seen.get("phase") != _AWAITING_NOTES:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    if seen.get("kind") == "pipeline":
+        raise HTTPException(
+            400, "A single upload is one item — start over instead of "
+                 "removing it.")
+    rev = seen.get("_rev")
+    photo = (req.photo or "").strip()
+
+    staging = str(seen.get("_staging_id") or "")
+    names = [n for n in (seen.get("_names") or []) if isinstance(n, str)]
+    groups = [g for g in (seen.get("_groups") or [])
+              if isinstance(g, dict) and isinstance(g.get("indices"), list)]
+    if not staging or not names or not groups:
+        raise _photos_gone(
+            job_id, "run it again",
+            "This batch's photos are no longer on the server — they were "
+            "cleared while it waited for your notes. Please run the batch "
+            "again.")
+    if not 0 <= req.gi < len(groups):
+        raise _pending_item_gone()
+    mine = [i for i in groups[req.gi]["indices"] if 0 <= i < len(names)]
+    if photo not in {f"/media/{staging}/optimized/{names[i]}" for i in mine}:
+        raise _pending_item_gone()
+    if len(groups) <= 1:
+        raise HTTPException(
+            400, "That's the only item left — stop the batch instead.")
+
+    # Stamped with their key on the way through: until the first removal an
+    # item's key IS its slot (see _pending_items), and this is the call that
+    # makes the two differ.
+    others = [{**g, "key": g.get("key", gi)}
+              for gi, g in enumerate(groups) if gi != req.gi]
+    still_used = {i for g in others for i in g.get("indices") or []}
+    dropped = [i for i in mine if i not in still_used]
+    kept = [i for i in range(len(names)) if i not in set(dropped)]
+    moved = {old: new for new, old in enumerate(kept)}
+    left = [names[i] for i in kept]
+    regrouped = [{**g, "indices": [moved[i] for i in g.get("indices") or []
+                                   if i in moved]}
+                 for g in others]
+    pending = _pending_items(staging, left, regrouped)
+    job = jobstore.revise(job_id, _AWAITING_NOTES, uid, expect_rev=rev,
+                          _names=left, _groups=regrouped,
+                          pending_items=pending, total_photos=len(left),
+                          total_items=len(regrouped))
+    if job is None:
+        raise HTTPException(
+            409, "This batch moved on while that was sent — reload to see "
+                 "what it's working from.")
+    # Now that no plan points at them; best-effort, as for a single photo.
+    pile = storage.optimized_path(staging)
+    for i in dropped:
+        try:
+            if (pile / names[i]).is_file():
+                (pile / names[i]).unlink()
+        except OSError as exc:
+            log.info("bulk %s: couldn't drop %s from the pile: %s",
+                     job_id, names[i], exc)
+    log.info("bulk %s: seller removed item %d (%d photo(s)); %d item(s), "
+             "%d photo(s) left", job_id, req.gi, len(dropped),
+             len(regrouped), len(left))
+    return {"ok": True, "pending_items": pending}
+
+
+def _pending_item_gone() -> HTTPException:
+    """The item named is not where the client thinks it is — see
+    PendingItemRequest. Same meaning as _pending_photo_gone."""
+    return HTTPException(409, "That item has changed since you saw it — "
+                              "reload to see what's left.")
 
 
 @app.get("/api/bulk/status/{job_id}/brief")
