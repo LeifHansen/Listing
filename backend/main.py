@@ -830,8 +830,17 @@ def _rate_limit_auth(request: Request, bucket: str) -> None:
 
 
 @app.get("/api/health")
-def health() -> dict:
+async def health() -> dict:
     """Liveness, and nothing else.
+
+    `async def`, and that is load-bearing. Fly's check hits this every 15s
+    with a 5s timeout and replaces the machine -- killing any batch in flight
+    -- when it misses. A plain `def` runs on the threadpool, where it queued
+    behind whatever held the slots: forty-odd sync handlers each waiting on
+    eBay (four sequential policy lookups at 30s apiece on a slow day), a
+    Lower-prices run revising listings one by one, cutouts queued on the
+    inference lock. Everything below is a read of module constants, so it
+    answers on the event loop and says the process is alive whenever it is.
 
     This is anonymous and unrate-limited, so what it returns is published to
     anyone who asks. It used to answer with 26 operator-diagnostic keys: the
