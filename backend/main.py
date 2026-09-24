@@ -5492,10 +5492,17 @@ def sync_profile_from_ebay(request: Request) -> dict:
     fields: dict = {}
     try:
         ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
-        fields["ebay_username"] = ident["username"]
-        fields["ebay_email"] = ident["email"]
-        if ident.get("user_id"):
-            fields["ebay_user_id"] = ident["user_id"]
+        # Only what eBay actually told us -- the connect callback's rule, for
+        # its reason: identity_display answers "" for anything the response
+        # left out (the email needs its own scope and is usually absent), and
+        # "" is "we don't know", not a name. Written anyway, pressing "Sync
+        # from eBay" erased a username and email the app already had, and a
+        # blank username makes listing_sync.belongs_to scope nothing.
+        for field, value in (("ebay_username", ident["username"]),
+                             ("ebay_email", ident["email"]),
+                             ("ebay_user_id", ident.get("user_id"))):
+            if value:
+                fields[field] = value
     except Exception as exc:  # noqa: BLE001 - identity scope may be missing
         log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
     # Only fill policy/location gaps — never overwrite explicit selections.
