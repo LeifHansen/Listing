@@ -122,7 +122,11 @@ jobs:
             2>/dev/null || echo '')
           echo "production build: ${build:-<none>}"
           echo "main HEAD:        $(git rev-parse HEAD)"
-          if [ -z "$build" ]; then
+          # "unknown" is what /api/health answers for an image built with no
+          # GIT_SHA (main.py: `config.BUILD_SHA or "unknown"`), so it is the
+          # same finding as no field at all -- not "a commit outside main",
+          # which is what it fell through to.
+          if [ -z "$build" ] || [ "$build" = "unknown" ]; then
             echo "::error::/api/health reports no build commit at all. The image predates the build stamp, so production is running code from before 2026-08-26 regardless of what the last deploy said."
             exit 1
           fi
