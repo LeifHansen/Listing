@@ -27,9 +27,17 @@ SERPAPI_URL = "https://serpapi.com/search.json"
 MAX_LEADS = 12
 _TIMEOUT = 25.0
 
+# Set once SerpAPI has refused the key itself (401/403: expired or revoked).
+# Every later call would be refused the same way, and each still cost the
+# caller an R2 existence check or upload to presign the photo, a round trip,
+# and a WARNING row: production's feed carried that refusal 23 times in one
+# day. The key is read once at boot, so the only thing that can make it good
+# again is a restart with a new one -- which is also what clears this.
+_key_refused = False
+
 
 def enabled() -> bool:
-    return config.serpapi_ready()
+    return config.serpapi_ready() and not _key_refused
 
 
 def reverse_image(url: str) -> list[dict]:
@@ -57,6 +65,14 @@ def reverse_image(url: str) -> list[dict]:
         # is the only thing that separates them, it is not a secret, and
         # without it the row could not tell an operator which one they had.
         status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (401, 403):
+            global _key_refused
+            _key_refused = True
+            # Once, loudly: the operator's only sign the key needs replacing.
+            log.warning("image search: SerpAPI refused the key (%s) -- "
+                        "reverse-image leads are off until it is replaced "
+                        "and the app restarted", status)
+            return []
         log.warning("image search: lookup failed (%s%s)",
                     type(exc).__name__, f" {status}" if status else "")
         return []
