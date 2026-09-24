@@ -225,6 +225,18 @@ it. If a test ever genuinely cannot run in CI, **deselect it** in the workflow
 with a marker rather than letting it skip — deselecting is visible in a diff,
 and skipping buys the whole problem back.
 
+**Running them locally.** Build the frontend first: `backend/main.py` mounts
+`frontend/dist` when it is imported, so without a build every test that
+imports the app fails at collection (74 files), which reads like a broken
+tree rather than a missing step. Then, from the repository root:
+
+```bash
+(cd frontend && npm ci && npm run lint && npm test && npm run build)
+pip install -r requirements.txt pytest ruff   # rembg/onnxruntime optional
+ruff check backend
+python -m pytest backend/tests -q -rs         # nothing may skip, as in CI
+```
+
 ## First-time Fly setup
 
 A `Dockerfile` and `fly.toml` are included. eBay requires **publicly reachable
@@ -1899,19 +1911,16 @@ problem:
   capped, deferring the rest — for a caller that genuinely means a selection.
   Nothing in the app does.
 
-  **It is one group, not two.** "Fill in details" and "Check details" are two
-  rec types (`specifics` is a fill the AI can make; `verify` is a note only a
-  person can settle) and they rendered as two stacked groups with two counts
-  and a button on one of them. The seller, looking at *"Fill in details · 70"*
-  over *"Check details · 149"*, asked for one. The split is real to the engine
-  and is not a decision anyone has to make at the top of a dashboard: both say
-  *this listing's details aren't finished*, and the press that finishes them
-  has always covered both. So the two collapse into **Finish details**, one
-  badge adding both halves up, one button — and the rows behind the chevron,
-  each keeping its own verb, for a seller who would rather work through them
-  one at a time. The section header carries nothing: a second copy of the
-  button, naming the same number as the group beneath it, is how a seller
-  comes to distrust both.
+  **It is one group.** It used to be two: "Fill in details" (`specifics`, a
+  fill the AI can make) stacked over "Check details" (`verify`, a note only a
+  person can settle), and a seller looking at *"Fill in details · 70"* over
+  *"Check details · 149"* asked for one. Both said *this listing's details
+  aren't finished*, so the group is **Finish details** — one badge, one
+  button, the rows behind the chevron for a seller who would rather work
+  through them one at a time — and the `verify` type is gone altogether (see
+  below). The section header carries nothing: a second copy of the button,
+  naming the same number as the group beneath it, is how a seller comes to
+  distrust both.
 
   **What decides the group** is item specifics, never the free-text
   `missing_info` notes beside them — a note is evidence the fill has *already*
@@ -1936,20 +1945,20 @@ problem:
     listing whose photos genuinely cannot answer its category has blank
     specifics before the fill and blank specifics after it, so it sat there
     forever and was charged for on every press. What is left for the seller
-    afterwards is to *look*, which is the **Check details** suggestion instead.
+    afterwards is to *look* — which the editor shows on the listing itself,
+    not a dashboard group (next paragraph).
 
-  **Check details waits a day** (`recommender.VERIFY_QUIET_DAYS`). It used not
-  to, and that turned a working button into a broken-looking one: the seller
-  pressed "Enrich all" on twelve listings, waited several minutes while the AI
-  read their photos and pushed the new specifics to eBay, and the group they
-  had just cleared was replaced *in the same slot* by "Check details · 12" —
-  the same twelve listings, still flagged, and (back when it was its own
-  group) with no button on it at all, just a list to open one at a time. From
-  outside, that is
-  indistinguishable from the button having done nothing, and it was reported
-  as exactly that. The notes behind it are real, but they are by construction
-  the things the fill has just declined to invent, so they are not a chore to
-  hand back in the same minute. After the quiet period they return unchanged.
+  **There is no "Check details" group** (see the note in `recommender.py`).
+  The notes the fill could not answer — "exact measurements", "confirm the
+  signature" — were their own suggestion type, and on a real store that was
+  203 rows with no bulk verb. Worse, it read as a broken button: press "Enrich
+  all" on twelve listings, wait several minutes, and the group just cleared
+  was replaced *in the same slot* by "Check details · 12" — the same twelve
+  listings, still flagged. A one-day quiet period was tried first and only
+  delayed the same nag. So the group is gone, and Enrich all accepts whatever
+  notes survive the fill on every listing it touches, in the same press
+  (`main._accept_remaining_notes`). The notes themselves stay on the listing,
+  where the editor shows them to someone holding the item.
 
 Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind

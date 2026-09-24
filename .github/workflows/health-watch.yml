@@ -1,9 +1,10 @@
 name: Health watch
 
-# The alarm for a system with no telemetry. /api/ready and /api/health already
-# report everything needed to see trouble coming -- readiness returns 503 below
-# READY_MIN_DISK_MB, health reports disk_free_mb, objstore_error and db state --
-# but nothing ever calls them. fly-logs.yml curls both and is
+# The alarm for a system with no telemetry. /api/ready already reports
+# everything needed to see trouble coming -- it returns 503 below
+# READY_MIN_DISK_MB and carries disk_free_mb, object storage and database state
+# (/api/health is liveness, the build stamp and the UI's flags only) -- but
+# nothing ever called it. fly-logs.yml curls both and is
 # workflow_dispatch-only, so it runs when a human remembers, which is never
 # before an incident. On 2026-08-10 the volume sat at 61% with the reclaim
 # daemon in aggressive mode, and that was visible only to someone going to look.

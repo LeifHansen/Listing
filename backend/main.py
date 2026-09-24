@@ -804,9 +804,9 @@ def _db_status_loop() -> None:
 
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
-    background-removal model, resolve the R2 bucket check so /api/health tells
+    background-removal model, resolve the R2 bucket check so /api/ready tells
     the truth from the first request, keep the db-status cache warm so the
-    liveness probe never blocks on Postgres, and keep the volume from filling
+    readiness read never blocks on Postgres, and keep the volume from filling
     up."""
     threading.Thread(target=images.warm, daemon=True).start()
     threading.Thread(target=objstore.probe, daemon=True).start()

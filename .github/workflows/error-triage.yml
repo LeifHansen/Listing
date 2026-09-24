@@ -37,8 +37,8 @@ on:
     - cron: '41 9 * * *'
   workflow_dispatch:
 
-# Nothing by default; each job opens only what it needs. Only prune-branches.yml
-# does this today, and it is the right default for a job that runs unattended.
+# Nothing by default; each job opens only what it needs. art-roster.yml does
+# the same, and it is the right default for a job that runs unattended.
 permissions: {}
 
 env:

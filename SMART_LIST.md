@@ -297,7 +297,7 @@ A draft is **eligible** when all of these hold:
 | Preflight `live` has **no blocking issue** | `preflight_issues(uid, listing, "live")` → `errors_only` | held, with the preflight `fix` strings as the reason, exactly as the editor shows them |
 | eBay connected | `has_stored_connection(uid)` | held: *Connect eBay to use Smart List* |
 | Unedited for the settle window | `updated_at < now − SETTLE_MINUTES` | not yet — skipped this tick, no row written |
-| **Quality bar** (when on) | ≥3 photos (`FEW_PHOTOS` in `recommender.py`), non-blank description, and (`filled_specifics ≥ MIN_SPECIFICS` or `enriched_at` set) | held: *Add photos / fill in details, or turn off the quality bar* — with an *Enrich* shortcut that runs the existing `POST /api/enrich/{id}` |
+| **Quality bar** (when on) | ≥3 photos (`FEW_PHOTOS` in `recommender.py`), non-blank description, and (`filled_specifics ≥ MIN_SPECIFICS` or `enriched_at` set) | held: *Add photos / fill in details, or turn off the quality bar* — with an *Enrich* shortcut that runs the existing `POST /api/listings/enrich` (ids in) |
 
 Two things are **deliberately not** in the gate:
 

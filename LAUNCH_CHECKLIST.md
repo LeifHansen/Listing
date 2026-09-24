@@ -221,9 +221,9 @@ Ordered by what it costs a seller.
       `backend/ratelimit.py`. (Done: `/api/etsy/suggest-taxonomy` needs a
       login and has a per-user ceiling, `ratelimit.ETSY_SUGGEST_MAX_CALLS`;
       it is still not charged.)
-- [ ] **R2 client init holds a lock across un-timed network calls** and
-      `objstore.probe()` has no caller; give boto3 a `Config` with timeouts
-      and probe from the startup thread. No `statement_timeout` /
+- [ ] **R2 client init holds a lock across un-timed network calls**; give
+      boto3 a `Config` with timeouts. (`objstore.probe()` does run now, from
+      the startup thread in `main._warm_models`.) No `statement_timeout` /
       `lock_timeout` toward Neon either. `backend/objstore.py`, `db.py`.
 - [ ] Smaller, each a few lines: `ImageEditor` Escape/backdrop bypass the
       AI-busy lock and its layer canvases are never released; object URLs leak

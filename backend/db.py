@@ -668,15 +668,16 @@ def _get_engine():
             url = _normalize_url(config.DATABASE_URL)
             # pool_timeout bounds the wait for a pool SLOT, not the TCP
             # connect. Without a connect timeout a new connection inherits the
-            # OS default and can hang for minutes on an unreachable host - and
-            # /api/health round-trips the DB inside Fly's 5s liveness timeout.
-            # A Neon stall therefore became a failed health check, and on a
-            # single-machine app Fly answers that by replacing the machine,
-            # killing whatever batch was running. Bound it well under 5s.
+            # OS default and can hang for minutes on an unreachable host. The
+            # health check used to round-trip the DB inside Fly's 5s liveness
+            # timeout, so a Neon stall became a failed check and Fly replaced
+            # the machine, killing whatever batch was running; /api/health
+            # reads no database now, but /api/ready and every request still
+            # connect through here. Bound it well under 5s.
             #
             # This bounds the CONNECT only; a server that accepts and then
-            # stalls is handled on the other side, by keeping /api/health on
-            # the warm cache (see db_status and main._db_status_loop).
+            # stalls is handled on the other side, by keeping the readiness
+            # read on the warm cache (see db_status and main._db_status_loop).
             #
             # libpq-only: SQLite's connect() rejects the keyword outright, and
             # the test suite runs the billing invariants on SQLite.

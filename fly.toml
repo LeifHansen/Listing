@@ -116,8 +116,9 @@ primary_region = 'sjc'
   # broken config still does. This is a LIVENESS check: it asks whether the
   # app can still serve a request, and deliberately passes while Postgres or
   # R2 are down. Tying it to those would have Fly restart the machine over an
-  # outage it cannot fix, turning someone else's blip into a restart loop —
-  # /api/health reports their state in its body for humans and the UI banner.
+  # outage it cannot fix, turning someone else's blip into a restart loop.
+  # Their state is on /api/ready (public) and /api/admin/diagnostics (behind
+  # the admin token); /api/health carries liveness and the UI's flags only.
   # grace_period covers the model warm-up thread started at boot.
   [[http_service.checks]]
     interval = "15s"
