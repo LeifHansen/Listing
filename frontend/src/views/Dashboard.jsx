@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
@@ -657,10 +657,19 @@ export function Dashboard() {
   // signed-out dashboard. Level-triggering costs an identity check and
   // converges: once `insights` is the shared empty, the write is skipped.
   if (!user && insights !== NO_INSIGHTS) setInsights(NO_INSIGHTS);
+  // Only the NEWEST answer may land -- the guard the store's listings and
+  // metrics loads carry. This re-reads on every change to the store's shape,
+  // which a batch or a publish run changes several times in a few seconds,
+  // and an earlier, slower answer arriving last put back suggestions built
+  // for the store as it was: a group the newer answer had already dropped,
+  // back on screen with its bulk button live.
+  const insightsRequest = useRef(0);
   const refreshInsights = useCallback(() => {
     if (!user) return;
+    const seq = ++insightsRequest.current;
     api("/api/insights")
       .then((r) => {
+        if (seq !== insightsRequest.current) return;
         setInsights(r.recommendations || NO_INSIGHTS);
         setBulkCaps(r.bulk_caps || NO_CAPS);
         setGroupTotals(r.group_totals || NO_TOTALS);
