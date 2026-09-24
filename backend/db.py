@@ -11,6 +11,7 @@ whether the DB is actually reachable.
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import threading
 import time as _time
@@ -823,7 +824,19 @@ def mutate_listing_data(
             rec = s.get(ListingRecord, listing_id, with_for_update=True)
             if rec is None:
                 return None
-            data = mutate(dict(rec.data or {}))
+            # A DEEP copy, and the depth is the whole point. SQLAlchemy decides
+            # whether a JSON column changed by comparing the new value to the
+            # loaded one with ==. A shallow dict() shared every nested object
+            # with the loaded value, so a mutate that edited in place below
+            # the top level -- merge_state's data["marketplaces"][key], the
+            # inventory mirror's "ended" mark -- changed BOTH sides, compared
+            # equal, and the column was never written: the status column moved
+            # and the Etsy listing id, its url and its error were silently
+            # dropped. The next crosspost then minted a second live Etsy
+            # listing, and an eBay sale never took the Etsy copy down. Only a
+            # write that also touched a top-level key (eBay's mirrored
+            # ebay_listing_id) happened to carry its nested state with it.
+            data = mutate(copy.deepcopy(rec.data or {}))
             if data is None:
                 return None
             rec.data = data
