@@ -1271,14 +1271,25 @@ export function AppProvider({ children }) {
   // for a caller to ask for. Call sites that still pass something — including
   // the `onClick={startNew}` ones that hand it a MouseEvent — are ignored, as
   // they always were.
+  // Only the NEWEST open may land, the same guard loadListings and
+  // loadMetrics carry. Opening is a read and, for an imported listing, a
+  // photo copy of up to 24 files, so tapping one listing and then another
+  // could land the FIRST one second: it replaced the listing the seller was
+  // already editing, and the edits made in between went with it. Starting a
+  // new listing retires an open still in flight for the same reason.
+  const openRequest = useRef(0);
+
   const startNew = useCallback(() => {
+    openRequest.current += 1;
     setSession(null);
     setView("new");
   }, []);
 
   const openListing = useCallback(async (id) => {
+    const seq = ++openRequest.current;
     try {
       let rec = await api(`/api/listings/${id}`);
+      if (seq !== openRequest.current) return;
       // An imported listing's photos live on eBay, and the editor only works
       // on images the app owns. Copying them used to happen invisibly inside
       // the GET above, which made a plain read download up to 24 files and
@@ -1296,6 +1307,7 @@ export function AppProvider({ children }) {
         } catch {
           // Non-fatal: the editor falls back to the read-only eBay photos.
         }
+        if (seq !== openRequest.current) return;
       }
       // status rides along so the workflow knows a live listing is being
       // REVISED (Update Live Listing / End listing) rather than published.
@@ -1314,7 +1326,9 @@ export function AppProvider({ children }) {
       // like it did nothing at all.
       setView((v) => (EDITOR_VIEWS.includes(v) ? v : "new"));
     } catch (e) {
-      toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
+      if (seq === openRequest.current) {
+        toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
+      }
     }
   }, [toast]);
 
