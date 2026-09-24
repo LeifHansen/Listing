@@ -152,6 +152,35 @@ def note_verified(uid: str, now: Optional[float] = None) -> None:
         _verified[uid] = now
 
 
+# Accounts with a check in flight right now. verify_due only reads the clock,
+# so once the TTL lapsed every request that built creds at the same moment
+# ran its own check: the dashboard's insights, metrics, inbox poll and orders
+# fire together, each check is four sequential eBay calls at a 30s timeout,
+# and each held a threadpool slot for the whole of it. One of them checking
+# is the same answer for all of them.
+_verifying: set[str] = set()
+
+
+def claim_verify(uid: str, now: Optional[float] = None,
+                 ttl: float = VERIFY_TTL) -> bool:
+    """verify_due, and the right to run the check: True for ONE caller at a
+    time. Everyone else goes on with the stored settings, exactly as they
+    would inside the TTL. The winner must release_verify() however the check
+    ends -- an inconclusive pass does not start the clock (note_verified is
+    only for a pass eBay answered), so the next request tries again."""
+    now = time.time() if now is None else now
+    with _verified_lock:
+        if uid in _verifying or (now - _verified.get(uid, 0.0)) < ttl:
+            return False
+        _verifying.add(uid)
+        return True
+
+
+def release_verify(uid: str) -> None:
+    with _verified_lock:
+        _verifying.discard(uid)
+
+
 # The policy ids each account actually has, from the last verify pass. This
 # exists because ACCOUNT_SCOPED is not the whole story: a DRAFT stores its own
 # `fulfillment_policy_id` (the editor's and the bulk card's Shipping dropdown),
