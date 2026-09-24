@@ -51,11 +51,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Shells to flyctl, so it takes the same lock fly-logs.yml does. The
-    # `fix` job below deliberately stays out of it: a multi-minute agent
-    # session must never hold up a deploy.
+    # Shells to flyctl, so it takes the same lock fly-logs.yml does -- and,
+    # like that one, NOT the deploy's. GitHub cancels a group's pending run
+    # when another queues, so this 09:41 run landing while one deploy waited
+    # behind another silently cancelled the waiting deploy. A read-only log
+    # pull has no reason to wait for a deploy, nor a deploy for it. The `fix`
+    # job below stays out of every group: a multi-minute agent session must
+    # never hold anything up.
     concurrency:
-      group: fly-deploy
+      group: fly-logs
       cancel-in-progress: false
     outputs:
       count: ${{ steps.triage.outputs.count }}
