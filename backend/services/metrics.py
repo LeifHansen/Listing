@@ -49,7 +49,15 @@ _TTL = 120  # seconds — enough to dedupe the insights + grid fetches
 # a day; watchers, bids and pending offers keep the short cache above, because
 # a buyer can act on a listing in the next minute.
 #
-# Keyed like _CACHE (token + the id set): {key: (fetched_at, report, asked)}.
+# Keyed by the SELLER'S EBAY ACCOUNT, not like _CACHE by token + id set:
+# {account: (fetched_at, report, asked)}. Both parts of that key moved on
+# their own while the report did not. The access token is re-minted every two
+# hours, and the id set changes with every listing that goes live, sells or
+# ends -- a bulk publish of twenty drafts changed it twenty times -- so each
+# of those re-read the whole store's report, every page of it, against the
+# app-wide daily allowance that production kept finding spent. Now a listing
+# the held report was never asked about is read on its own and joins it (see
+# _traffic_report), and a token that changed is still the same seller.
 _TRAFFIC_CACHE: dict[str, tuple[float, dict, set]] = {}
 _TRAFFIC_TTL = 60 * 60
 
@@ -301,42 +309,65 @@ def _traffic(token: str, listing_ids: list[str],
     return out
 
 
-def _traffic_report(token: str, ids: list[str], covered: set) -> dict[str, dict]:
+def _held(entry: tuple[float, dict, set], ids: list[str],
+          covered: set) -> dict[str, dict]:
+    """The part of a held report that answers for `ids`, and which of them
+    it was actually asked about. One seller's report holds every listing it
+    has been asked about this hour, including ones that have since ended; an
+    answer is only ever about the listings in this request."""
+    _at, report, asked = entry
+    wanted = set(ids)
+    covered.update(asked & wanted)
+    return {lid: m for lid, m in report.items() if lid in wanted}
+
+
+def _traffic_report(token: str, ids: list[str], covered: set,
+                    account: str = "") -> dict[str, dict]:
     """`_traffic`, behind the hour-long cache and the spent-allowance latch.
 
-    Served in this order: a report younger than _TRAFFIC_TTL; while the
-    allowance is spent, whatever report is held however old (and, holding
-    none, a `skipped` TrafficUnavailable rather than a request eBay will
-    refuse); otherwise a live read, whose answer — and which ids it actually
-    covered — is kept for the next hour."""
-    key = f"{token[-12:]}:{','.join(ids)}"
+    `account` names whose report this is (see _TRAFFIC_CACHE); without one
+    the token stands in, as it always used to.
+
+    Served in this order: a report younger than _TRAFFIC_TTL that has already
+    been asked about every listing here; while the allowance is spent,
+    whatever report is held however old (and, holding none, a `skipped`
+    TrafficUnavailable rather than a request eBay will refuse); otherwise a
+    live read — of only the listings a current report has never been asked
+    about, or of all of them when there is no current report — whose answer,
+    and which ids it actually covered, is kept for the rest of the hour."""
+    key = account or f"token:{token[-12:]}"
     now = time.time()
     hit = _TRAFFIC_CACHE.get(key)
-    if hit and now - hit[0] < _TRAFFIC_TTL:
-        covered.update(hit[2])
-        return hit[1]
+    current = hit is not None and now - hit[0] < _TRAFFIC_TTL
+    missing = [i for i in ids if i not in hit[2]] if current else list(ids)
+    if not missing:
+        return _held(hit, ids, covered)
     if now < _traffic_quota_spent_until:
         if hit:
-            covered.update(hit[2])
-            return hit[1]
+            return _held(hit, ids, covered)
         raise TrafficUnavailable(
             "traffic report not asked for: eBay's daily allowance is spent "
             "until midnight Pacific", quota=True, skipped=True)
     asked: set[str] = set()
     try:
-        report = _traffic(token, ids, asked)
+        report = _traffic(token, missing, asked)
     except TrafficUnavailable as exc:
         if exc.quota and hit:
             # The allowance ran out on this very read. Yesterday's figures
-            # are still yesterday's figures, so the stale report stands in.
-            covered.update(hit[2])
-            return hit[1]
+            # are still yesterday's figures, so the held report stands in.
+            return _held(hit, ids, covered)
         raise
-    if len(_TRAFFIC_CACHE) >= _CACHE_MAX:
+    if current:
+        # Only the newcomers were read. They join the held report without
+        # moving its clock, so the whole of it is still re-read an hour after
+        # its oldest figures were — never later than that.
+        entry = (hit[0], {**hit[1], **report}, hit[2] | asked)
+    else:
+        entry = (now, report, set(asked))
+    if key not in _TRAFFIC_CACHE and len(_TRAFFIC_CACHE) >= _CACHE_MAX:
         _make_room(_TRAFFIC_CACHE, _TRAFFIC_TTL)
-    _TRAFFIC_CACHE[key] = (now, report, set(asked))
-    covered.update(asked)
-    return report
+    _TRAFFIC_CACHE[key] = entry
+    return _held(entry, ids, covered)
 
 
 def _active_counts(token: str, status: Optional[dict] = None) -> dict[str, dict]:
@@ -478,8 +509,14 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
     # than one request is asked in several passes, and a pass that failed
     # leaves its listings unknown rather than idle.
     covered: set[str] = set()
+    # Whose traffic this is. The immutable eBay user id rather than the
+    # username, for the reason creds_for gives; the app user as well, so two
+    # of this app's accounts can never share a report.
+    uid = (creds or {}).get("_uid") or ""
+    account = (f"{uid}:{creds.get('ebay_user_id') or creds.get('ebay_username') or ''}"
+               if uid else "")
     try:
-        for lid, m in _traffic_report(token, ids, covered).items():
+        for lid, m in _traffic_report(token, ids, covered, account).items():
             out.setdefault(lid, {}).update(m)
     except Exception as exc:  # noqa: BLE001 - missing scope / API blip
         st = {"traffic_ok": False,
