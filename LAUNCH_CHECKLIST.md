@@ -303,13 +303,15 @@ Ordered by what it costs a seller.
 - Finish splitting `backend/main.py` (12.6k lines; the same owner check,
   path-traversal guard and truthy parse are re-typed 6–10× each). Started:
   `backend/routers/` holds the operator console, sign-in and the inbox, and
-  the caller's id is `deps.uid`. Most of the rest reads `_assert_session_owner`
-  or `_ebay_creds_for`, which 19 and 23 test files patch on `main` — move
-  those into `routers/deps.py` and repoint the tests' patches in the same
-  change (`test_a_patch_on_main_never_silently_misses.py` explains why a
-  patch left on `main` would stop reaching the moved code without failing).
-  Then `cards.jsx` / `BulkMode.jsx` / `useListingForm.js` (1–2k lines each),
-  with characterisation tests first. URL routing (deep links, back/forward).
+  the caller's id is `deps.uid`. 45 more routes can move as they are. The
+  other 78 read helpers that tests patch on `main` — `_support_reference`,
+  `_in_background`, `_assert_session_owner`, `_ebay_creds_for` and the token
+  charge pin the most — so move each helper into `routers/deps.py` and
+  repoint its patches in the same change, the way `_uid` moved
+  (`test_a_patch_on_main_never_silently_misses.py` explains why a patch left
+  on `main` would stop reaching the moved code without failing). Then
+  `cards.jsx` / `BulkMode.jsx` / `useListingForm.js` (1–2k lines each), with
+  characterisation tests first. URL routing (deep links, back/forward).
 - Normalised tables for external listings, marketplace operations and
   durable jobs (still one JSON document per listing; the publish lock is
   process-local; the enrich/import runners are threads).
