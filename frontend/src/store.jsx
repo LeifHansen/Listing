@@ -1183,6 +1183,15 @@ export function AppProvider({ children }) {
   // session: { sessionId, listing, confidence } — null until AI identify runs
   // or a saved listing is opened.
   const [session, setSession] = useState(null);
+  // What is open in the editor NOW, for async work that finishes after its
+  // own screen has gone. A single-item draft polls its job from the uploader,
+  // and a seller who switches to Manage and opens another listing unmounts
+  // that uploader while the job runs on -- so nothing it held could say what
+  // was open when the draft landed. The store stays mounted; this is kept in
+  // step in an effect (React's refs rule) and read through a stable getter.
+  const sessionNow = useRef(null);
+  useEffect(() => { sessionNow.current = session; }, [session]);
+  const currentSession = useCallback(() => sessionNow.current, []);
 
   // Drafts the user has set aside. A skipped draft still lives in Drafts (and
   // can be un-skipped from its card), but the post-publish queue never offers
@@ -1862,7 +1871,7 @@ export function AppProvider({ children }) {
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
-    session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
+    session, setSession, currentSession, startNew, openListing, deleteListing, bulkDeleteListings,
     rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
@@ -1890,7 +1899,7 @@ export function AppProvider({ children }) {
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
-    session, startNew, openListing,
+    session, currentSession, startNew, openListing,
     deleteListing, bulkDeleteListings, rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
