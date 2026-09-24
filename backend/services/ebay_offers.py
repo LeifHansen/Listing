@@ -42,16 +42,13 @@ and it never sinks the rest of the run.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Optional
 
 import httpx
 
 from .. import config
-from .ebay import is_scope_error
-from .ebay import rest_headers as _headers
+from .ebay import is_scope_error, rest_headers as _headers
 
-log = logging.getLogger("thryft.offers")
 
 _NEGOTIATION = "/sell/negotiation/v1"
 

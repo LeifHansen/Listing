@@ -124,10 +124,3 @@ def block(references) -> str:
         return ""
     body = "\n\n".join(entries)
     return f"\n{PREAMBLE}\n{OPEN}\n{body}\n{CLOSE}\n"
-
-
-def for_expert(references, expert: str) -> list:
-    """Just the references filed under `expert`."""
-    name = (expert or "").strip().lower()
-    return [r for r in (references or [])
-            if str(getattr(r, "expert", "")).strip().lower() == name]

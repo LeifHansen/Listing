@@ -2950,15 +2950,6 @@ def labels_for_orders(user_id: str, order_ids: list[str]) -> dict[str, list[dict
         return out
 
 
-def labels_for_order_best_effort(user_id: str, order_id: str) -> list[dict]:
-    """labels_for_order for callers that only DECORATE an order with what
-    was bought -- an unreadable row costs a badge, not a decision."""
-    try:
-        return labels_for_order(user_id, order_id)
-    except StorageUnavailable:
-        return []
-
-
 def labels_for_listing(user_id: str, listing_record_id: str) -> list[dict]:
     """Labels bought for orders that matched one of our listing records,
     newest first -- how "Ship it" on a sold notification finds the label

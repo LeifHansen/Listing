@@ -4896,7 +4896,6 @@ def _apply_art_markers(listing: Listing, found: dict, artist: str,
 # come back in the filtered search a buyer is actually using.
 _FRAMING_ASPECT = "Framing"
 _FRAME_MATERIAL_ASPECT = "Frame Material"
-_FEATURES_ASPECT = "Features"
 
 # mount -> the word eBay's Framing aspect takes. Not every mount has one:
 # rolled, shrink-wrapped and loose sheets are all "Unframed", and a stretched
