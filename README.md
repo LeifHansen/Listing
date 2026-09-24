@@ -1282,6 +1282,7 @@ backend/
     deps.py          request helpers main.py and the routers share
     admin.py         the operator console (/api/admin) and /api/ops
     auth.py          signing up, in and out (/api/auth)
+    inbox.py         the notifications bell and the buyer-message inbox
   config.py          env / settings
   db.py              SQLAlchemy models + every database read and write
   models.py          Pydantic models (Listing, etc.)
