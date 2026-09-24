@@ -105,6 +105,16 @@ async def _lifespan(_app: FastAPI):
     # one settles it.
     _in_background(_settle_owed_refunds, what="owed refunds")
     yield
+    # The error writer is a daemon thread, so the failures still queued when
+    # the process stops -- the last seconds before a deploy or a restart, often
+    # the ones worth reading -- died with it. errorlog.flush() drains them on
+    # the way out; bounded, because Fly gives a stopping machine seconds and a
+    # slow database must not hold up the release replacing it.
+    if errorlog.writer_started():
+        try:
+            await asyncio.wait_for(run_in_threadpool(errorlog.flush), timeout=3)
+        except Exception as exc:  # noqa: BLE001 - never block shutdown
+            log.info("errorlog: shutdown flush incomplete: %s", exc)
 
 
 # No /docs, /redoc or /openapi.json: the schema enumerates every admin and

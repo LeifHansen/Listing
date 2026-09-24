@@ -541,6 +541,12 @@ def install() -> None:
     config.log.addHandler(CaptureHandler())
 
 
+def writer_started() -> bool:
+    """Whether this process runs the writer -- the one place a shutdown flush
+    has anything to save that nothing else will."""
+    return _writer_started
+
+
 def start_writer() -> None:
     """Start the daemon that drains the queue into the database. Idempotent.
 
