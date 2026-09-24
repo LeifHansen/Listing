@@ -24,7 +24,7 @@ def api(monkeypatch, every_marketplace):
     monkeypatch.setattr(config, "ETSY_CLIENT_ID", "key")
     monkeypatch.setattr(config, "ETSY_SHARED_SECRET", "secret")
     monkeypatch.setattr(config, "ETSY_REDIRECT_URI", "https://app.example/api/etsy/callback")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     asked = []
     monkeypatch.setattr(etsy_service, "suggest_taxonomy",
                         lambda listing: (asked.append(listing.title),

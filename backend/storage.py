@@ -26,7 +26,7 @@ def new_session_id() -> str:
 
     12 hex characters is 48 bits with no uniqueness check against the
     database. Ids are not the security boundary — they travel in public
-    /media URLs by design, and the guard is _assert_session_owner — but a
+    /media URLs by design, and the guard is deps.assert_session_owner — but a
     birthday collision would silently merge two sellers' photos into one
     directory, which no error would ever report.
     """

@@ -31,7 +31,7 @@ PROGRAM = "SELLING_POLICY_MANAGEMENT"
 def connected(monkeypatch):
     # `_uid` rides along in the real creds dict — the existing ensure-policy
     # route reads it the same way.
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     return TestClient(main.app)
@@ -99,7 +99,7 @@ def test_a_refusal_points_somewhere_the_seller_can_go(connected, monkeypatch):
 
 
 def test_a_disconnected_account_is_told_to_connect(monkeypatch):
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: None)
     assert _post(TestClient(main.app)).status_code == 400
 
 
@@ -140,7 +140,7 @@ def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch
 def test_a_policy_the_seller_already_chose_is_not_overwritten(connected, monkeypatch):
     """Ids are saved as defaults only where none is set. Overwriting a
     deliberate choice with eBay's first policy is the bug #186 was about."""
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: {
         "access_token": "tok", "_uid": "u1",
         "fulfillment_policy_id": "chosen-by-the-seller"})
     for name, pol in (("ensure_service_policy", {"id": "FP-new", "created": True}),

@@ -50,7 +50,7 @@ from backend.services import recommender
 def seller(dbmod, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "db", dbmod)
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t"})
     monkeypatch.setattr(main, "_metrics_by_record_id", lambda creds, items: {})
     monkeypatch.setattr(main, "_resolve_category", lambda listing: None)

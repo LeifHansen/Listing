@@ -1,6 +1,6 @@
 """Possession of a session id must not reach another user's photos.
 
-The session-scoped write endpoints guard with _assert_session_owner, which
+The session-scoped write endpoints guard with deps.assert_session_owner, which
 asks the DATABASE whose listing this is. The file operation that follows asks
 STORAGE, under a different naming rule. Where the two disagreed, the guard
 answered about one session and the write landed on another.

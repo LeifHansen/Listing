@@ -91,7 +91,8 @@ def test_the_brand_answers_its_own_note():
 def seller(dbmod, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "db", dbmod)
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {"access_token": "t"})
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
+                        lambda request: {"access_token": "t"})
     # Nothing here reaches eBay's taxonomy or Claude: the fill itself is the
     # unit under test everywhere else (main._enrich_listing), and what this
     # file is about is which listings it is handed and what is reported back.
@@ -291,7 +292,7 @@ def test_a_live_listing_we_cannot_revise_is_not_billed_for(seller, monkeypatch):
     assert dbmod.upsert_listing("live-one", _listing("live-one"),
                                 status="published", user_id=uid)
     _with_photo("live-one")
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: None)
     charged: list = []
     monkeypatch.setattr(main, "_charge_uid",
                         lambda *a, **k: charged.append(a) or None)

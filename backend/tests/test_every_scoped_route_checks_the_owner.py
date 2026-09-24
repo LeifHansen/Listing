@@ -14,11 +14,11 @@ somewhere in its call graph — or to appear below with a reason. It is a pure
 source scan: it needs neither fastapi nor a booted app, and it fails on the
 route that was added rather than on the seller who found it.
 
-Nothing here is a claim that the check is CORRECT — `_assert_session_owner`'s
-own behaviour (fail closed on a database outage, anonymous sessions still
-usable) is tested in test_session_alias_authorization.py. This is the weaker,
-broader claim the suite could not otherwise make: that no scoped route lacks
-one entirely.
+Nothing here is a claim that the check is CORRECT —
+`deps.assert_session_owner`'s own behaviour (fail closed on a database
+outage, anonymous sessions still usable) is tested in
+test_session_alias_authorization.py. This is the weaker, broader claim the
+suite could not otherwise make: that no scoped route lacks one entirely.
 """
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ WHERE = {n.name: where for where, n in DEFINED}
 # record. The third — threading the caller's identity into the lookup so the
 # QUERY is scoped — cannot be a substring match, because the same expression
 # appears in log lines that check nothing; _scopes_a_call below finds it.
-OWNERSHIP = re.compile(r"_assert_session_owner|\['user_id'\] != |\.get\('user_id'\) != ")
+OWNERSHIP = re.compile(r"deps\.assert_session_owner"
+                       r"|\['user_id'\] != |\.get\('user_id'\) != ")
 
 # How this file spells "who is asking".
 IDENTITY = re.compile(r"deps\.uid\(request\)|run_in_threadpool\(deps\.uid, request\)"
@@ -208,8 +209,9 @@ def test_a_listing_scoped_route_checks_who_is_asking(name):
     where = " ".join(f"{m} {p}" for m, p in routes)
     assert _guarded(node), (
         f"{where} ({name}, {WHERE[name]}:{node.lineno}) is scoped to one "
-        f"listing and never checks who is asking. Call _assert_session_owner, "
-        f"or compare the record's user_id — or add it to EXEMPT with a reason.")
+        f"listing and never checks who is asking. Call "
+        f"deps.assert_session_owner, or compare the record's user_id — or "
+        f"add it to EXEMPT with a reason.")
 
 
 @pytest.mark.parametrize("name", sorted(EXEMPT))
@@ -242,7 +244,7 @@ def test_the_job_readers_actually_use_the_uid_they_are_given():
     honours it — the far end of the same trust the delete rests on.
 
     A job with no owner stays readable by id: the app supports logged-out
-    bulk uploads, and that matches `_assert_session_owner`'s rule for an
+    bulk uploads, and that matches `deps.assert_session_owner`'s rule for an
     anonymous session. What must never happen is an OWNED job answering
     someone else.
     """

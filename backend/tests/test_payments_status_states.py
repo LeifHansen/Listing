@@ -49,7 +49,7 @@ def api(monkeypatch):
     from backend import main
 
     monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda _r: {"access_token": "tok", "_uid": "u1"})
 
     def _answer(value):

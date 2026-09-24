@@ -101,7 +101,7 @@ def test_the_sweep_asks_for_live_listings(seller, monkeypatch):
     for i in range(6):
         _put(dbmod, uid, f"draft-{i}", "draft")
     monkeypatch.setattr(main, "LIST_CAP", 3, raising=False)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t",
                                          "ebay_username": "seller"})
 
@@ -147,7 +147,7 @@ def test_the_metrics_panel_asks_for_live_listings_too(seller, monkeypatch):
     page was read to keep the live rows -- and on a big store the live rows
     past the cap got no numbers at all."""
     client, dbmod, uid = seller
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t"})
     asked: list = []
 

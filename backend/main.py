@@ -1963,28 +1963,6 @@ def _charge_ai(request: Request, feature: str, units: int = 1):
     return _charge_uid(uid, feature, units)
 
 
-def _assert_session_owner(session_id: str, request: Request) -> None:
-    """404 when this session's saved listing belongs to a DIFFERENT user.
-    Session ids appear in media URLs and can leak, so possession of an id
-    must not grant write access. Unsaved or unowned (anonymous) sessions
-    pass — the app supports logged-out flows.
-
-    Fails CLOSED on a database outage. This check is the only thing standing
-    between a leaked session id and write access to someone else's photos,
-    and it answers from the database — so if a read failure were treated like
-    "no such listing", one Neon blip would quietly disable the guard on every
-    session-scoped endpoint at once, while the rest of the app (on-disk
-    sessions, /media) kept serving. A brief 503 is the right trade.
-    """
-    rec = db.get_listing_strict(session_id)
-    if rec is db.UNAVAILABLE:
-        raise HTTPException(
-            503, "Can't verify who this listing belongs to right now — "
-                 "please try again in a moment.")
-    if rec and rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
-
-
 # Moved to services/background.py so marketplace providers share it; the
 # local name keeps every existing call site unchanged.
 _in_background = run_in_background
@@ -2383,11 +2361,6 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
 # The token cache, per-user creds bundle, promotion helpers and the whole
 # publish pipeline moved to marketplaces/ebay_provider.py; these same-named
 # wrappers keep every existing /api/ebay/* route below unchanged.
-
-
-def _ebay_creds_for(request: Request):
-    """Build live eBay creds for the logged-in user, or None if not connected."""
-    return ebay_provider.creds_for(deps.uid(request))
 
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
@@ -2796,7 +2769,7 @@ def get_ebay_policies(request: Request) -> dict:
     """The connected seller's eBay business policies + which ones are set as
     this account's defaults. These are eBay's 'templates' for shipping,
     payment, and returns; a listing's offer references them."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first to load your policies.")
     lists = ebay_auth.list_business_policies(creds["access_token"])
@@ -2824,7 +2797,7 @@ def get_store_categories(request: Request, refresh: bool = False) -> dict:
     itself; or we could not ask eBay just now — which is not evidence of
     either, and says so instead of quietly reporting an empty store.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first to load your store categories.")
     try:
@@ -2898,7 +2871,7 @@ def ebay_policy_preview(service_code: str = "",
 def ensure_policy(request: Request, payload: dict) -> dict:
     """Find — or create — a fulfillment policy for any catalog shipping
     service, and make it the account default if none is set yet."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     svc = ebay_auth.service_by_code(str(payload.get("service_code", "")))
@@ -2950,7 +2923,7 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     are saved as the account defaults only where none is set: a seller who
     deliberately chose a policy keeps it.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     # Before the account is read and before anything is saved: an unreviewed
@@ -3082,10 +3055,10 @@ def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
     uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     session_id, listing = req.session_id, req.listing
     out: dict = {"env": config.EBAY_ENV,
                  "ebay_username": creds.get("ebay_username") or "",
@@ -3162,7 +3135,7 @@ def ebay_opt_in_policies(request: Request) -> dict:
     ready". The response says which, because promising the second and
     delivering the first is worse than not offering the button.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds or not creds.get("access_token"):
         raise HTTPException(400, "Connect eBay first.")
     token = creds["access_token"]
@@ -3193,7 +3166,7 @@ def ebay_account_overview(request: Request) -> dict:
     business policies (with the current defaults), ship-from locations, opted-in
     programs, and managed-payments status. Best-effort; {connected: false} when
     eBay isn't linked."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds or not creds.get("access_token"):
         return {"connected": False}
     try:
@@ -3239,7 +3212,7 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         # for having emptied a text box.
         fields["ship_from_postal"] = ""
     elif postal:
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         if not creds:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
         try:
@@ -4915,7 +4888,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
     uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     access = creds["access_token"]
@@ -5079,7 +5052,7 @@ def ebay_payments_status(request: Request) -> dict:
     """
     if not deps.uid(request):
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
     try:
@@ -5440,7 +5413,7 @@ async def upload_more(
     with the work still running -- "adding photos is taking forever / not
     working". The request now returns the moment the originals are on disk.
     """
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
     # What this listing already HAS, which is not the same as what is on the
@@ -5601,7 +5574,7 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
@@ -5679,7 +5652,7 @@ async def image_restore_original(
     session_id, name = (session_id or "").strip(), (name or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo to restore.")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
@@ -5789,7 +5762,7 @@ def _studio_load(request: Request, session_id: str, name: str,
     # holding one must not let a caller run the studio against someone else's
     # photos. The inline-`file` path above is the editor's own canvas blob and
     # touches nothing stored, so it stays open to the logged-out flows.
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
@@ -5820,7 +5793,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name") or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
@@ -5995,7 +5968,7 @@ def identify(session_id: str, request: Request) -> dict:
     that comes back has the same shape, so nothing below this line changes."""
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
     if not names:
@@ -6069,7 +6042,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     seller already set."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     listing = req.listing
     if not listing.category_id:
         raise HTTPException(400, "Pick an eBay category first — specifics are per category.")
@@ -6303,7 +6276,7 @@ def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # Authorize before billing: never charge for a request we're about to 404.
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     spent = _charge_ai(request, "refine")
     try:
         updated = claude_ai.refine(req.listing, req.prompt)
@@ -6322,7 +6295,7 @@ def refine(req: RefineRequest, request: Request) -> dict:
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     prev = _restore_server_state(session_id, listing)
     storage.save_listing(session_id, listing)
     # Checked, like the PATCH route directly below: `db.upsert_listing`
@@ -6378,7 +6351,7 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     rather than from the copy it already had — which is the copy that was
     stale.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec = db.get_listing(session_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
@@ -6531,7 +6504,7 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     never the client's doing, and the seller was told their photos had changed
     somewhere else when they had not changed at all.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec = db.get_listing(session_id) or {}
     stored = _listing_image_order(session_id, rec)
     if not stored:
@@ -6578,7 +6551,7 @@ def item_conditions(payload: dict, request: Request) -> dict:
     cid = str(payload.get("category_id", "")).strip()
     if not cid:
         raise HTTPException(400, "category_id is required")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     token = creds.get("access_token") if creds else None
     try:
         return {**taxonomy.item_conditions(cid, access_token=token),
@@ -6653,7 +6626,7 @@ def delete_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name", "")).strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     images = _drop_optimized_image(session_id, name, deps.uid(request))
     remaining = storage.list_optimized(session_id)
     # `images` is the listing's own order with the photo gone — what the
@@ -6857,7 +6830,7 @@ async def add_listing_video(session_id: str, request: Request,
     176MB cutout model and three bulk workers, is an OOM waiting for the day
     two sellers upload at once.
     """
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     rec, data = await run_in_threadpool(_listing_record_for, session_id)
     if data is None:
         raise HTTPException(404, "Listing not found")
@@ -6950,7 +6923,7 @@ def listing_video_status(session_id: str, request: Request) -> dict:
     or BLOCKED is terminal, so an open tab does not turn into a request per
     second for the life of the listing.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec, data = _listing_record_for(session_id)
     if data is None:
         raise HTTPException(404, "Listing not found")
@@ -6981,7 +6954,7 @@ def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
     call on eBay is one more thing that can fail while the seller waits for a
     button that has already done its job here.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     try:
         safe = storage.safe_video_name(name)
     except ValueError as exc:
@@ -8805,7 +8778,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     synchronous request open, so slow vision calls can't time out the browser."""
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
     uid = deps.uid(request)
@@ -8867,7 +8840,7 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     # Shop Mode's "Buy" is a decision made in a shop, on this answer: the
     # seller taps it and then pays for the item. A write that did not land
@@ -9172,7 +9145,7 @@ def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
     items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"],
                                          statuses=("published", "live"))
     status: dict = {}
-    by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status,
+    by_id = _metrics_by_record_id(deps.ebay_creds_for(request), items, status,
                                   fresh=bool(refresh))
     return {"metrics": by_id,
             "traffic_ok": bool(status.get("traffic_ok")),
@@ -9403,7 +9376,7 @@ def insights(request: Request) -> dict:
                 "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         recs = recommender.ranked(
             items, metrics_by_id=metrics_by_id,
@@ -9455,7 +9428,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
     the revise is rejected, and neither stops the rest of the run.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
     try:
@@ -9566,7 +9539,7 @@ def send_offers(payload: dict, request: Request) -> dict:
     skip nor a failure stops the rest of the run.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
     try:
@@ -9980,7 +9953,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
         records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
         if not records:
             raise HTTPException(404, "None of those listings are here anymore.")
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without
@@ -10202,7 +10175,7 @@ def finish_all(request: Request) -> dict:
         _ENRICH_JOBS[uid] = job_id
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         records = _finish_all_set(items, creds)
         if not records:
             raise HTTPException(400, "There's nothing left on your list.")
@@ -10544,9 +10517,9 @@ def _merge_ids(payload: dict, request: Request) -> tuple[str, list[str]]:
     source_ids = [s for s in dict.fromkeys(raw_sources) if s and s != target_id]
     if not target_id or not source_ids:
         raise HTTPException(400, "Pick a target and at least one duplicate to merge.")
-    _assert_session_owner(target_id, request)
+    deps.assert_session_owner(target_id, request)
     for sid in source_ids:
-        _assert_session_owner(sid, request)
+        deps.assert_session_owner(sid, request)
     return target_id, source_ids
 
 
@@ -10910,7 +10883,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     """
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     uid = deps.uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
     # A sold listing is an archive record, not a draft: it says what one
@@ -10972,7 +10945,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         raise HTTPException(404, "Listing not found")
     if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     # Ending goes through EndItem, which needs the seller's own token. The
     # env-configured single-tenant credentials used to serve here via
     # withdrawOffer; they are the OPERATOR's, and with the Inventory engine
@@ -11107,7 +11080,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     _SWEEP_COOLDOWN); the cheap finished-list reconcile always runs, so an
     item that ended or sold on eBay still moves on the very next sync.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0}
@@ -11295,7 +11268,7 @@ def import_listings(request: Request) -> dict:
     (or a reload mid-sync) would otherwise double the eBay calls this spends.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user:
         raise HTTPException(401, "Log in first.")
     if not creds:
@@ -11356,7 +11329,7 @@ app.include_router(inbox_routes.router)
 # --- sold orders + shipping labels ------------------------------------------
 
 def _orders_creds(request: Request) -> dict:
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
     return creds
@@ -12054,7 +12027,7 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
                            max_attempts=ratelimit.ETSY_SUGGEST_MAX_CALLS):
         raise HTTPException(
             429, "Too many category lookups at once. Wait a moment and try again.")
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
     try:
         return etsy_service.suggest_taxonomy(listing)

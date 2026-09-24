@@ -8,7 +8,7 @@ different rows and the same directory.
 That is not a tidiness problem, it is an authorization bypass, because the
 ownership guard and the file operation consulted different namespaces:
 
-  _assert_session_owner("abc123-")  -> no such row -> "unowned, allow"
+  assert_session_owner("abc123-")  -> no such row -> "unowned, allow"
   storage.session_dir("abc123-")    -> .../sessions/abc123 -> the victim's photos
 
 Session ids ride in public /media URLs, so knowing one is the normal case, not

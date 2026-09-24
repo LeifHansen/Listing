@@ -50,7 +50,7 @@ def client(monkeypatch):
     monkeypatch.setattr(main.config, "taxonomy_ready", lambda: True)
     monkeypatch.setattr(main, "_taxonomy_guard", lambda *a, **k: None)
     monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda *a, **k: {"access_token": "tok", "_uid": "u1"})
     return main, TestClient(main.app, raise_server_exceptions=False)
 
@@ -133,7 +133,7 @@ def test_autofill_uses_the_same_answer_as_the_lookup_beside_it(client,
     other one no longer does."""
     main, api = client
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.taxonomy, "item_aspects", _boom)
 
     res = api.post("/api/autofill-specifics/s1", json={

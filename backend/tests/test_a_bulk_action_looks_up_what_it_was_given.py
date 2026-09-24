@@ -45,7 +45,8 @@ def seller(dbmod, monkeypatch):
     # The route refuses without a connection. Nothing here reaches eBay: every
     # listing it is pointed at is either a draft (skipped before the revise)
     # or absent, so `provider.publish` is never called.
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {"access_token": "t"})
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
+                        lambda request: {"access_token": "t"})
     return client, dbmod, uid
 
 

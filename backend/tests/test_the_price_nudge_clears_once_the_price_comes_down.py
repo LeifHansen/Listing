@@ -215,7 +215,8 @@ def seller(dbmod, monkeypatch):
                "ebay_listing_id": "1234567890"},
         status="published", user_id=uid)
 
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {"access_token": "t"})
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
+                        lambda request: {"access_token": "t"})
     # Plenty of lookers, no watchers — the signal the group is built from, and
     # the one a price cut cannot move: these are the views this listing has
     # had since the day it went up.

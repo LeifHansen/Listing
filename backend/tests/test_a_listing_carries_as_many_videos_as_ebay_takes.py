@@ -453,7 +453,8 @@ def api(monkeypatch, tmp_path):
     fake = FakeDb(rows={"s1": {"id": "s1", "status": "draft",
                                "listing": {"title": "Vintage tee"}}})
     monkeypatch.setattr(main, "db", fake)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "db", fake)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
     monkeypatch.setattr(main, "_in_background", lambda fn, *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)

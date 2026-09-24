@@ -1,10 +1,15 @@
 """Request helpers shared by main.py and the route modules beside this one.
 
 What a handler needs from the request that belongs to no one area: who and
-where the caller is, the sign-in rate limit, the opaque page cursor, and the
-superadmin gate with its audit trail. They live here, not in main.py, because a route
-module cannot import main.py — main includes the routers, so the reverse is
-an import cycle.
+where the caller is, whether they own the listing they name, their eBay
+credentials, the sign-in rate limit, the opaque page cursor, and the
+superadmin gate with its audit trail. They live here, not in main.py,
+because a route module cannot import main.py — main includes the routers,
+so the reverse is an import cycle.
+
+main.py's own handlers call these too. A test that swaps main's `db` for a
+stand-in therefore swaps this module's as well, or the ownership check below
+reads the real one (tests/test_a_patch_on_main_never_silently_misses.py).
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ from fastapi import HTTPException, Request
 
 from .. import auth, db, ratelimit
 from ..config import log
+from ..marketplaces import ebay_provider
 from ..services import errorlog
 
 
@@ -29,6 +35,33 @@ def uid(request: Request) -> Optional[str]:
     # liveness probe on the only machine.
     errorlog.note_user(user["id"] if user else "")
     return user["id"] if user else None
+
+
+def assert_session_owner(session_id: str, request: Request) -> None:
+    """404 when this session's saved listing belongs to a DIFFERENT user.
+    Session ids appear in media URLs and can leak, so possession of an id
+    must not grant write access. Unsaved or unowned (anonymous) sessions
+    pass — the app supports logged-out flows.
+
+    Fails CLOSED on a database outage. This check is the only thing standing
+    between a leaked session id and write access to someone else's photos,
+    and it answers from the database — so if a read failure were treated like
+    "no such listing", one Neon blip would quietly disable the guard on every
+    session-scoped endpoint at once, while the rest of the app (on-disk
+    sessions, /media) kept serving. A brief 503 is the right trade.
+    """
+    rec = db.get_listing_strict(session_id)
+    if rec is db.UNAVAILABLE:
+        raise HTTPException(
+            503, "Can't verify who this listing belongs to right now — "
+                 "please try again in a moment.")
+    if rec and rec.get("user_id") and rec["user_id"] != uid(request):
+        raise HTTPException(404, "Listing not found")
+
+
+def ebay_creds_for(request: Request):
+    """Build live eBay creds for the logged-in user, or None if not connected."""
+    return ebay_provider.creds_for(uid(request))
 
 
 def client_ip(request: Request) -> str:

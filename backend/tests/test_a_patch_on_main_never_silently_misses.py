@@ -1,9 +1,10 @@
 """A test that patches `main` has to still be patching something.
 
-Some ninety test files steer the app by replacing a name on backend.main,
-as in `monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)`,
-and fifty-odd names are patched that way. It works because the handlers live
-in main.py and look those names up in main's globals each time they run.
+Seventy-odd test files steer the app by replacing a name on backend.main,
+as in `monkeypatch.setattr(main, "_in_background", lambda fn, *a: None)`,
+and about fifty names are patched that way. It works because the handlers
+live in main.py and look those names up in main's globals each time they
+run.
 
 Moving a handler out of main.py breaks that without breaking anything loud.
 The moved code reads its OWN module's binding — the function it imported, or
@@ -29,7 +30,10 @@ source alone (no app is booted, so this runs in the light CI job too):
    main's own handlers read.
 3. What does not reach a router is replacing main's whole binding of a
    module with a stand-in. So a test that does that, to a module a router
-   also holds, drives no route that lives under backend/routers. (The
+   also holds, drives no route that lives under backend/routers. deps is
+   held to more, because main's own handlers call it (who is asking,
+   whether they own the listing): any route can reach it, so a stand-in for
+   a module deps reads is installed on deps too, alongside main's. (The
    `dbmod` fixture is exempt: it is the same module object, reloaded
    against a scratch database.)
 4. Nothing under backend/routers imports backend.main. main includes the
@@ -53,8 +57,9 @@ def _tree(path: Path) -> ast.Module:
     return ast.parse(path.read_text(), filename=str(path))
 
 
-def _patches_on_main(tree: ast.Module):
-    """(name, value) for each `setattr(main, "name", value)` in a test."""
+def _setattrs(tree: ast.AST, targets: set[str]):
+    """(name, value) for each `setattr(<target>, "name", value)` under `tree`
+    whose target is spelled as one of `targets`."""
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and len(node.args) >= 2):
             continue
@@ -63,9 +68,14 @@ def _patches_on_main(tree: ast.Module):
                   else getattr(func, "id", ""))
         target, name = node.args[0], node.args[1]
         if (called in ("setattr", "delattr")
-                and isinstance(target, ast.Name) and target.id == "main"
+                and ast.unparse(target) in targets
                 and isinstance(name, ast.Constant) and isinstance(name.value, str)):
             yield name.value, (node.args[2] if len(node.args) > 2 else None)
+
+
+def _patches_on_main(tree: ast.AST):
+    """(name, value) for each `setattr(main, "name", value)` in a test."""
+    return _setattrs(tree, {"main"})
 
 
 PATCHED: dict[str, set[str]] = {}
@@ -288,6 +298,11 @@ def _strings(tree: ast.Module):
             yield str(node.values[0].value) + _FILLED
 
 
+def _is_dbmod(value) -> bool:
+    """The `dbmod` fixture: the same module object, reloaded, not a stand-in."""
+    return isinstance(value, ast.Name) and value.id == "dbmod"
+
+
 def test_a_module_swapped_on_main_is_never_the_one_a_router_reads():
     routed = _router_paths()
     # Only a module some router holds can be missed. A test swapping one no
@@ -301,7 +316,7 @@ def test_a_module_swapped_on_main_is_never_the_one_a_router_reads():
         tree = _tree(path)
         swapped = {name for name, value in _patches_on_main(tree)
                    if name in MAIN_MODULES and name in held
-                   and not (isinstance(value, ast.Name) and value.id == "dbmod")}
+                   and not _is_dbmod(value)}
         if not swapped:
             continue
         hits = sorted({p.rstrip("{") for s in _strings(tree) for p in routed
@@ -313,6 +328,33 @@ def test_a_module_swapped_on_main_is_never_the_one_a_router_reads():
         "these routes live in backend/routers and read their own binding of "
         "the module, so the stand-in never reaches them; patch the router's "
         f"binding (or the module's attribute) instead: {problems}")
+
+
+def test_a_module_swapped_on_main_is_swapped_on_deps_too():
+    """main's own handlers call deps, so whichever route a test drives, the
+    ownership check there reads deps' `db`. A stand-in installed on main
+    alone would leave that check reading the real database while the test
+    believes it controls it. Checked per function, stand-in by stand-in."""
+    deps = BACKEND / "routers" / "deps.py"
+    held = {a.asname or a.name for node in ast.walk(_tree(deps))
+            if isinstance(node, (ast.Import, ast.ImportFrom)) for a in node.names}
+    assert "db" in held, "deps no longer reads db; this rule can go"
+    problems = []
+    for path in TESTS:
+        for fn in ast.walk(_tree(path)):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            on_main = {(n, ast.unparse(v)) for n, v in _patches_on_main(fn)
+                       if n in held and n in MAIN_MODULES
+                       and v is not None and not _is_dbmod(v)}
+            on_deps = {(n, ast.unparse(v))
+                       for n, v in _setattrs(fn, {"main.deps", "deps"})
+                       if v is not None}
+            problems += [f"{path.name}::{fn.name} swaps main.{n} for {v}"
+                         for n, v in sorted(on_main - on_deps)]
+    assert not problems, (
+        "install the same stand-in on main.deps as well, or deps' helpers "
+        f"keep reading the real module: {problems}")
 
 
 def test_no_router_imports_main():

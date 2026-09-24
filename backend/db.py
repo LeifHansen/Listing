@@ -2250,7 +2250,7 @@ def get_listing(listing_id: str) -> Optional[dict]:
 
     It used to collapse the two, and ten route handlers turned the result
     into `404 "Listing not found"` -- a claim about the seller's account made
-    on the strength of not being able to ask. `_assert_session_owner` had
+    on the strength of not being able to ask. `deps.assert_session_owner` had
     already reasoned this through for the ownership guard and refuses with a
     503; this is the same reasoning, in the one place all of them read.
 

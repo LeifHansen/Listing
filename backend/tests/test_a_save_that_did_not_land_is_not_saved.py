@@ -70,7 +70,7 @@ class FakeDb:
     def list_listings(self, **kw):
         return list(self.rows.values())
 
-    # `_assert_session_owner` compares the strict read against db.UNAVAILABLE.
+    # `deps.assert_session_owner` compares the strict read against db.UNAVAILABLE.
     UNAVAILABLE = object()
 
     def __getattr__(self, name):  # anything else this route doesn't need
@@ -92,7 +92,8 @@ def test_a_save_that_did_not_land_is_not_reported_as_saved(api, monkeypatch):
     main, client = api
     fake = FakeDb(landed=False)
     monkeypatch.setattr(main, "db", fake)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "db", fake)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)
 
     res = client.post("/api/save/s1", json=_listing())
@@ -106,7 +107,8 @@ def test_a_save_that_landed_still_says_so(api, monkeypatch):
     main, client = api
     fake = FakeDb(landed=True)
     monkeypatch.setattr(main, "db", fake)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "db", fake)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)
 
     res = client.post("/api/save/s1", json=_listing())
@@ -121,7 +123,8 @@ def test_a_merge_reports_only_the_sources_it_actually_removed(api, monkeypatch):
         "s1": {"id": "s1", "listing": _listing(), "status": "draft"},
     }, landed=True, deleted=False)
     monkeypatch.setattr(main, "db", fake)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "db", fake)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main, "_purge_session_images", lambda *a, **k: None)
     monkeypatch.setattr(main, "_in_background", lambda fn, *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)

@@ -61,7 +61,7 @@ def client(monkeypatch):
                         lambda *_a, **_k: effects.__setitem__(
                             "writes", effects["writes"] + 1))
     monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *_a, **_k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *_a, **_k: None)
     monkeypatch.setattr(main, "_in_background",
                         lambda fn, *a, what="", **k: fn(*a, **k))
 

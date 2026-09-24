@@ -181,7 +181,7 @@ from backend import main, ratelimit  # noqa: E402
 @pytest.fixture()
 def seller(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "tok"})
     ratelimit.reset()
     client = TestClient(main.app)

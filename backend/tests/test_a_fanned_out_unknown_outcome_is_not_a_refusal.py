@@ -47,7 +47,7 @@ def api(monkeypatch):
     from backend import main
 
     monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main, "_restore_server_state", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)
     monkeypatch.setattr(main.db, "get_listing", lambda _sid: {})

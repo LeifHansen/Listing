@@ -24,7 +24,7 @@ from backend import main  # noqa: E402
 def sync(monkeypatch):
     saved: dict = {}
     monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t", "_uid": "u1"})
     monkeypatch.setattr(main.ebay_auth, "fetch_policies_and_location",
                         lambda _t: {})

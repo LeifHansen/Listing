@@ -49,7 +49,8 @@ from backend.models import ItemSpecific
 def seller(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {"access_token": "t"})
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
+                        lambda request: {"access_token": "t"})
     monkeypatch.setattr(main, "_resolve_category", lambda listing: None)
     main._ENRICH_JOBS.clear()
     ratelimit.reset()
