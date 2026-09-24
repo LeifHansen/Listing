@@ -76,6 +76,16 @@ def check(key: str, now: float | None = None,
     with _lock:
         hits = [t for t in _hits.get(key, []) if now - t < WINDOW_SECONDS]
         hits.append(now)
+        # Only the newest limit+1 attempts can ever decide an answer: a key is
+        # over its limit exactly while its (limit+1)th most recent attempt is
+        # inside the window, so anything older changes nothing. Kept, they
+        # made a flood its own amplifier -- every refused attempt was stored
+        # and every check copied the whole list under the one global lock, so
+        # a single address hammering /api/client-errors (no login needed) or
+        # the studio grew one list without bound and made each check slower
+        # than the last, on the event loop for the async callers.
+        if len(hits) > limit + 1:
+            del hits[:len(hits) - (limit + 1)]
         _hits[key] = hits
         if len(_hits) > _MAX_KEYS:
             _evict(now, key)
