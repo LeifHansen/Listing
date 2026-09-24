@@ -1275,7 +1275,12 @@ errors on a DB problem. Tables are auto-created on first use.
 
 ```
 backend/
-  main.py            FastAPI app + routes
+  main.py            FastAPI app, startup, middleware, and the routes not
+                     yet split out
+  routers/           route modules split out of main.py, one area each
+                     (the rules for moving one are in its __init__.py)
+    deps.py          request helpers main.py and the routers share
+    admin.py         the operator console (/api/admin) and /api/ops
   config.py          env / settings
   db.py              SQLAlchemy models + every database read and write
   models.py          Pydantic models (Listing, etc.)

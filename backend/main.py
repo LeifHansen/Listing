@@ -75,6 +75,7 @@ from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
 from .services import errorlog
 from .services.background import run_in_background
+from .routers import admin as admin_routes, deps
 
 
 @asynccontextmanager
@@ -822,17 +823,9 @@ def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _client_ip(request: Request) -> str:
-    """The caller's IP. Fly puts the real client in Fly-Client-IP; uvicorn
-    runs with --proxy-headers so request.client is already the forwarded
-    address, but the explicit header is the one Fly guarantees."""
-    return (request.headers.get("Fly-Client-IP")
-            or (request.client.host if request.client else "?"))
-
-
 def _rate_limit_auth(request: Request, bucket: str) -> None:
     """429 when one client floods an auth endpoint (see backend/ratelimit)."""
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"{bucket}:{ip}"):
         log.warning("auth: rate limited %s from %s", bucket, ip)
         raise HTTPException(
@@ -897,377 +890,10 @@ async def health() -> dict:
     }
 
 
-def _diagnostics() -> dict:
-    """Everything an operator needs to tell "not configured" apart from
-    "misconfigured". Served only from the admin route above."""
-    return {
-        "ok": True,
-        # The commit actually running. A deploy can report success while the
-        # image serving traffic is older (a poisoned builder cache has done
-        # this here before), and without this the only way to tell was to
-        # diff response shapes against git history and guess.
-        "build": config.BUILD_SHA or "unknown",
-        "anthropic_configured": config.anthropic_ready(),
-        "google_ai_configured": config.google_ai_ready(),
-        "identify_provider": config.identify_provider(),
-        "ebay_configured": config.ebay_ready(),
-        "ebay_missing": config.ebay_status()["missing"],
-        "taxonomy_configured": config.taxonomy_ready(),
-        "ebay_env": config.EBAY_ENV,
-        "ebay_oauth_ready": config.ebay_oauth_ready(),
-        "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
-        # Etsy, where "configured" is only half the answer: which of Etsy's
-        # three access tiers the app is on decides how many shops may connect
-        # at all, and the roster is how the operator seats them. Counts, never
-        # the addresses — this is a diagnostics endpoint, not a place to hand
-        # out the beta's email list to anyone holding the admin token.
-        # `etsy_seats: 0` means no ceiling (Commercial Access); a roster
-        # larger than the ceiling also gets its own config_warnings() line,
-        # because the overflow is refused on Etsy's page rather than here.
-        "etsy_configured": config.etsy_oauth_ready(),
-        "etsy_access_tier": config.etsy_access_tier(),
-        "etsy_seats": config.etsy_seat_ceiling(),
-        "etsy_roster": len(config.ETSY_OWNER_EMAILS),
-        "etsy_gate_active": config.etsy_gate_active(),
-        # True when the two above disagree about who is protected: the tier
-        # still restricts who may authorize, and an empty roster leaves the
-        # gate inert — so every seller reaches Etsy's refusal page. Carries
-        # its own config_warnings() line; reported here too because this is
-        # the endpoint an operator opens when a seller says Connect is broken.
-        "etsy_access_unverified": config.etsy_access_unverified(),
-        # Photo storage: is the R2 bucket wired up — and if not, exactly which
-        # pieces are missing (four credentials sat deployed for a week while a
-        # bare `false` here hid that two more vars were expected) — plus how
-        # much room is left on the volume (a full one breaks every upload).
-        "objstore_configured": objstore.enabled(),
-        "objstore_missing": config.r2_missing(),
-        "objstore_bucket": config.R2_BUCKET if objstore.enabled() else None,
-        "objstore_url_mode": (("public" if config.r2_public_urls() else "presigned")
-                              if objstore.enabled() else None),
-        "objstore_error": objstore.last_error(),
-        "disk_free_mb": round(storage.disk_free_bytes() / 1e6),
-        "storage": "r2" if objstore.enabled() else "local",
-        # Monetization, reported like every other integration: whether metering
-        # is actually on, what's still missing before money can move, and which
-        # Stripe mode the keys are in — a test key on a production deploy
-        # accepts nothing and otherwise looks identical to a working one.
-        "tokens_enabled": config.tokens_enabled(),
-        "tokens_missing": config.tokens_missing(),
-        "stripe_live_mode": config.stripe_live_mode(),
-        # Misconfigurations that look exactly like "not configured yet": a
-        # secret set under a name one word off from the one the code reads, or
-        # an on/off flag set to something that isn't on. Every `*_missing` list
-        # above reports those two cases identically to never having set them,
-        # which is how production ran with the paid tier off and a Stripe key
-        # visibly deployed. [] means nothing adjacent was found.
-        "config_warnings": config.config_warnings(),
-        "db": db.db_status(),
-        # Erasures this deployment still owes: photos whose account is already
-        # deleted, and eBay account-deletion notices acknowledged but not yet
-        # carried out. Both are promises already made to somebody, so a number
-        # here that does not come back down is the alert. Counts only — the
-        # ids belong to people who asked to be forgotten.
-        "deletion_backlog": deletion_queue.backlog(),
-        # Refunds that did not commit and are still owed. Like the deletion
-        # backlog, a number here that does not come back down is a promise
-        # already made to somebody — in this case, their money.
-        "owed_refunds": owed_refunds.backlog(),
-    }
-
-
-def _token_matches(supplied: str, expected: str) -> bool:
-    """Constant-time equality for a header-borne token.
-
-    On bytes, not str: secrets.compare_digest raises TypeError for a str with
-    a character outside ASCII, and Starlette hands headers over as latin-1
-    text -- so one probe with a byte >= 0x80 in it was a 500 and an
-    error_events row, where a wrong token is a 401.
-    """
-    return secrets.compare_digest(supplied.encode("utf-8", "replace"),
-                                  expected.encode("utf-8", "replace"))
-
-
-def _require_admin(request: Request) -> None:
-    """Fail CLOSED: an unset ADMIN_TOKEN denies rather than admits.
-
-    An absent secret reading as "no check required" is exactly how this
-    endpoint would end up public again on a deploy that forgot to set it --
-    which is the state it is being moved out of.
-    """
-    expected = (config.ADMIN_TOKEN or "").strip()
-    supplied = (request.headers.get("x-admin-token") or "").strip()
-    if not expected or not supplied or not _token_matches(supplied, expected):
-        raise HTTPException(401, "Not authorised.")
-
-
-@app.get("/api/admin/diagnostics")
-def admin_diagnostics(request: Request) -> dict:
-    """The deployment detail /api/health used to hand out anonymously."""
-    _require_admin(request)
-    return _diagnostics()
-
-
-# --- superadmin console ------------------------------------------------------
-#
-# The operator console: cross-user reads and a handful of account actions,
-# gated by users.role rather than the shared header token above. The two
-# doors deliberately coexist: /api/admin/diagnostics keeps working with the
-# database down (curl/CI), while everything below authenticates a PERSON,
-# so every action can be written down with a name on it.
-#
-# These handlers live in THIS module on purpose. The ownership guardrail
-# (tests/test_every_scoped_route_checks_the_owner.py) AST-scans main.py and
-# nothing else — an admin route in a separate module would silently leave
-# that scan, which is exactly how the next cross-user read ships unreviewed.
-# If main.py is ever split, extend that test's MAIN/FUNCS first.
-
-def _require_superadmin(request: Request) -> dict:
-    """The signed-in superadmin, or 404. Fail CLOSED.
-
-    404 rather than 401/403, on purpose: (a) it does not confirm an admin
-    surface exists to whoever is probing for one; (b) lib/api.js treats any
-    401 as "session expired" and signs the caller out client-side — the
-    wrong outcome for a curious logged-in seller who typed /api/admin into
-    devtools. A database outage propagates as StorageUnavailable → 503, like
-    every other authenticated route: "cannot check" is never "not an admin".
-    The role is re-read from the user row on every request (current_user's
-    per-request read), so revoking it takes effect immediately — there is no
-    role claim inside the 30-day JWT to wait out.
-    """
-    user = auth.current_user(request)
-    if not user or (user.get("role") or "") != "superadmin":
-        raise HTTPException(404, "Not found")
-    return user
-
-
-def _audit_admin(admin: dict, request: Request, action: str,
-                 target_type: str = "", target_id: str = "",
-                 data: Optional[dict] = None) -> str:
-    """Write the audit row for an admin action, BEFORE the action runs.
-
-    Raises (→ 503) when it cannot: an admin action that cannot be written
-    down does not run. Returns the row id — token grants carry it in their
-    ledger `ref`, so the two trails reconcile mechanically.
-    """
-    return db.admin_audit(admin, action, target_type=target_type,
-                          target_id=target_id, ip=_client_ip(request),
-                          data=data)
-
-
-def _admin_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:
-    """The same opaque "<stamp>|<id>" token _cursor_for mints, for admin
-    pages keyed on their own timestamp columns. None when the row cannot
-    name a place in the order — the page then honestly offers no button."""
-    if not stamp or not row_id:
-        return None
-    raw = f"{stamp}|{row_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-
-
-@app.get("/api/admin/system")
-def admin_system(request: Request) -> dict:
-    """_diagnostics(), for the console's System tab. Same payload as
-    /api/admin/diagnostics behind the session gate instead of the header."""
-    _require_superadmin(request)
-    return _diagnostics()
-
-
-@app.get("/api/admin/overview")
-def admin_overview(request: Request, days: int = 30) -> dict:
-    """The platform KPIs plus the two obligation backlogs. Reads raise
-    rather than answering zeros — the console renders "couldn't check"."""
-    _require_superadmin(request)
-    if days not in (7, 30, 90):
-        days = 30
-    kpis = db.admin_platform_kpis(days)
-    kpis["deletion_backlog"] = deletion_queue.backlog()
-    kpis["owed_refunds"] = owed_refunds.backlog()
-    return kpis
-
-
-@app.get("/api/admin/users")
-def admin_users(request: Request, q: str = "", before: str = "",
-                limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 100))
-    cursor = _cursor_from(before) if before else None
-    # One row more than will be returned, so the answer can say whether it
-    # is the whole list — same probe-row trade as /api/listings.
-    rows = db.admin_list_users(limit=limit + 1, before=cursor, q=q)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    out = {"users": rows,
-           "rollups": db.admin_user_rollups([u["id"] for u in rows]),
-           "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                         rows[-1].get("id"))
-                           if truncated and rows else None)}
-    try:
-        out["total"] = db.admin_count_users()
-    except errors.StorageUnavailable:
-        # The page is honest without it; a total must never be invented.
-        pass
-    return out
-
-
-@app.get("/api/admin/users/{user_id}")
-def admin_user_detail(user_id: str, request: Request) -> dict:
-    _require_superadmin(request)
-    detail = db.admin_get_user(user_id)
-    if detail is None:
-        raise HTTPException(404, "No such account.")
-    return {"user": detail}
-
-
-# The most an admin can hand out in one grant. Not a product limit — a
-# typo guard: 1000000 where 1000 was meant is a real balance someone
-# spends, and there is no undo that claws back what was already used.
-_ADMIN_GRANT_CAP = 100_000
-
-
-@app.post("/api/admin/users/{user_id}/grant-tokens")
-def admin_grant_tokens(user_id: str, request: Request,
-                       payload: Optional[dict] = None) -> dict:
-    """Credit an account (a support goodwill, a refund made right). The
-    ledger row's ref carries the audit row's id, and token_credit's unique
-    ref makes a retried grant a no-op rather than a double credit."""
-    admin = _require_superadmin(request)
-    body = payload or {}
-    try:
-        amount = int(body.get("tokens"))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "How many tokens? Send a whole number.")
-    if not 1 <= amount <= _ADMIN_GRANT_CAP:
-        raise HTTPException(
-            400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
-    note = str(payload.get("note") or "").strip()[:200]
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    audit_id = _audit_admin(admin, request, "grant_tokens", "user", user_id,
-                            data={"tokens": amount, "note": note})
-    res = db.token_credit(user_id, amount, ref=f"admin:{audit_id}",
-                          kind="grant",
-                          note=note or f"granted by {admin['email']}")
-    if res is None:
-        raise HTTPException(
-            503, "The grant was recorded but could not be applied — it was "
-                 "NOT credited. Try again in a moment.")
-    return {"ok": True, "granted": amount,
-            "already": bool(res.get("already"))}
-
-
-@app.post("/api/admin/users/{user_id}/revoke-sessions")
-def admin_revoke_sessions(user_id: str, request: Request) -> dict:
-    """Force-sign-out one account everywhere (a stolen token, a support
-    request). db.revoke_sessions is strict, so success here means the write
-    landed."""
-    admin = _require_superadmin(request)
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    _audit_admin(admin, request, "revoke_sessions", "user", user_id)
-    db.revoke_sessions(user_id)
-    return {"ok": True}
-
-
-@app.post("/api/admin/users/{user_id}/disable")
-def admin_set_disabled(user_id: str, request: Request,
-                       payload: Optional[dict] = None) -> dict:
-    """Lock an account out ({"disabled": true}) or back in (false).
-
-    Two refusals: your own account (locking yourself out of the console
-    that unlocks accounts), and another superadmin (demote them with
-    scripts/grant_superadmin.py --revoke first, so removing an operator is
-    a deliberate, audited, out-of-band step rather than a console click).
-    Disabling also revokes sessions: the lockout must reach tokens that are
-    already minted, not just the next login.
-    """
-    admin = _require_superadmin(request)
-    body = payload or {}
-    disabled = body.get("disabled")
-    if not isinstance(disabled, bool):
-        raise HTTPException(400, 'Send {"disabled": true} or false.')
-    if user_id == admin["id"]:
-        raise HTTPException(400, "You can't disable your own account.")
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    if (target.get("role") or "") == "superadmin":
-        raise HTTPException(
-            400, "That account is a superadmin — revoke its role first "
-                 "(scripts/grant_superadmin.py --revoke).")
-    _audit_admin(admin, request,
-                 "disable_account" if disabled else "enable_account",
-                 "user", user_id)
-    updated = db.set_user_disabled(user_id, disabled)
-    if updated is None:
-        raise HTTPException(404, "No such account.")
-    if disabled:
-        db.revoke_sessions(user_id)
-    return {"ok": True, "disabled_at": updated.get("disabled_at")}
-
-
-@app.get("/api/admin/listings")
-def admin_listings(request: Request, q: str = "", status: str = "",
-                   user_id: str = "", before: str = "",
-                   limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 100))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
-                                  status=status, user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"listings": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("updated_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/listings/{listing_id}")
-def admin_get_listing(listing_id: str, request: Request) -> dict:
-    """One listing in full, whoever owns it — the read-only detail behind a
-    row in the console's cross-user browse. See the ownership test's EXEMPT
-    entry: cross-user is the point here, and the gate above is the check."""
-    _require_superadmin(request)
-    rec = db.get_listing_strict(listing_id)
-    if rec is db.UNAVAILABLE:
-        raise HTTPException(
-            503, "Couldn't read that listing just now. Try again in a "
-                 "moment.")
-    if rec is None:
-        raise HTTPException(404, "Listing not found")
-    return rec
-
-
-@app.get("/api/admin/ledger")
-def admin_ledger_view(request: Request, kind: str = "", user_id: str = "",
-                      before: str = "", limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
-                           user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/compliance")
-def admin_compliance(request: Request) -> dict:
-    """The two obligation queues. The counts raise on a read failure (a zero
-    here is a claim that nothing is owed), so an outage 503s the tab rather
-    than rendering 'Nothing owed' over queue rows nobody could read."""
-    _require_superadmin(request)
-    return {
-        "deletion_backlog": db.count_pending_deletion_notices(),
-        "media_purge_backlog": db.count_pending_media_purges(),
-        "deletion_notices": db.pending_deletion_notices(100),
-        "media_purges": db.pending_media_purges(100),
-    }
+# The operator console and the machine doors (/api/admin, /api/ops) live in
+# routers/admin.py. Included here, where they were defined, so they keep
+# their place in the route order.
+app.include_router(admin_routes.router)
 
 
 @app.post("/api/admin/compliance/run")
@@ -1275,124 +901,16 @@ def admin_run_compliance(request: Request) -> dict:
     """Kick the recovery passes now instead of waiting for the next boot —
     the button an operator presses when the backlog number is not coming
     down. Inline rather than backgrounded so the response can say what
-    actually happened."""
-    admin = _require_superadmin(request)
-    _audit_admin(admin, request, "run_compliance_queue", "system")
+    actually happened.
+
+    The one console route not in routers/admin.py: the passes are this
+    module's own, run at every boot, and they read _purge_session_images,
+    which tests patch here."""
+    admin = deps.require_superadmin(request)
+    deps.audit_admin(admin, request, "run_compliance_queue", "system")
     finished = _finish_pending_deletions()
     refunds = _settle_owed_refunds()
     return {"ok": True, "deletions": finished, "refunds_settled": refunds}
-
-
-def _require_error_feed(request: Request) -> None:
-    """The triage job's door. Fails CLOSED, like _require_admin.
-
-    A twin of _require_admin rather than a reuse of it, reading its own
-    ERROR_FEED_TOKEN. The distinction is the point: ADMIN_TOKEN also opens
-    /api/admin/diagnostics, which reports raw database and object-store
-    exception text — the Neon host, the role, the R2 account. A scheduled job
-    that reads which bugs are open has no business holding that, and a
-    credential in CI is the one most likely to leak.
-    """
-    expected = (config.ERROR_FEED_TOKEN or "").strip()
-    supplied = (request.headers.get("x-error-feed-token") or "").strip()
-    if not expected or not supplied or not _token_matches(supplied, expected):
-        raise HTTPException(401, "Not authorised.")
-
-
-def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
-                  min_severity: str = "", include_resolved: bool = True
-                  ) -> dict:
-    """The distinct failures, newest-seen first. Shared by both doors below.
-
-    `sink` rides along because a queue that is dropping rows would otherwise
-    look exactly like a quiet day — the most dangerous thing a monitor can
-    do. It is the lesson check_health.py's docstring records, one layer down:
-    an alarm that cannot tell "nothing happened" from "I could not see" is
-    worse than no alarm.
-    """
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.error_events_list(limit=limit + 1, before=cursor,
-                                since_hours=since_hours,
-                                min_severity=min_severity,
-                                include_resolved=include_resolved)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"errors": rows,
-            "sink": errorlog.stats(),
-            "next_cursor": (_admin_cursor(rows[-1].get("last_seen"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/errors")
-def admin_errors(request: Request, before: str = "", limit: int = 50,
-                 since_hours: int = 0, severity: str = "",
-                 include_resolved: bool = True) -> dict:
-    """The console's Errors tab. Session-gated, like the rest of the console."""
-    _require_superadmin(request)
-    return _error_report(before=before, limit=limit, since_hours=since_hours,
-                         min_severity=severity,
-                         include_resolved=include_resolved)
-
-
-@app.get("/api/ops/error-feed")
-def ops_error_feed(request: Request, limit: int = 50, since_hours: int = 36,
-                   severity: str = "") -> dict:
-    """The same report, for the daily triage job. Token-gated.
-
-    Two doors onto one payload, exactly as /api/admin/system and
-    /api/admin/diagnostics already coexist: the session door authenticates a
-    PERSON, which is right for the console and wrong for a robot that would
-    have to hold a human's long-lived session to use it.
-
-    Under /api/ops rather than /api/admin, and that is not cosmetic.
-    test_every_console_route_is_gated walks app.routes and requires EVERY
-    /api/admin/ path to answer 404 to a non-superadmin — "the next admin route
-    is born tested". It carries exactly one exception, /api/admin/diagnostics,
-    described in its own docstring as the older door. Adding two more would
-    turn a guardrail that cannot be forgotten into a list somebody maintains,
-    which is how the next unreviewed cross-user read ships. Machine doors get
-    their own prefix instead, and the console's guarantee stays absolute.
-
-    Defaults to a 36-hour window rather than 24: the job runs on a daily cron,
-    and a calendar-day read drops anything that happened in the seam between
-    one run and the next. Overlap costs nothing, because the fingerprint
-    dedupes.
-    """
-    _require_error_feed(request)
-    return _error_report(limit=limit, since_hours=since_hours,
-                         min_severity=severity, include_resolved=False)
-
-
-@app.post("/api/ops/errors/{fingerprint}/fixed")
-def ops_error_fixed(fingerprint: str, request: Request,
-                    payload: Optional[dict] = None) -> dict:
-    """Mark a failure as having a fix proposed, so the job stops proposing one.
-
-    Token-gated, and under /api/ops for the reason the feed above gives. It
-    is never cleared automatically — if the bug returns, `last_seen` moves and
-    the row surfaces again on its own, which is a fact rather than a guess
-    about whether the fix worked.
-    """
-    _require_error_feed(request)
-    pr = str((payload or {}).get("pr") or "")[:200]
-    return {"ok": db.mark_error_fixed(fingerprint, pr)}
-
-
-@app.get("/api/admin/audit")
-def admin_audit_view(request: Request, before: str = "",
-                     limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_audit_list(limit=limit + 1, before=cursor)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
 
 
 # Disk below this and photo work will start failing mid-upload. Reporting it
@@ -1437,7 +955,7 @@ async def client_error(request: Request) -> dict:
     except (TypeError, ValueError):
         return ok
 
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"clienterr:{ip}",
                            max_attempts=config.CLIENT_ERROR_MAX_PER_WINDOW):
         return ok
@@ -3959,9 +3477,9 @@ def add_expert_knowledge(request: Request, payload: dict) -> dict:
             400, f"You can save {KNOWLEDGE_PER_ACCOUNT} references per expert. "
                  f"Remove one first.")
     if scope == "global":
-        _audit_admin(user, request, "add_global_reference",
-                     target_type="expert", target_id=expert,
-                     data={"url": safe_url[:300]})
+        deps.audit_admin(user, request, "add_global_reference",
+                         target_type="expert", target_id=expert,
+                         data={"url": safe_url[:300]})
 
     record_id = db.expert_knowledge_add(expert, safe_url, note, scope=scope,
                                         account_id=uid, added_by=uid)
@@ -4008,7 +3526,7 @@ def refresh_expert_knowledge(request: Request, record_id: str) -> dict:
     else pays for."""
     uid = _uid(request)
     _owned_knowledge(record_id, uid)
-    if not ratelimit.check(f"reference:{_client_ip(request)}"):
+    if not ratelimit.check(f"reference:{deps.client_ip(request)}"):
         raise HTTPException(429, "Too many refreshes. Try again in a few "
                                  "minutes.")
     run_in_background(_distill_reference_row, record_id)
@@ -6342,7 +5860,7 @@ def _studio_guard(request: Request) -> None:
     They deliberately are NOT token-metered — the border re-check fires
     automatically after every crop and save, so charging it would bill people
     for ordinary editing — which makes a rate ceiling the only brake."""
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"studio:{ip}", max_attempts=ratelimit.STUDIO_MAX_CALLS):
         log.warning("studio: rate limited %s", ip)
         raise HTTPException(
@@ -6736,7 +6254,7 @@ def _taxonomy_guard(request: Request) -> None:
     ONE budget across all three: they draw on the same eBay allowance, so
     metering them separately would let a caller spend it three times over.
     """
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"taxonomy:{ip}",
                            max_attempts=ratelimit.TAXONOMY_MAX_CALLS):
         log.warning("taxonomy: rate limited %s", ip)
@@ -9511,52 +9029,15 @@ def _projected_for_list(rec: dict) -> dict:
 
 
 def _cursor_for(rec: dict) -> Optional[str]:
-    """The opaque token naming one row, for the page that follows it.
+    """The page cursor naming one listing (deps.page_cursor has the format).
 
-    Base64url of "<updated_at>|<id>" — encoded so the timestamp's colons and
-    offset sign survive a query string untouched, and opaque so nobody starts
-    hand-assembling one. It is the server's own words handed back; the read it
-    feeds is scoped by `user_id` exactly like every other, so a cursor says
-    WHERE to start and never whose store to start in.
-
-    None when the row cannot name a place in the order. The column is
-    non-nullable so this is defensive, but the failure it prevents is the loud
-    kind: a blank half mints a token the next request rejects as malformed —
-    a 400 in the middle of a walk the seller started. No cursor degrades
-    honestly instead: the page still says it was cut, and the button that
-    could not have worked is simply not offered.
+    The read it feeds is scoped by `user_id` exactly like every other, so a
+    cursor says WHERE to start and never whose store to start in. None when
+    the row cannot name a place in the order — defensive, as `updated_at` is
+    non-nullable, but a blank half would mint a token the next request
+    refuses mid-walk.
     """
-    stamp, rid = rec.get("updated_at"), rec.get("id")
-    if not stamp or not rid:
-        return None
-    raw = f"{stamp}|{rid}"
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-
-
-def _cursor_from(token: str) -> tuple[datetime, str]:
-    """Parse one, or raise 400.
-
-    Refused rather than ignored. An ignored cursor answers with page one,
-    which the client reads as the listings that FOLLOW the ones it has — so
-    the store looks like it ends where it began, which is the bug paging
-    exists to fix, arriving through the fix.
-    """
-    try:
-        pad = "=" * (-len(token) % 4)
-        raw = base64.urlsafe_b64decode(token + pad).decode()
-        stamp, sep, last_id = raw.partition("|")
-        if not sep or not last_id:
-            raise ValueError("no separator")
-        when = datetime.fromisoformat(stamp)
-        # Same rule as everywhere else a stored timestamp is read: a naive one
-        # is UTC, not local, or the comparison silently moves the page edge.
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        return when, last_id
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            400, "That listing page link is no longer valid — reload the page "
-                 "to start from the top.") from exc
+    return deps.page_cursor(rec.get("updated_at"), rec.get("id"))
 
 
 @app.get("/api/listings")
@@ -9586,7 +9067,7 @@ def listings(request: Request, limit: int = LIST_CAP,
     # The last row of the previous page, when the client is walking older
     # ones. Empty means "from the top", which is what a client sends on first
     # load and is not a malformed cursor.
-    cursor = _cursor_from(before) if before else None
+    cursor = deps.cursor_from(before) if before else None
     rows = (db.list_listings(limit=limit + 1, user_id=user["id"], before=cursor)
             if user else [])
     items, truncated = rows[:limit], len(rows) > limit
@@ -9668,7 +9149,7 @@ def _export_pages(uid: str, first: list[dict]):
         if not token:
             return
         try:
-            cursor = _cursor_from(token)
+            cursor = deps.cursor_from(token)
         except HTTPException:
             return
         try:

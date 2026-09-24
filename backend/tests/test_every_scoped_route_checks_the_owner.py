@@ -7,11 +7,12 @@ and a session id is not a secret — it rides in the public /media URLs handed t
 eBay, so it turns up in eBay's listing pages, in the seller's browser history
 and in any log that records image fetches.
 
-So this walks main.py's AST, finds every handler scoped to one listing or one
-session, and requires each of them to be ownership-checked somewhere in its
-call graph — or to appear below with a reason. It is a pure source scan: it
-needs neither fastapi nor a booted app, and it fails on the route that was
-added rather than on the seller who found it.
+So this walks the AST of every module that registers routes — main.py and
+the modules split out of it under routers/ — finds every handler scoped to
+one listing or one session, and requires each of them to be ownership-checked
+somewhere in its call graph — or to appear below with a reason. It is a pure
+source scan: it needs neither fastapi nor a booted app, and it fails on the
+route that was added rather than on the seller who found it.
 
 Nothing here is a claim that the check is CORRECT — `_assert_session_owner`'s
 own behaviour (fail closed on a database outage, anonymous sessions still
@@ -28,10 +29,15 @@ from pathlib import Path
 import pytest
 
 MAIN = Path(__file__).resolve().parents[1] / "main.py"
-SRC = MAIN.read_text()
-TREE = ast.parse(SRC)
-FUNCS = {n.name: n for n in TREE.body
-         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+# main.py held every handler until the split into routers/ began. A handler
+# moved out of the scan's sight would be exactly how the next cross-user read
+# ships unreviewed, so the scan reads every module there too.
+SOURCES = [MAIN, *sorted((MAIN.parent / "routers").glob("*.py"))]
+DEFINED = [(path.relative_to(MAIN.parent), n)
+           for path in SOURCES for n in ast.parse(path.read_text()).body
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+FUNCS = {n.name: n for _where, n in DEFINED}
+WHERE = {n.name: where for where, n in DEFINED}
 
 # Two of the three shapes an ownership check takes in this file: the shared
 # helper, and the inline comparison for a handler that already holds the
@@ -75,7 +81,7 @@ EXEMPT = {
         "Stripe scoped to that user.",
     "admin_get_listing":
         "A superadmin console route: the cross-user read is the point. "
-        "Access is gated by _require_superadmin — fail-closed, the role "
+        "Access is gated by require_superadmin — fail-closed, the role "
         "re-read from the user row on every request, 404 to everyone else "
         "— pinned by test_admin_requires_a_superadmin.py.",
 }
@@ -155,6 +161,17 @@ def test_the_scan_found_the_routes_it_is_meant_to_guard():
         assert expected in SCOPED, f"{expected} is no longer being scanned"
 
 
+def test_no_function_name_is_defined_in_two_scanned_modules():
+    """The call graph is followed by bare name. Two modules defining the same
+    one would let the scan read one module's function as the other's, and a
+    guarded helper could vouch for an unguarded copy of itself."""
+    seen: dict[str, list[str]] = {}
+    for where, node in DEFINED:
+        seen.setdefault(node.name, []).append(f"{where}:{node.lineno}")
+    twice = {name: at for name, at in seen.items() if len(at) > 1}
+    assert not twice, twice
+
+
 @pytest.mark.parametrize("name", sorted(SCOPED))
 def test_a_listing_scoped_route_checks_who_is_asking(name):
     routes, node = SCOPED[name]
@@ -163,9 +180,9 @@ def test_a_listing_scoped_route_checks_who_is_asking(name):
         return
     where = " ".join(f"{m} {p}" for m, p in routes)
     assert _guarded(node), (
-        f"{where} ({name}, main.py:{node.lineno}) is scoped to one listing and "
-        f"never checks who is asking. Call _assert_session_owner, or compare "
-        f"the record's user_id — or add it to EXEMPT with a reason.")
+        f"{where} ({name}, {WHERE[name]}:{node.lineno}) is scoped to one "
+        f"listing and never checks who is asking. Call _assert_session_owner, "
+        f"or compare the record's user_id — or add it to EXEMPT with a reason.")
 
 
 @pytest.mark.parametrize("name", sorted(EXEMPT))

@@ -3035,7 +3035,7 @@ def db_status(refresh: bool = False) -> dict:
 #
 # Cross-user reads, prefixed admin_ so they are greppable: everything above
 # this line is scoped to one user_id, and only the /api/admin routes (gated
-# by main._require_superadmin) may call what is below it. All of them follow
+# by deps.require_superadmin) may call what is below it. All of them follow
 # the module's read policy for reads that feed a REPORT: a failure RAISES
 # rather than answering zeros — the console renders "couldn't check", never
 # an invented 0 (the same dash-not-zero contract the dashboard has).
