@@ -27,9 +27,10 @@ source alone (no app is booted, so this runs in the light CI job too):
    (`_uid = deps.uid`): the tests would go on patching the alias, which only
    main's own handlers read.
 3. What does not reach a router is replacing main's whole binding of a
-   module with a stand-in. So a test that does that drives no route that
-   lives under backend/routers. (The `dbmod` fixture is exempt: it is the
-   same module object, reloaded against a scratch database.)
+   module with a stand-in. So a test that does that, to a module a router
+   also holds, drives no route that lives under backend/routers. (The
+   `dbmod` fixture is exempt: it is the same module object, reloaded
+   against a scratch database.)
 4. Nothing under backend/routers imports backend.main. main includes the
    routers, so the reverse is an import cycle — and a way around rule 2.
 
@@ -131,10 +132,14 @@ def _read_when_called(tree: ast.Module) -> set[str]:
 
 
 def test_the_scan_finds_the_patches():
-    """A scan that silently matches nothing passes forever."""
-    assert len(PATCHED) >= 40, sorted(PATCHED)
-    for expected in ("_uid", "db", "_assert_session_owner", "_ebay_creds_for"):
-        assert expected in PATCHED, f"{expected} is no longer seen being patched"
+    """A scan that silently matches nothing passes forever. The list is meant
+    to shrink as the split moves patches off main, so what is pinned is that
+    both spellings are read, and that the suite's own patches are found."""
+    sample = ast.parse('monkeypatch.setattr(main, "_uid", fake)\n'
+                       'setattr(main, "LIST_CAP", 3)\n'
+                       'monkeypatch.setattr(other, "_uid", fake)\n')
+    assert sorted(n for n, _v in _patches_on_main(sample)) == ["LIST_CAP", "_uid"]
+    assert PATCHED, "no test patches anything on main, or the scan broke"
 
 
 def test_every_name_patched_on_main_is_still_read_by_main():
@@ -284,11 +289,17 @@ def _strings(tree: ast.Module):
 
 def test_a_module_swapped_on_main_is_never_the_one_a_router_reads():
     routed = _router_paths()
+    # Only a module some router holds can be missed. A test swapping one no
+    # router reads (ebay_offers, say) can drive a routed path to sign up.
+    held = {a.asname or a.name for path in ROUTERS
+            for node in ast.walk(_tree(path))
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for a in node.names}
     problems = []
     for path in TESTS:
         tree = _tree(path)
         swapped = {name for name, value in _patches_on_main(tree)
-                   if name in MAIN_MODULES
+                   if name in MAIN_MODULES and name in held
                    and not (isinstance(value, ast.Name) and value.id == "dbmod")}
         if not swapped:
             continue

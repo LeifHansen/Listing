@@ -1,9 +1,10 @@
 """Request helpers shared by main.py and the route modules beside this one.
 
 What a handler needs from the request that belongs to no one area: where the
-caller is, the opaque page cursor, and the superadmin gate with its audit
-trail. They live here, not in main.py, because a route module cannot import
-main.py — main includes the routers, so the reverse is an import cycle.
+caller is, the sign-in rate limit, the opaque page cursor, and the superadmin
+gate with its audit trail. They live here, not in main.py, because a route
+module cannot import main.py — main includes the routers, so the reverse is
+an import cycle.
 """
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
-from .. import auth, db
+from .. import auth, db, ratelimit
+from ..config import log
 
 
 def client_ip(request: Request) -> str:
@@ -22,6 +24,15 @@ def client_ip(request: Request) -> str:
     address, but the explicit header is the one Fly guarantees."""
     return (request.headers.get("Fly-Client-IP")
             or (request.client.host if request.client else "?"))
+
+
+def rate_limit_auth(request: Request, bucket: str) -> None:
+    """429 when one client floods an auth endpoint (see backend/ratelimit)."""
+    ip = client_ip(request)
+    if not ratelimit.check(f"{bucket}:{ip}"):
+        log.warning("auth: rate limited %s from %s", bucket, ip)
+        raise HTTPException(
+            429, "Too many attempts. Wait a few minutes and try again.")
 
 
 def page_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:
