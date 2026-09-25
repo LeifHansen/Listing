@@ -120,10 +120,10 @@ def test_a_fresh_listing_marked_down_is_not_suddenly_stale():
 # --------------------------------------------------- only the price advice stops
 
 def test_a_price_cut_silences_nothing_else():
-    """It is evidence about the price and about nothing else. A listing short
-    of photos still wants photos."""
-    item = _live(price_lowered_at=_ago(0), images=["only-one.jpg"])
-    assert "photos" in _types(item, LOOKERS)
+    """It is evidence about the price and about nothing else. A listing with
+    its item specifics blank still wants them filled in."""
+    item = _live(price_lowered_at=_ago(0))
+    assert "specifics" in _types(item, LOOKERS)
 
 
 def test_an_unreadable_stamp_leaves_the_advice_standing():

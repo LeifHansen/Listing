@@ -66,8 +66,8 @@ def seller(dbmod, monkeypatch, tmp_path):
 
 
 def _listing(rid: str, **over) -> dict:
-    """A live imported listing with blank specifics and enough photos that no
-    other suggestion outranks the two under test."""
+    """A live imported listing with blank specifics and a note left for a
+    person — the two under test."""
     return {"title": f"Item {rid}", "category_id": "11450", "source": "ebay",
             "ebay_listing_id": f"11{rid}", "images": ["a.jpg", "b.jpg", "c.jpg"],
             "missing_info": ["exact measurements"], **over}
@@ -289,23 +289,25 @@ def test_a_listing_the_fill_could_not_run_on_says_so_and_stays(seller,
 
 
 def test_it_does_not_touch_the_groups_that_need_a_decision(seller, monkeypatch):
-    """A price cut needs a percentage and photos need someone holding the
-    item. Neither is this button's to make."""
+    """A price cut needs a percentage. It is not this button's to make."""
     client, dbmod, uid = seller
-    assert dbmod.upsert_listing(
-        "thin", _listing("thin", images=["only.jpg"]),
-        status="published", user_id=uid)
-    _with_photo("thin")
+    assert dbmod.upsert_listing("looked-at", _listing("looked-at"),
+                                status="published", user_id=uid)
+    _with_photo("looked-at")
+    monkeypatch.setattr(
+        main, "_metrics_by_record_id",
+        lambda creds, items, *a, **k: {"looked-at": {"views": 40,
+                                                     "watchers": 0}})
     monkeypatch.setattr(
         main, "_enrich_listing_v2",
         lambda listing, paths, tags, progress=None: 0)
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda name: _AcceptingEbay(dbmod, uid))
 
-    # One photo outranks the fill, so this listing is in "Add more photos".
-    assert _groups(client) == {"photos": 1}
+    # Views with no watchers outrank the fill, so this one is in "Lower prices".
+    assert _groups(client) == {"lower_price": 1}
     assert client.post("/api/listings/finish-all").status_code == 400
-    assert _groups(client) == {"photos": 1}
+    assert _groups(client) == {"lower_price": 1}
 
 
 # ------------------------------------------------------- what it says first
