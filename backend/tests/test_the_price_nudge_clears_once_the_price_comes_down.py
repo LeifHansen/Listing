@@ -244,6 +244,26 @@ def _price_group(client) -> list[dict]:
             if rec["type"] == "lower_price"]
 
 
+def test_lower_all_does_not_skip_a_cheap_listing(seller):
+    """The report: "Lower all" said "1 skipped" and nothing changed. At its
+    default 10% a $4.99 listing's cut is $4.49, whose nearest .99 is the $4.99
+    it started on — so the cut came back as a no-op and was skipped, and the
+    group stayed exactly where it was."""
+    client, dbmod = seller
+    uid = dbmod.get_listing("L1")["user_id"]
+    stored = dbmod.get_listing("L1")["listing"]
+    assert dbmod.upsert_listing("L1", {**stored, "price": 4.99},
+                                status="published", user_id=uid)
+    assert _price_group(client), "the suggestion has to be offered first"
+
+    r = client.post("/api/ebay/lower-prices",
+                    json={"percent": 10, "listing_ids": ["L1"]})
+    assert r.status_code == 200, r.text
+    assert (r.json()["changed"], r.json()["skipped"]) == (1, 0), r.text
+    assert dbmod.get_listing("L1")["listing"]["price"] == 4.49
+    assert not _price_group(client)
+
+
 def test_pressing_lower_all_actually_clears_the_group(seller):
     """The whole report, start to finish: the group is there, the seller takes
     its advice with the button the group itself carries, and the group is

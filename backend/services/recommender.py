@@ -13,7 +13,7 @@ still produce useful advice.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AbstractSet, Optional
 
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
 FEW_PHOTOS = 3    # fewer than this → suggest adding photos
@@ -178,7 +178,9 @@ def filled_specifics(listing: dict) -> int:
 
 
 def recommend_for(item: dict, metrics: Optional[dict] = None,
-                  blank_specifics: Optional[int] = None) -> list[dict]:
+                  blank_specifics: Optional[int] = None,
+                  offer_eligible: Optional[AbstractSet[str]] = None
+                  ) -> list[dict]:
     """Recommended actions for ONE listing record. Each rec:
     {listing_id, listing_title, type, label, reason, action, priority}.
     Higher priority = surface sooner.
@@ -188,6 +190,11 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     aspect list — see the "Fill in details" rule below. None means nobody
     counted (no category, the Taxonomy API down, or past the lookup budget one
     dashboard load may spend), and the rule falls back to `filled_specifics`.
+
+    `offer_eligible` is the set of eBay listing ids eBay says it will carry an
+    offer to buyers for right now (services/ebay_offers.eligible_cached) —
+    see the "Send offers" rule below. None means eBay could not be asked, and
+    the rule falls back to the watch count alone.
     """
     listing = item.get("listing") or {}
     status = item.get("status")
@@ -248,11 +255,22 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     #     metrics._offers), and absence is not "no offers" — but it is not a
     #     reason to withhold the nudge either, so an unknown one falls through
     #     to the send, which asks eBay and reports what it says.
+    #
+    # And a fourth, which is eBay's own answer rather than a guess at it: a
+    # watcher is not what eBay counts, and its eligibility sweep leaves out
+    # listings whose watchers it will not carry an offer to. The send skips
+    # anything the sweep leaves out, so a suggestion built on the watch count
+    # alone kept offering listings the button could only skip — pressed, it
+    # reported them skipped and the group came back unchanged. Where eBay
+    # could be asked (`offer_eligible` is not None), the suggestion is only
+    # what the button can actually do.
     fmt = str(listing.get("listing_format") or "FIXED_PRICE").upper()
     offered = _age_days(str(listing.get("offer_sent_at") or "").strip() or None)
     offer_quiet = offered is not None and offered < OFFER_QUIET_DAYS
+    ebay_id = str(listing.get("ebay_listing_id") or "").strip()
+    eligible = offer_eligible is None or ebay_id in offer_eligible
     if (watchers and fmt == "FIXED_PRICE" and not m.get("offers")
-            and not offer_quiet):
+            and not offer_quiet and eligible):
         add("send_offers", "Send an offer",
             f"{watchers} watcher{'' if watchers == 1 else 's'} — offer them a "
             "discount before they move on.", 95)
@@ -324,7 +342,8 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
 
 
 def ranked(items: list[dict], metrics_by_id: Optional[dict] = None,
-           blanks_by_id: Optional[dict] = None) -> list[dict]:
+           blanks_by_id: Optional[dict] = None,
+           offer_eligible: Optional[AbstractSet[str]] = None) -> list[dict]:
     """Every listing's strongest recommendation, best first. UNCAPPED.
 
     The cap belongs to whoever is rendering these, not to the ranking — and
@@ -346,7 +365,8 @@ def ranked(items: list[dict], metrics_by_id: Optional[dict] = None,
     for it in items:
         for r in recommend_for(
                 it, metrics=metrics_by_id.get(it.get("id")),
-                blank_specifics=blanks_by_id.get(it.get("id"))):
+                blank_specifics=blanks_by_id.get(it.get("id")),
+                offer_eligible=offer_eligible):
             held = best.get(r["listing_id"])
             if held is None or r["priority"] > held["priority"]:
                 best[r["listing_id"]] = r
