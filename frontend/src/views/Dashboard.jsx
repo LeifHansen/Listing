@@ -45,8 +45,10 @@ const NO_TOTALS = Object.freeze({});
 // The "Finish everything" plan before /api/insights has answered. Zero total
 // hides the button rather than offering one that cannot say what it will do.
 const NO_PLAN = Object.freeze({ total: 0, enrich: 0, accept: 0 });
-// How many of a group ONE tap actually reaches. Both bulk actions fill a
-// capped number of listings per run and defer the rest, so the group must not
+// How many of a group ONE tap actually reaches. A bulk action the server caps
+// (Send offers) runs a capped number of listings and defers the rest; a group
+// with no cap in bulk_caps (Lower all, Enrich all) runs all of it. Either way
+// the group must not
 // promise the whole badge: it asked to confirm 46, quoted the AI cost of 46,
 // then ran 25 and reported "1 of 25".
 const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
@@ -255,7 +257,7 @@ function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
           </span>
         </label>
         <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
-        {/* The server reprices a capped number per run and defers the rest.
+        {/* A capped run (Send offers) covers part of the group and defers the rest.
             Said here, next to the button that spends it, rather than only in
             the toast that arrives once it is already too late to plan. */}
         {count < total && (
@@ -385,8 +387,8 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
             {Math.min(progress.done + 1, progress.total)} of {progress.total}
             {/* A capped run has to account for its remainder right here, or
                 "2 of 25" under a badge reading 46 reads as a contradiction.
-                The fill no longer has one — it takes the whole list — and
-                the price drop still does. */}
+                Neither job that draws this line has one any more — the fill
+                and the price drop both take the whole group. */}
             {progress.deferred > 0
               ? ` · ${progress.deferred} more after this run` : ""}
           </span>
@@ -679,29 +681,46 @@ export function Dashboard() {
     () => items.map((i) => `${i.id}:${i.status}`).join("|"), [items]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, storeShape]);
 
-  // Bulk price drop across one suggestion group. Reports per-listing outcomes
-  // rather than a bare success: over a dozen listings some will have sold or
-  // ended since the suggestion was computed, and "lowered 11, skipped 1" is
-  // the honest answer.
+  // Bulk price drop across the whole "Lower prices" group. Reports
+  // per-listing outcomes rather than a bare success: over a dozen listings
+  // some will have sold or ended since the suggestion was computed, and
+  // "lowered 11, skipped 1" is the honest answer.
+  //
+  // ALL of them, the same way "Enrich all" came to mean all of them. This
+  // used to hand the server the rows this screen was holding, and the server
+  // repriced a capped BULK_PRICE_CAP of those per press — so in an
+  // environment where that cap was 1, "Lower all…" on a group of 41 said
+  // "Lower 1 price by 20%" and lowered one. The run sends no ids and has no
+  // cap now: the server works the group out from the same ranking this
+  // screen renders, and runs it as a job this polls.
   const [bulkBusy, setBulkBusy] = useState(null); // group type, or null
+  // What a long run is doing right now, or null. The fill and the price drop
+  // are background JOBS the client polls — minutes of vision passes and eBay
+  // revises, far longer than any browser holds a request open — and a
+  // spinner with no end in sight is the shape of a hang. `type` says which
+  // group the line belongs under.
+  const [bulkProgress, setBulkProgress] = useState(null);
   const lowerAll = async (group, percent) => {
-    const ids = group.recs.map((r) => r.listing_id);
-    // The rows the group holds are a capped slice of it (see groupSize), and
-    // the ones that did not fit are still prices this button has to get to.
-    const unsent = Math.max(groupSize(group) - ids.length, 0);
     setBulkBusy(group.type);
+    setBulkProgress({ type: group.type, done: 0, total: groupSize(group),
+                      deferred: 0, title: "" });
     try {
-      const res = await postJson("/api/ebay/lower-prices",
-        { percent, listing_ids: ids });
+      const start = await postJson("/api/ebay/lower-all", { percent });
+      const total = start.total || groupSize(group);
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setBulkProgress({
+          type: group.type, done: j.current || 0,
+          total: j.total_items || total, deferred: 0,
+          title: j.current_title || "",
+        }),
+      });
+      // The run's own percentage: a press that found one already going is
+      // handed that run, which may have been started at a different number.
+      const cut = res.percent ?? percent;
       const parts = [];
-      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${percent}%`);
+      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${cut}%`);
       if (res.skipped) parts.push(`${res.skipped} skipped`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      // The server caps one run so the request can't outlive the gateway —
-      // and it can only defer what it was sent, so the rest of the group is
-      // added back on here.
-      const left = unsent + (res.deferred || 0);
-      if (left) parts.push(`${left} left — run it again to finish`);
       toast(parts.join(" · ") || "Nothing to change.", {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
       });
@@ -709,7 +728,10 @@ export function Dashboard() {
       loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
-    } finally { setBulkBusy(null); }
+    } finally {
+      setBulkBusy(null);
+      setBulkProgress(null);
+    }
   };
 
   // The same shape for "Send offers", and it reports the same way, because
@@ -740,14 +762,6 @@ export function Dashboard() {
       toast(`Couldn't send offers: ${e.message}`, { kind: "error" });
     } finally { setBulkBusy(null); }
   };
-
-  // What a long run is doing right now, or null. Both the fill and the
-  // whole-list press are background JOBS the client polls — minutes of vision
-  // passes and eBay revises, far longer than any browser holds a request open
-  // — and a spinner with no end in sight is the shape of a hang. `type` says
-  // which control the line belongs under: a group's own rec type, or
-  // FINISH_ALL for the press that spans them.
-  const [bulkProgress, setBulkProgress] = useState(null);
 
   // "Enrich all" — the whole suggestions list, in one press.
   //

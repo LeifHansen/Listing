@@ -10032,6 +10032,49 @@ BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
+def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
+               base_url: str, provider) -> dict:
+    """Cut ONE listing's price by `percent` and push it to eBay.
+
+    Returns a bulk_actions outcome: {"ok": True, "was", "now"}, {"skip":
+    reason}, or {"message": why eBay refused}. Shared by the route that is
+    handed ids and the job that works its own set out, so a price drop is one
+    thing however it was asked for.
+    """
+    if rec.get("status") not in ("published", "live"):
+        return {"skip": "No longer live on eBay."}
+    data = rec.get("listing") or {}
+    new_price = bulk_actions.lower_price(data.get("price"), percent)
+    if new_price is None:
+        return {"skip": "Price is already at the floor for a bulk drop."}
+    listing = Listing(**data)
+    was = listing.price
+    listing.price = new_price
+    # The whole point of the button, recorded on the listing. Without it
+    # the suggestion that offered this drop is rebuilt from `created_at`
+    # and from eBay's cumulative view count — neither of which a price cut
+    # moves — so the group came back in the same slot with the same twelve
+    # listings the moment the run finished. See recommender.price_drop_stamp.
+    listing.price_lowered_at = recommender.price_drop_stamp(data, new_price)
+    # This edit never passes through a save, so there is no diff for
+    # dirty_fields to find — and a revise only carries fields marked as
+    # changed. Unmarked, this would send eBay an empty revise: the record
+    # would show the new price, the seller would be told it worked, and
+    # the listing would still be at the old one.
+    listing.mark_dirty("price")
+    # Through the provider, so each listing takes whichever revise path it
+    # belongs to (Trading for store listings, the Inventory API for the
+    # older app-published ones) and the record's status is written by the
+    # same code a single publish uses.
+    outcome = provider.publish(
+        PublishContext(session_id=rec["id"], listing=listing, mode="live",
+                       base_url=base_url, uid=uid, prev_record=rec),
+        creds)
+    if not outcome.ok:
+        return {"message": outcome.message or "eBay rejected the new price."}
+    return {"ok": True, "was": was, "now": new_price}
+
+
 @app.post("/api/ebay/lower-prices")
 def lower_prices(payload: dict, request: Request) -> dict:
     """Lower the price of several live listings by one percentage, and push each
@@ -10080,43 +10123,10 @@ def lower_prices(payload: dict, request: Request) -> dict:
     # reported for a second pass rather than silently dropped.
     records, deferred = mine[:BULK_PRICE_CAP], mine[BULK_PRICE_CAP:]
     provider = marketplaces.get("ebay")
-
-    def _apply(rec: dict) -> dict:
-        if rec.get("status") not in ("published", "live"):
-            return {"skip": "No longer live on eBay."}
-        data = rec.get("listing") or {}
-        new_price = bulk_actions.lower_price(data.get("price"), percent)
-        if new_price is None:
-            return {"skip": "Price is already at the floor for a bulk drop."}
-        listing = Listing(**data)
-        was = listing.price
-        listing.price = new_price
-        # The whole point of the button, recorded on the listing. Without it
-        # the suggestion that offered this drop is rebuilt from `created_at`
-        # and from eBay's cumulative view count — neither of which a price cut
-        # moves — so the group came back in the same slot with the same twelve
-        # listings the moment the run finished. See recommender.price_drop_stamp.
-        listing.price_lowered_at = recommender.price_drop_stamp(data, new_price)
-        # This edit never passes through a save, so there is no diff for
-        # dirty_fields to find — and a revise only carries fields marked as
-        # changed. Unmarked, this would send eBay an empty revise: the record
-        # would show the new price, the seller would be told it worked, and
-        # the listing would still be at the old one.
-        listing.mark_dirty("price")
-        # Through the provider, so each listing takes whichever revise path it
-        # belongs to (Trading for store listings, the Inventory API for the
-        # older app-published ones) and the record's status is written by the
-        # same code a single publish uses.
-        outcome = provider.publish(
-            PublishContext(session_id=rec["id"], listing=listing, mode="live",
-                           base_url=_base_url(request), uid=user["id"],
-                           prev_record=rec),
-            creds)
-        if not outcome.ok:
-            return {"message": outcome.message or "eBay rejected the new price."}
-        return {"ok": True, "was": was, "now": new_price}
-
-    result = bulk_actions.run(records, _apply)
+    base_url = _base_url(request)
+    result = bulk_actions.run(
+        records, lambda rec: _lower_one(rec, percent, user["id"], creds,
+                                        base_url, provider))
     # Listings the client asked for that aren't the seller's (or are gone) are
     # reported rather than silently dropped from the totals.
     missing = wanted - {r["id"] for r in mine}
@@ -10127,6 +10137,119 @@ def lower_prices(payload: dict, request: Request) -> dict:
              "failed=%d deferred=%d", user["id"], percent, len(result.changed),
              len(result.skipped), len(result.failed), len(deferred))
     return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
+
+
+# The price drops running right now: user id -> job id. One per account, and
+# not for tidiness — a second press while the first is still going would cut
+# the same prices twice, 20% off and then 20% off that.
+_REPRICE_JOBS: dict[str, str] = {}
+_REPRICE_LOCK = threading.Lock()
+# The suggestion group "Lower all…" clears.
+LOWER_ALL_TYPES = ("lower_price",)
+
+
+def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
+                       creds: dict, base_url: str, percent: float) -> None:
+    """Background worker for "Lower all…": every price in the group, cut and
+    pushed to eBay one serial revise at a time, with the job saying which
+    listing it is on as it goes."""
+    provider = marketplaces.get("ebay")
+
+    def _apply(rec: dict) -> dict:
+        # Re-read: this set was worked out when the button was pressed, and a
+        # run over a whole group takes minutes. A listing that has sold or
+        # been repriced since is judged on what it is now, not on then.
+        fresh = db.get_listing(rec["id"])
+        if not fresh:
+            return {"skip": "This listing is gone.", "needs_you": False}
+        return _lower_one(fresh, percent, uid, creds, base_url, provider)
+
+    try:
+        result = bulk_actions.run(
+            records, _apply,
+            on_each=lambda i, title: jobstore.update(
+                job_id, phase="repricing", current=i, current_title=title[:80]))
+        log.info("lower-all %s: user=%s percent=%s listings=%d changed=%d "
+                 "skipped=%d failed=%d", job_id, uid, percent, len(records),
+                 len(result.changed), len(result.skipped), len(result.failed))
+        jobstore.update(job_id, done=True, phase="done", current=len(records),
+                        result={"percent": percent, "deferred": 0,
+                                **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = _support_reference()
+        log.warning("lower-all job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish lowering these prices. Try again in a moment — "
+            f"if it keeps happening, quote {reference} to support."))
+    finally:
+        with _REPRICE_LOCK:
+            if _REPRICE_JOBS.get(uid) == job_id:
+                _REPRICE_JOBS.pop(uid, None)
+
+
+@app.post("/api/ebay/lower-all")
+def lower_all(payload: dict, request: Request) -> dict:
+    """Lower every price in the dashboard's "Lower prices" group by one
+    percentage, and push each to eBay.
+
+    Takes NO ids, and has no cap. The route above is handed the group's rows
+    and reprices at most BULK_PRICE_CAP of them per request, so "Lower all…"
+    on a group of 41 was a button that lowered a slice and deferred the rest —
+    and in an environment where that cap was 1, it lowered one price per
+    press under a badge reading 41. The seller pressing this is asking for the
+    number on the badge, so the set is worked out here, from the same ranking
+    the dashboard renders, and run as a job so its length costs time rather
+    than a gateway timeout.
+
+    Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        percent = bulk_actions.validate_percent(payload.get("percent"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    uid = user["id"]
+    # Check AND reserve in one critical section: a double tap that passed the
+    # check twice would start two runs over the same listings.
+    job_id = storage.new_session_id()
+    with _REPRICE_LOCK:
+        running = _REPRICE_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True, "total": 0,
+                        "deferred": 0}
+        _REPRICE_JOBS[uid] = job_id
+    try:
+        items = db.list_listings(limit=LIST_CAP, user_id=uid)
+        records = _suggestion_set(items, creds, LOWER_ALL_TYPES)
+        if not records:
+            raise HTTPException(400, "There are no prices left to lower.")
+        base_url = _base_url(request)
+    except BaseException:
+        # The reservation stands for a job that will never start; without this
+        # the next press is told "already running".
+        with _REPRICE_LOCK:
+            if _REPRICE_JOBS.get(uid) == job_id:
+                _REPRICE_JOBS.pop(uid, None)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "reprice", "phase": "repricing", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_lower_all_job,
+                     args=(job_id, records, uid, creds, base_url, percent),
+                     daemon=True).start()
+    log.info("lower-all %s: started for user=%s percent=%s listings=%d",
+             job_id, uid, percent, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records),
+            "deferred": 0}
 
 
 # How many listings one "Send offers" run touches. Each is a separate eBay
@@ -10268,16 +10391,19 @@ def _bulk_caps() -> dict:
     """How many listings ONE tap on a suggestion group's bulk button reaches,
     keyed by the recommendation type that carries the button.
 
-    Every bulk action caps a single run and hands the remainder back as
-    `deferred` (see the constants above). The dashboard had no way to know
-    that, so it promised the whole group: a 46-listing "Fill in details" asked
-    the seller to confirm 46, quoted the AI cost of 46 — and then ran 25 and
-    reported "1 of 25" against a group badge reading 46. The caps ride along
-    with the recommendations so the group can say what this pass will actually
-    do before the seller agrees to spend anything on it.
+    A bulk action that names ids caps a single run and hands the remainder
+    back as `deferred` (see the constants above). The dashboard had no way to
+    know that, so it promised the whole group: a 46-listing "Fill in details"
+    asked the seller to confirm 46, quoted the AI cost of 46 — and then ran 25
+    and reported "1 of 25" against a group badge reading 46. The caps ride
+    along with the recommendations so the group can say what this pass will
+    actually do before the seller agrees to spend anything on it.
+
+    "lower_price" is absent because its button is no longer capped: "Lower
+    all…" runs /api/ebay/lower-all, which takes the whole group. Absent reads
+    on the dashboard as "one run covers the badge", which is now the truth.
     """
-    return {"specifics": BULK_ENRICH_CAP, "lower_price": BULK_PRICE_CAP,
-            "send_offers": BULK_OFFER_CAP}
+    return {"specifics": BULK_ENRICH_CAP, "send_offers": BULK_OFFER_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it
@@ -10738,9 +10864,10 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
                 _ENRICH_JOBS.pop(uid, None)
 
 
-def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
-    """The records "Finish everything" acts on: every listing the dashboard is
-    currently offering "Fill in details" for.
+def _suggestion_set(items: list[dict], creds: Optional[dict],
+                    types: tuple[str, ...]) -> list[dict]:
+    """The records in the dashboard's suggestion groups of `types`, all of
+    them — what a group's "all" button acts on.
 
     Read off the SAME ranking the screen is built from (recommender.ranked,
     strongest rec per listing), so the button clears exactly the group the
@@ -10751,8 +10878,14 @@ def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
     recs = recommender.ranked(
         items, metrics_by_id=_metrics_by_record_id(creds, items),
         blanks_by_id=_blank_specifics_by_id(items))
-    wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
+    wanted = {r["listing_id"] for r in recs if r["type"] in types}
     return [it for it in items if it.get("id") in wanted]
+
+
+def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
+    """The records "Finish everything" acts on: every listing the dashboard is
+    currently offering "Fill in details" for."""
+    return _suggestion_set(items, creds, FINISH_ALL_TYPES)
 
 
 @app.post("/api/listings/finish-all")

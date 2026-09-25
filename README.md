@@ -1041,6 +1041,7 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/ebay/lower-all` | Lower every price in the dashboard's "Lower prices" group by one percentage, as a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
@@ -1843,6 +1844,19 @@ problem:
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
 
+  **"All" means all of them**, for the same reason as "Enrich all" below. The
+  button used to send the rows the dashboard was holding to
+  `POST /api/ebay/lower-prices`, which reprices at most `BULK_PRICE_CAP` per
+  request — and in an environment where that cap was **1**, *"Lower prices ·
+  41"* offered *"Lower 1 price by 20%"* and lowered one. The press sends no
+  ids and has no cap now: `POST /api/ebay/lower-all` works the group out from
+  the same ranking the dashboard renders (`_suggestion_set`) and runs it as a
+  **background job** (`job_id`, polled on `/api/bulk/status/{id}`, with the
+  listing it is on under the group). One per account at a time: a second press
+  while one is running joins it instead of cutting the same prices twice. The
+  capped, ids-in route is still there for a caller that means a selection;
+  nothing in the app does.
+
   **The group clears once the cut is made** (`Listing.price_lowered_at`), and
   until it did, this was the same broken-looking button as "Enrich all" below.
   Both rules that put a listing in this group are computed from signals a price
@@ -1966,9 +1980,9 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
   listing is its own serial eBay call — a revise, or, for an offer, the one
   listing eBay's Negotiation API takes per request; the remainder comes back
   as `deferred` for another pass instead of the request outliving the
-  gateway. The press that finishes the details list
-  names none, so it has no remainder to defer — it is a job from the first
-  moment, and the client polls it rather than holding a request open.
+  gateway. The presses that finish the details list and lower every price
+  name none, so they have no remainder to defer — each is a job from the
+  first moment, and the client polls it rather than holding a request open.
 
 Every row also carries a **dismiss** (×). The engine rebuilds this list from
 scratch on every load, so advice the seller has already considered and decided
