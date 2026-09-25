@@ -12,6 +12,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -6985,6 +6986,358 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
         raise errors.StorageUnavailable(
             "Couldn't save that change just now. Try again in a moment.")
     return {"ok": True, "listing": data}
+
+
+# What a card's "Quick edit" panel may change, on a listing at any stage the
+# grid can edit it in.
+#
+# PATCH above is the draft cards' door, and it only SAVES: its fields are
+# decisions made before anything is on eBay. This is the door for the rest of
+# the grid. A live listing's title, price or stock changed from its card has
+# to reach eBay in the same request, or the card and the listing disagree
+# with nothing on either screen saying so — which is exactly why the card
+# controls were kept off live listings until now.
+#
+# Every field here is one a revise can carry (ebay_trading.REVISABLE_FIELDS),
+# except `purchase_price`: the seller's own cost basis, read by the profit
+# line and never sent to any marketplace. Category and format stay out on
+# purpose — a live listing's format is fixed once eBay has it, and a category
+# change drags in a new set of required item specifics that only the editor
+# can show.
+_QUICK_EDITABLE = ("title", "price", "quantity", "condition",
+                   "condition_descriptors", "brand", "fulfillment_policy_id",
+                   "purchase_price")
+# The stages a quick edit only saves, and the ones it saves AND sends. A sold
+# listing is the archive of one finished sale and an ended one is relisted as
+# a new listing, never revised (eBay refuses to revise a finished item), so
+# neither is in either list.
+_QUICK_EDIT_SAVED = ("draft", "dry_run", "unlisted")
+_QUICK_EDIT_SENT = ("published", "live")
+_CONDITION_ENUM = re.compile(r"^[A-Z][A-Z_]{1,39}$")
+
+
+def _quick_money(label: str, value) -> float:
+    """A money field from a card, or a 400 the seller can read."""
+    if isinstance(value, bool):
+        raise HTTPException(400, f"{label} has to be a number.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{label} has to be a number.") from None
+    if not math.isfinite(number) or number < 0:
+        raise HTTPException(400, f"{label} can't be negative.")
+    return round(number, 2)
+
+
+def _quick_edit_value(name: str, value, *, live: bool, fmt: str):
+    """One quick-edit field, checked and normalised — or a 400 that names it.
+
+    Checked here rather than left to the model, for the reason patch_listing
+    gives: the model is also what every STORED listing loads through, so it
+    truncates and coerces rather than refusing. A seller typing into a box is
+    the one caller who can act on a refusal, and a title quietly cut at 80
+    characters is a title they did not write.
+    """
+    if name == "title":
+        title = str(value or "").strip()
+        if not title:
+            raise HTTPException(400, "A listing needs a title.")
+        if len(title) > TITLE_MAX_CHARS:
+            raise HTTPException(
+                400, f"eBay titles stop at {TITLE_MAX_CHARS} characters — this "
+                     f"one is {len(title)}.")
+        return title
+    if name == "price":
+        if value is None or value == "":
+            if live:
+                raise HTTPException(400, "A live listing needs a price.")
+            return None
+        # A plain auction has no Buy It Now at all, and the revise writes
+        # `price` as <BuyItNowPrice> on anything auction-shaped — so a number
+        # typed here would ADD a Buy It Now to an auction that never had one.
+        # Its opening bid is not revisable once it is live.
+        if live and fmt == "AUCTION":
+            raise HTTPException(
+                400, "A live auction sells to the highest bid — it has no Buy "
+                     "It Now price to change, and eBay won't move its opening "
+                     "bid once it's live.")
+        price = _quick_money("The price", value)
+        if live and price <= 0:
+            raise HTTPException(400, "A live listing needs a price above zero.")
+        return price
+    if name == "purchase_price":
+        if value is None or value == "":
+            return None
+        return _quick_money("What you paid", value)
+    if name == "quantity":
+        if isinstance(value, bool):
+            raise HTTPException(400, "Quantity has to be a whole number.")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Quantity has to be a whole number.") from None
+        if not math.isfinite(number) or not number.is_integer() or number < 0:
+            raise HTTPException(400, "Quantity has to be a whole number, zero or more.")
+        return int(number)
+    if name == "condition":
+        condition = str(value or "").strip().upper()
+        if not _CONDITION_ENUM.match(condition):
+            raise HTTPException(400, "That condition isn't one eBay knows.")
+        return condition
+    if name == "condition_descriptors":
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise HTTPException(400, "The condition's details didn't come through right.")
+        return value
+    # brand, fulfillment_policy_id: free text, capped by the model.
+    return str(value or "").strip()
+
+
+def _quick_edit_targets(listing: Listing) -> list[str]:
+    """Every marketplace this listing is live on right now — and only those.
+
+    A quick edit updates the copies that exist; it never creates one. eBay
+    counts when the record carries its item id (the status alone is not
+    enough: a listing live only on Etsy reads "published" too, and a live
+    publish without an item id is a CREATE). Anywhere else counts when its
+    own state says published.
+    """
+    targets = ["ebay"] if (listing.ebay_listing_id or "").strip() else []
+    for key, state in (listing.marketplaces or {}).items():
+        if key == "ebay" or key in targets:
+            continue
+        if getattr(state, "status", "") == "published" and marketplaces.get(key):
+            targets.append(key)
+    return targets
+
+
+def _quick_edit_sentence(outcomes: dict) -> str:
+    """One line for the toast: where the change landed, and where it didn't."""
+    def _label(key: str) -> str:
+        provider = marketplaces.get(key)
+        return provider.label if provider else key
+
+    if list(outcomes) == ["ebay"]:
+        outcome = outcomes["ebay"]
+        # The provider's own sentence either way: on success it is
+        # revise_message (which already names anything eBay could not take),
+        # and on a refusal it is eBay's reason, which the client improves on
+        # from `issues` where it can (publishShared.blockedReason).
+        return outcome.message or ("Your eBay listing has been updated." if outcome.ok
+                                   else "eBay didn't take the change.")
+    done = [_label(k) for k, o in outcomes.items() if o.ok]
+    missed = [(k, o) for k, o in outcomes.items() if not o.ok]
+    parts = []
+    if done:
+        parts.append("Updated on " + " and ".join(done) + ".")
+    for key, outcome in missed:
+        parts.append(f"{_label(key)} didn't take it: "
+                     f"{outcome.message or 'no reason given'}")
+    return " ".join(parts) or "Nothing was updated."
+
+
+def _undo_quick_edit(session_id: str, stored: dict, fields, uid: Optional[str]
+                     ) -> Optional[dict]:
+    """Put the named fields back as they were before a change no marketplace
+    would take. Returns the restored listing, or None when the write did not
+    land — in which case the change is still saved here, still marked, and
+    the answer has to say so rather than claim nothing changed.
+
+    Why undo at all: the card shows what the record holds. A price eBay
+    refused, left in the record, is a card showing $1.00 over a listing
+    selling at $19.99 — the disagreement this route exists to prevent, now
+    caused by it. Only the named fields go back (and the marks, and the
+    markdown stamp a price change moved); anything another writer touched in
+    the meantime is left alone.
+    """
+    def _restore(data: dict) -> dict:
+        for name in fields:
+            if name in stored:
+                data[name] = stored[name]
+            else:
+                data.pop(name, None)
+        data["dirty_fields"] = list(stored.get("dirty_fields") or [])
+        if "price" in fields:
+            data["price_lowered_at"] = stored.get("price_lowered_at") or ""
+        return data
+
+    if db.enabled():
+        data = db.mutate_listing_data(session_id, _restore, user_id=uid)
+        if data is None:
+            return None
+    else:
+        disk = storage.load_listing(session_id)
+        if disk is None:
+            return None
+        data = _restore(dict(disk))
+    try:
+        storage.save_listing(session_id, Listing(**data))
+    except Exception as exc:  # noqa: BLE001 - the row is the truth
+        log.warning("quick edit: disk mirror not restored for %s: %s", session_id, exc)
+    return data
+
+
+@app.post("/api/listings/{session_id}/quick-edit")
+def quick_edit_listing(session_id: str, payload: dict, request: Request) -> dict:
+    """Change named fields from a listing's card, and put a live listing's
+    change where its buyers see it.
+
+    Named fields only, like PATCH: the card holds whatever /api/listings
+    last loaded, and writing that back is how a title fixed in another tab
+    gets overwritten. The request says what the seller changed and nothing
+    else.
+
+    A draft or a Shop Mode find is saved and that is all. A LIVE listing is
+    saved and then revised on every marketplace it is live on, through the
+    same providers the editor's Update uses — so the revise carries only the
+    fields this edit changed (dirty_fields), the checklist runs, and eBay's
+    refusal comes back in eBay's words. Only fields that actually changed
+    are marked, so a stale card re-sending the value eBay already has sends
+    nothing; a field this request names that an earlier attempt left
+    undelivered goes again, which is what the card's "Try again" is.
+
+    The save happens first, because the revise is built from the saved
+    record. When no marketplace takes the change it is put back
+    (_undo_quick_edit) and the answer says nothing changed, so the card goes
+    on showing what buyers see; the panel keeps what the seller typed, to fix
+    and send again. An answer that never came back is NOT undone — the change
+    may well be live — and neither is a fan-out where one marketplace took
+    it. What is refused BEFORE anything is written: an unconnected eBay
+    account, and a listing with variations, whose revise would be refused
+    whole (ebay_trading.build_revise_item).
+    """
+    _assert_session_owner(session_id, request)
+    uid = _uid(request)
+    rec = db.get_listing(session_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+    status = rec.get("status") or "draft"
+    if status == "sold":
+        raise HTTPException(
+            409, "This listing has sold — it's archived under Inactive. Use "
+                 "Relist as new listing to sell another one.")
+    if status == "ended":
+        raise HTTPException(
+            409, "This listing has ended — open it and relist it to change it.")
+    live = status in _QUICK_EDIT_SENT
+    if not live and status not in _QUICK_EDIT_SAVED:
+        raise HTTPException(409, "This one can't be changed from its card — open it instead.")
+
+    asked = {k: v for k, v in (payload or {}).items() if k in _QUICK_EDITABLE}
+    if not asked:
+        raise HTTPException(
+            400, "Nothing to change. Send one of: " + ", ".join(_QUICK_EDITABLE) + ".")
+    stored = dict(rec.get("listing") or {})
+    fmt = str(stored.get("listing_format") or "FIXED_PRICE").strip().upper()
+    changes = {k: _quick_edit_value(k, v, live=live, fmt=fmt) for k, v in asked.items()}
+
+    merged = {**stored, **changes}
+    if "price" in changes:
+        # A markdown typed on a card is the advice taken, exactly as in PATCH.
+        merged["price_lowered_at"] = recommender.price_drop_stamp(
+            stored, merged.get("price"))
+    try:
+        listing = Listing(**merged)
+    except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
+        raise HTTPException(
+            400, "That value isn't valid: " + _validation_summary(exc)) from exc
+    # Marked only where the value MOVED. purchase_price is not a tracked field,
+    # so it is never marked and never offered to a marketplace.
+    edited = [n for n in dirty_fields.changed_fields(listing, stored) if n in changes]
+    listing.mark_dirty(*edited)
+    pending = set(stored.get("dirty_fields") or ())
+    to_send = sorted(set(edited) | (set(changes) & pending))
+    targets = _quick_edit_targets(listing) if live and to_send else []
+
+    creds = None
+    if "ebay" in targets:
+        creds = marketplaces.get("ebay").creds_for(uid)
+        if not creds:
+            raise HTTPException(
+                400, "Connect eBay first — this listing is live there, and a "
+                     "change made here has to reach it. Nothing was saved.")
+        if listing.has_variations:
+            raise HTTPException(
+                409, "This listing has size or colour variations, and Thryft "
+                     "Shop can't edit those yet — changing it here could remove "
+                     "them. Edit it on eBay in Seller Hub. Nothing was saved.")
+
+    storage.save_listing(session_id, listing)
+    data = listing.model_dump()
+    if db.enabled() and not db.upsert_listing(
+            session_id, data, status=status, user_id=rec.get("user_id") or uid):
+        raise errors.StorageUnavailable(
+            "Couldn't save that change just now — nothing has changed. Try "
+            "again in a moment.")
+
+    if not targets:
+        paid_only = not edited and "purchase_price" in changes \
+            and changes["purchase_price"] != stored.get("purchase_price")
+        message = ("Saved." if edited or not live
+                   else "Saved — what you paid stays here; it never goes to eBay."
+                   if paid_only else "Nothing changed.")
+        return {"ok": True, "saved": True, "listing": data, "status": status,
+                "pushed": [], "results": {}, "message": message}
+
+    prev = {**rec, "listing": data}
+    base_url = _base_url(request)
+    if targets == ["ebay"]:
+        # The editor's own route for an eBay-only listing (the legacy path of
+        # /api/publish), so a revise from a card and one from the editor are
+        # the same revise. Isolated like _publish_targets isolates each
+        # provider: the save above has landed, and whatever happens to the
+        # revise is an answer about the revise, not a failed save.
+        try:
+            outcome = marketplaces.get("ebay").publish(
+                PublishContext(session_id=session_id, listing=listing, mode="live",
+                               base_url=base_url, uid=uid, prev_record=prev),
+                creds)
+        except HTTPException as exc:
+            outcome = PublishOutcome(ok=False, message=str(exc.detail))
+        except Exception as exc:  # noqa: BLE001 - the save stands either way
+            log.warning("quick edit: revise crashed for %s: %s", session_id, exc)
+            outcome = PublishOutcome(
+                ok=False, outcome_unknown=True,
+                message="We couldn't confirm eBay took the change — check the "
+                        "listing on eBay before changing it again.")
+        _record_publish_verdict(session_id, uid, [outcome], "live")
+        outcomes = {"ebay": outcome}
+    else:
+        outcomes = _publish_targets(session_id, listing, "live", targets, uid,
+                                    base_url, prev)
+
+    results = {
+        key: {"ok": o.ok, "message": o.message, "issues": o.issues,
+              **({"outcome_unknown": True} if o.outcome_unknown else {})}
+        for key, o in outcomes.items()
+    }
+    message = _quick_edit_sentence(outcomes)
+    refused = not any(o.ok or o.outcome_unknown for o in outcomes.values())
+    if refused:
+        restored = _undo_quick_edit(session_id, stored, list(changes), uid)
+        if restored is not None:
+            return {"ok": False, "saved": False, "listing": restored,
+                    "status": status, "pushed": targets, "results": results,
+                    "message": message}
+        log.warning("quick edit: %s was refused and could not be put back", session_id)
+
+    # The record as the revise left it: dirty marks cleared on acceptance, a
+    # category eBay remapped, the status it settled on. Falls back to this
+    # request's copy when there is no row to read — never to an error, because
+    # the change has already happened and the answer has to say so.
+    fresh = None
+    try:
+        fresh = db.get_listing(session_id) if db.enabled() else None
+    except errors.StorageUnavailable as exc:
+        log.info("quick edit: couldn't re-read %s after the revise: %s", session_id, exc)
+    return {"ok": all(o.ok for o in outcomes.values()), "saved": True,
+            "listing": (fresh or {}).get("listing") or data,
+            "status": (fresh or {}).get("status") or status,
+            "pushed": targets, "results": results,
+            "message": message}
 
 
 def _listing_image_order(session_id: str,
