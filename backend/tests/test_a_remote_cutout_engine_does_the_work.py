@@ -325,7 +325,7 @@ def test_falling_back_to_local_with_a_key_configured_is_degraded(chain):
 
 def _framed_print(size=(1200, 900), box=(280, 160, 900, 760)):
     """A print in a frame on a surface almost its own colour -- the case
-    artwork.border() is entitled to give up on."""
+    artwork.outline() is entitled to give up on."""
     img = Image.new("RGB", size, (206, 202, 196))
     draw = ImageDraw.Draw(img)
     draw.rectangle(box, fill=(210, 206, 200), outline=(198, 194, 188), width=3)
@@ -366,7 +366,7 @@ def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
     img, box = _framed_print()
     chain("removebg", "local")
     _remote(monkeypatch, removebg=_engine(returns=lambda rgb: _cut(rgb.size, box)))
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
 
@@ -387,7 +387,7 @@ def test_a_print_photographed_at_an_angle_is_still_a_print(chain, no_local,
     the very photos it exists for, so the rectangle is fitted at the best
     angle instead."""
     chain("removebg", "local")
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 3, 5, 8, 12, 20):
         img, _ = _framed_print()
@@ -405,7 +405,7 @@ def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
     off while taking floor at the opposite one -- accepted/rejected looked
     perfect throughout, and only measuring the overlap showed it."""
     chain("removebg", "local")
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 5, 12, 20):
         img, _ = _framed_print()
@@ -432,7 +432,7 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
     then fills it solid itself. Measured with the gap still in it, a matted
     print scores below an ellipse and is refused."""
     chain("removebg", "local")
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
     img, box = _framed_print()
 
     def _holed(rgb):
@@ -461,7 +461,8 @@ def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
     asked = []
     _remote(monkeypatch, removebg=_engine(
         returns=lambda rgb: _cut(rgb.size, box), log=asked))
-    monkeypatch.setattr(artwork, "border", lambda rgb: (10, 10, 100, 100))
+    monkeypatch.setattr(artwork, "outline", lambda rgb: (
+        ((10, 10), (100, 10), (100, 100), (10, 100)),))
 
     images.art_cutout(img)
 
@@ -484,7 +485,7 @@ def test_a_subject_lifted_out_of_a_painting_is_refused(chain, no_local,
         return out
 
     _remote(monkeypatch, removebg=_engine(returns=_the_baby))
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     assert images.art_cutout(img) is None, \
         "a round subject is not a picture's border — keep the photo as shot"
@@ -501,14 +502,14 @@ def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch)
         punched out of it — exactly the shape that must NOT reach the
         composite. Kept small enough that the box is ACCEPTED (it still fills
         ~0.95 of itself), so this exercises the rectangle rather than the
-        shape gate: the hole has to be filled back in by artwork.mask, not
+        shape gate: the hole has to be filled back in by artwork.quad, not
         rejected on its way past."""
         out = _cut(rgb.size, box)
         ImageDraw.Draw(out).ellipse((560, 400, 710, 550), fill=(0, 0, 0, 0))
         return out
 
     _remote(monkeypatch, removebg=_engine(returns=_holes_in_the_art))
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
 
@@ -534,7 +535,7 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
         return out
 
     _remote(monkeypatch, removebg=_engine(returns=_rounded))
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
     assert out is not None
@@ -554,7 +555,7 @@ def test_a_paid_engine_is_still_asked_about_a_border_first(chain, no_local,
     asked = []
     _remote(monkeypatch, removebg=_engine(
         returns=lambda rgb: _cut(rgb.size, box), log=asked))
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     assert images.art_cutout(img) is not None
     assert asked == [img.size], "the paid engine located the border"
