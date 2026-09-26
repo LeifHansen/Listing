@@ -1129,36 +1129,43 @@ def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Ima
     return _compose_on_white(rgb, alpha)
 
 
-# What a photo of ART gets instead of a cutout when its border cannot be
+# What a photo of ART gets instead of a cutout when its outline cannot be
 # found. Same shape as DETAIL_KEPT_AS_SHOT: not an error and not a refusal,
 # just nothing attempted, reported in `bg_error` so the seller is told and the
 # charge comes back.
+#
+# It used to say the picture's edge "isn't clearly in the frame", and sellers
+# read it as the app not seeing what was plainly there: the piece WAS in the
+# frame, on every photo, and the scan that could not find it was the thing at
+# fault. What actually stops the outline being found is an edge that does not
+# stand out from what is behind it, so that is what it says — along with the
+# one thing the seller can do about it.
 ART_NO_BORDER_KEPT_AS_SHOT = (
-    "This is a picture, and its outer edge isn't clearly in the frame — "
-    "cutting to a guessed border would crop the artwork, so it was kept as "
-    "shot.")
+    "This is a picture, and its outer edge couldn't be told apart from what's "
+    "behind it — cutting to a guessed edge would crop the artwork, so it was "
+    "kept as shot. A backdrop that contrasts with the frame or edge helps.")
 
 
 def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
-    """The photo cut to the outer border of the FLAT RECTANGULAR THING in it,
-    kept whole on white — or None when there isn't one.
+    """The photo cut to the outer outline of the FLAT RECTANGULAR THING in it
+    — or of each, when there are two side by side — kept whole on white; or
+    None when there isn't one.
 
-    artwork.border() on its own, composited. Geometry, no model: the border
-    is scanned from the photo, and what ships is a filled rectangle, so
-    nothing inside it can be removed.
+    artwork.outline() on its own, composited. Geometry, no model: the outline
+    is found in the photo, and what ships is its four corners filled solid,
+    so nothing inside it can be removed.
 
     Two callers, and they want it for two different reasons. art_cutout asks
-    first because a scanned border cannot be wrong about what is inside the
-    box it returns. And the ordinary cutout path asks LAST, after the model
-    has found nothing it would ship — see optimize() and
-    remove_background_white().
+    first because a found outline cannot be wrong about what is inside it.
+    And the ordinary cutout path asks LAST, after the model has found nothing
+    it would ship — see optimize() and remove_background_white().
     """
-    box = artwork.border(rgb)
-    if box is None:
+    quads = artwork.outline(rgb)
+    if quads is None:
         return None
-    log.info("art cutout: kept everything inside the scanned border %s of a "
-             "%dx%d photo", box, rgb.width, rgb.height)
-    return _compose_on_white(rgb, artwork.mask(rgb.size, box))
+    log.info("art cutout: kept everything inside the outline %s of a %dx%d "
+             "photo", quads, rgb.width, rgb.height)
+    return _compose_on_white(rgb, artwork.outline_matte(rgb.size, quads))
 
 
 def art_cutout(rgb: Image.Image,
@@ -1178,22 +1185,22 @@ def art_cutout(rgb: Image.Image,
     painting is one connected, solid, box-filling region — arithmetically a
     perfect cutout. The thing that separates it from one is not in the matte.
 
-    So the matte here is a FILLED RECTANGLE, and nothing inside the border is
-    ever examined, let alone removed. None means the border could not be found
-    and the photo must be kept exactly as shot; it never means "cut to what
-    the model kept", which is the failure this exists to prevent.
+    So the matte here is a FILLED FOUR-CORNERED OUTLINE, and nothing inside
+    it is ever examined, let alone removed. None means the outline could not
+    be found and the photo must be kept exactly as shot; it never means "cut
+    to what the model kept", which is the failure this exists to prevent.
 
-    A SECOND LOOK at the border, and only at the border. `border()` is asked
-    first and is still the trusted answer, because it is geometry and cannot
-    be wrong about what is inside the box it returns. It handles a hand-held
-    photo itself -- it fits the content it found at an angle rather than
-    demanding an upright rectangle -- so what reaches the second look is a
-    picture whose edge could not be found at all: one lying on a surface close
-    to its own colour. Then a segmentation matte's outer SHAPE is offered
-    instead, and artwork.quad_from_alpha refuses it unless it is a rectangle
-    at some angle rather than a subject lifted out of one. Either way what
-    ships is solid, from artwork.mask() or artwork.quad(). There is still no
-    code path here that can remove a pixel from inside the border.
+    A SECOND LOOK at the outline, and only at the outline. `outline()` is
+    asked first and is still the trusted answer, because it is geometry and
+    cannot be wrong about what is inside the corners it returns. It handles a
+    hand-held photo, a lit wall, a shadow and a textured floor itself, so what
+    reaches the second look is a picture whose edge could not be found at
+    all: one lying on a surface close to its own colour. Then a segmentation
+    matte's outer SHAPE is offered instead, and artwork.quad_from_alpha
+    refuses it unless it is a rectangle at some angle rather than a subject
+    lifted out of one. Either way what ships is solid, from
+    artwork.outline_matte() or artwork.quad(). There is still no code path
+    here that can remove a pixel from inside the outline.
 
     Which model draws that matte is _border_alpha's business, and until this
     change the answer in production was "none, ever" -- see its note. `wait`
@@ -1208,7 +1215,7 @@ def art_cutout(rgb: Image.Image,
     if alpha is None:
         return None
     # Four corners rather than a box, because the photo that gets here is the
-    # one border() could not scan at all, and a print that faint against its
+    # one outline() could not find at all, and a print that faint against its
     # background is usually also lying at an angle on it. See
     # artwork.quad_from_alpha.
     corners = artwork.quad_from_alpha(rgb.size, alpha)
@@ -1220,7 +1227,7 @@ def art_cutout(rgb: Image.Image,
 
 
 # Whether the LOCAL model may be asked where a picture's border is when the
-# geometric scan could not find one. On by default; ART_LOCAL_BORDER=off puts
+# geometric outline could not be found. On by default; ART_LOCAL_BORDER=off puts
 # the second look back to paid engines only. See _border_alpha.
 _ART_LOCAL_BORDER = (os.getenv("ART_LOCAL_BORDER", "on").strip().lower()
                      not in ("off", "0", "false", "no"))
@@ -1509,7 +1516,7 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
                     # on it is a tray -- but the shape of the thing is the
                     # same, so the same geometry answers it. Asked only after
                     # the model has declined, so no photo that gets a cutout
-                    # today changes, and artwork.border() answers None for
+                    # today changes, and artwork.outline() answers None for
                     # anything that is not a rectangle, so a garment or a
                     # close-up is still kept as shot.
                     rescued = _rectangle_cutout(img)
