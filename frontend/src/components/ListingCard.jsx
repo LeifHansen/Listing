@@ -2,7 +2,8 @@ import { memo, useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
-  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel,
+  SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Pencil,
+  ChevronDown,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
@@ -12,6 +13,7 @@ import {
 import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
+import { quickEditPanelId } from "@/views/listing/QuickEdit";
 import { buyerWaiting, keptWhenEnded } from "@/lib/listingsView";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
@@ -331,6 +333,12 @@ function turnStyle(spin, square) {
 // photos are already eBay's copy anyway.
 // `needsInfo` paints the whole card amber: this listing will not reach eBay
 // until something on it is filled in. See the cardClass comment below.
+// `onQuickEdit(id)` puts a "Quick edit" toggle on the card — a strip along the
+// bottom of a grid tile, a button among a list row's controls — and
+// `quickEditOpen` says whether its panel is showing. The card only carries the
+// toggle: the panel (views/listing/QuickEdit) is the caller's to place, under
+// the card, where the grid can make room for it without stretching the cards
+// beside it.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
 // every unread-count refresh re-rendered the whole tree -- one framer-motion
 // card per listing, reconciled once a minute for a bell badge, and once every
@@ -339,6 +347,7 @@ function turnStyle(spin, square) {
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  onQuickEdit, quickEditOpen = false,
   showEbayChip = false,
   layout = "grid", className,
 }) {
@@ -528,9 +537,46 @@ export const ListingCard = memo(function ListingCard({
     </button>
   );
 
+  // Quick edit: the fields a seller changes most, opened under the card (see
+  // QuickEdit). A toggle, not a mode: it says whether the panel is open, and
+  // the card itself goes on opening the full editor when it is clicked. Named
+  // for the listing it belongs to, since a grid holds forty of them.
+  const name = l.title || item.title || "this listing";
+  const quickEditProps = onQuickEdit && {
+    type: "button",
+    onClick: (e) => { e.stopPropagation(); onQuickEdit(item.id); },
+    "aria-expanded": !!quickEditOpen,
+    "aria-controls": quickEditOpen ? quickEditPanelId(item.id) : undefined,
+    "aria-label": `Quick edit: ${name}`,
+    // Where the panel sends focus back to when it closes (QuickEdit).
+    "data-quick-edit-toggle": item.id,
+    title: quickEditOpen
+      ? "Close quick edit"
+      : "Quick edit — change the title, price and more without opening it",
+  };
+  // In a list row it is one of the row's controls, labelled where there is
+  // room for the word and an icon where there is not.
+  const quickEditButton = list && quickEditProps && (
+    <button
+      {...quickEditProps}
+      className={cn(
+        "inline-flex items-center justify-center gap-1.5 h-8 rounded-full cursor-pointer",
+        "w-8 sm:w-auto sm:px-3 text-[12px] font-semibold",
+        "backdrop-blur border shadow-card transition-colors",
+        quickEditOpen
+          ? "bg-blue border-blue text-on-accent"
+          : "bg-card/85 border-line text-ink-secondary hover:text-blue hover:border-blue/40",
+      )}
+    >
+      <Pencil size={14} aria-hidden />
+      <span className="hidden sm:inline">Quick edit</span>
+    </button>
+  );
+
   const actions = (onDelete || onEnd || onStartOver || onSkip
-    || (list && rotatable)) && (
+    || (list && rotatable) || quickEditButton) && (
     <>
+      {quickEditButton}
       {list && rotateButton}
       {/* Skip: set this draft aside. It stays in Drafts, but the queue
           after a publish stops offering it as the next one to work on. */}
@@ -803,6 +849,9 @@ export const ListingCard = memo(function ListingCard({
           <CtaHint status={item.status} />
         </div>
       </div>
+      {/* Room at the foot of the tile for the Quick edit strip, which is
+          laid over it from outside the button (see below). */}
+      {onQuickEdit && <span aria-hidden className="block h-10 shrink-0" />}
     </motion.button>
   );
 
@@ -821,6 +870,29 @@ export const ListingCard = memo(function ListingCard({
         <div className="absolute inset-x-px top-px aspect-[4/3] z-10 pointer-events-none">
           {rotateButton}
         </div>
+      )}
+      {/* The Quick edit strip along the tile's foot: part of the card to the
+          eye, a sibling of the card button to the document, like every other
+          control here. It sits over the room the button leaves for it, so
+          nothing on the card is ever under it. */}
+      {!list && quickEditProps && (
+        <button
+          {...quickEditProps}
+          className={cn(
+            "absolute inset-x-px bottom-px z-10 h-10 flex items-center gap-1.5 px-4",
+            "rounded-b-[calc(var(--radius-card)-1px)] border-t border-line/70",
+            "text-[12px] font-semibold cursor-pointer transition-colors duration-150",
+            quickEditOpen
+              ? "text-blue bg-blue-soft/60"
+              : "text-ink-secondary hover:text-blue hover:bg-bg-sunken/70",
+          )}
+        >
+          <Pencil size={13} aria-hidden />
+          Quick edit
+          <ChevronDown size={15} aria-hidden
+            className={cn("ml-auto transition-transform duration-150",
+              quickEditOpen && "rotate-180")} />
+        </button>
       )}
       {/* The tick that puts this listing into a bulk action. Standing, not a
           mode: it is on the card from the moment the grid offers bulk

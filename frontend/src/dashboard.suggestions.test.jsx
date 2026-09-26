@@ -59,8 +59,7 @@ const MORE_RECS = [
     action: "open", priority: 45, rate: null },
 ];
 
-// A group with its own capped bulk verb — the price drop still runs a capped
-// number per pass, so that arithmetic is tested where it still applies.
+// A group whose bulk verb needs a number first — "Lower all…".
 const PRICE_RECS = [
   { listing_id: "a", listing_title: "Nike hoodie", type: "lower_price",
     label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
@@ -93,14 +92,19 @@ function json(body) {
 // (/api/insights); `statuses` are polls to serve before the finished one, for
 // the live progress line.
 function server(calls, { jobResult, recs, bulkCaps, groupTotals,
-                        statuses, finishAll, tokens, lowerResult } = {}) {
+                        statuses, finishAll, tokens } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
+    // Recorded so a regression back to the capped, client-named route shows.
     if (path === "/api/ebay/lower-prices") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
-      return json(lowerResult
-        || { changed: 1, skipped: 0, failed: 0, deferred: 0 });
+      return json({ changed: 1, skipped: 0, failed: 0, deferred: 0 });
+    }
+    if (path === "/api/ebay/lower-all") {
+      calls.push({ path, body: JSON.parse(opts.body || "{}") });
+      return json({ job_id: "job-1", running: true,
+                    total: (groupTotals || {}).lower_price || 0, deferred: 0 });
     }
     if (path === "/api/listings/finish-all") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
@@ -446,40 +450,65 @@ describe("a group bigger than the rows it was sent", () => {
   });
 });
 
-/* A capped run still has to say so — and one still exists.
+/* "Lower all…" means all of them.
  *
- * The price drop reprices a capped number per pass (BULK_PRICE_CAP) and
- * defers the rest, so the panel that spends it must not promise the badge.
- * This is the arithmetic the fill used to need and no longer does. */
-describe("a run that is capped says what it covers", () => {
-  const THREE = [
-    ...PRICE_RECS,
-    { listing_id: "c", listing_title: "Levi's 501", type: "lower_price",
-      label: "Lower the price", reason: "Live 30 days — a price drop can restart interest.",
-      action: "open", priority: 68, rate: null },
-  ];
+ * Reported as: "only lowers price for one item despite clicking lower all".
+ * The group read "Lower prices · 41" and the panel under it offered "Lower 1
+ * price by 20%": the button handed the server the rows this screen was
+ * holding, the server repriced BULK_PRICE_CAP of them per press, and that
+ * cap was 1 in the environment it was pressed in. The same shape "Enrich all"
+ * had, and the same fix — no ids, no cap, a job this screen polls. */
+describe("the price drop takes the whole group", () => {
+  // Two rows arrived; the store holds 41. The rows are a capped slice of the
+  // group (see groupSize), never its size.
+  const BIG = { recs: PRICE_RECS, groupTotals: { lower_price: 41 } };
 
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
-  it("names the part of the group one pass reaches", async () => {
-    const { root, text } = await mount([], {
-      recs: THREE, groupTotals: { lower_price: 3 },
-      bulkCaps: { lower_price: 2 },
-    });
+  it("offers the number on the badge, not one pass's slice of it", async () => {
+    const { root, text } = await mount([], BIG);
     await click(byText("Lower all…"));
-    expect(text()).toContain("One run covers 2 of them");
-    expect(text()).toContain("the other 1 stays on the list for a second run");
+    expect(byText("Lower 41 prices by 10%")).toBeTruthy();
+    expect(text()).not.toContain("second run");
+    expect(text()).not.toContain("of 41 prices");
     await act(async () => { root.unmount(); });
   });
 
-  it("promises the whole group when one pass covers it", async () => {
+  it("sends no ids, and never the capped route", async () => {
+    const calls = [];
+    const { root } = await mount(calls, BIG);
+    await click(byText("Lower all…"));
+    await click(byText("Lower 41 prices by 10%"));
+    expect(calls).toEqual([{ path: "/api/ebay/lower-all", body: { percent: 10 } }]);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("reports what the whole run did, with nothing left to run again", async () => {
     const { root, text } = await mount([], {
-      recs: PRICE_RECS, groupTotals: { lower_price: 2 },
-      bulkCaps: { lower_price: 40 },
+      ...BIG,
+      jobResult: { percent: 10, changed: 39, skipped: 2, failed: 0,
+                   total: 41, deferred: 0 },
     });
     await click(byText("Lower all…"));
-    expect(text()).not.toContain("second run");
+    await click(byText("Lower 41 prices by 10%"));
+    expect(text()).toContain("Lowered 39 prices by 10% · 2 skipped");
+    expect(text()).not.toContain("run it again");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("shows which listing it is on, under the group it belongs to", async () => {
+    const { root, text } = await mount([], {
+      ...BIG,
+      statuses: [{ id: "job-1", done: false, phase: "repricing", current: 3,
+                   total_items: 41, current_title: "Canon AE-1" }],
+    });
+    await click(byText("Lower all…"));
+    await click(byText("Lower 41 prices by 10%"));
+    expect(text()).toContain("“Canon AE-1”");
+    expect(text()).toContain("4 of 41");
+    expect(text()).not.toContain("more after this run");
+    await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
     await act(async () => { root.unmount(); });
   });
 });
@@ -540,14 +569,14 @@ describe("nothing on the list is hidden any more", () => {
   });
 
   it("points a group's own button at the whole group", async () => {
-    // Nothing narrows the set behind a group verb any more, so what the
-    // button sends is simply what the group holds.
+    // Nothing narrows the set behind a group verb any more — the server
+    // works the group out itself, so the button names no listings at all.
     const calls = [];
     const { root } = await mount(calls, { recs: PRICE_RECS });
     await click(byText("Lower all…"));
     await click(buttons().find(
       (b) => (b.textContent || "").startsWith("Lower 2 prices")));
-    expect(calls[0].body.listing_ids).toEqual(["a", "b"]);
+    expect(calls[0]).toEqual({ path: "/api/ebay/lower-all", body: { percent: 10 } });
     await act(async () => { root.unmount(); });
   });
 
@@ -556,8 +585,10 @@ describe("nothing on the list is hidden any more", () => {
     // working: the seller could not tell what was wrong with the listing.
     const { root, text } = await mount([], {
       recs: PRICE_RECS,
-      lowerResult: {
-        changed: 1, skipped: 1, failed: 0, deferred: 0,
+      // What the run's job finishes with — the press is a job now, and its
+      // result carries the same per-listing reasons the old reply did.
+      jobResult: {
+        percent: 10, changed: 1, skipped: 1, failed: 0, deferred: 0,
         results: {
           changed: [{ listing_id: "a", title: "Nike hoodie" }],
           skipped: [{ listing_id: "b", title: "Canon AE-1",

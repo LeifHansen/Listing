@@ -300,14 +300,14 @@ Ordered by what it costs a seller.
 
 ## After launch (known, not on the critical path)
 
-- Finish splitting `backend/main.py` (12.5k lines; the same owner check,
+- Finish splitting `backend/main.py` (13.2k lines; the same owner check,
   path-traversal guard and truthy parse are re-typed 6–10× each). Started:
   `backend/routers/` holds the operator console, sign-in and the inbox, and
   `routers/deps.py` holds the caller's id, the ownership check, the eBay
   credentials, the token charge, the support reference and the background
-  runner. 76 more routes can move as they are. The other 47 read something
-  tests patch on `main`: the drafting chain's helpers pin 10 of them,
-  `LIST_CAP` 9, `_purge_session_images` and `_bulk_set` 7 each, then
+  runner. 75 more routes can move as they are. The other 51 read something
+  tests patch on `main`: `LIST_CAP` pins 11 of them, the drafting chain's
+  helpers 10, `_purge_session_images` and `_bulk_set` 7 each, then
   `_easypost_key`, `_finish_connect` and the expert-knowledge routes' direct
   `run_in_background` call. Move a shared helper into `routers/deps.py`, and
   an area's own into its router, repointing the patches in the same change,

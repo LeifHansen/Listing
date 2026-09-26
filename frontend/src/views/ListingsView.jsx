@@ -28,6 +28,7 @@ import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
+import { canQuickEdit, QuickEditPanel } from "@/views/listing/QuickEdit";
 import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
@@ -124,10 +125,12 @@ export function ListingsView({ search = "" }) {
 
   const list = listingsLayout === "list";
   // One class for every collection this view renders (cards and skeletons
-  // alike), so the two layouts can never drift apart.
+  // alike), so the two layouts can never drift apart. The card grid has no
+  // row gap of its own: each card brings the space under it (see the cell
+  // below), because that space is also where its Quick edit panel opens.
   const gridClass = list
     ? "flex flex-col gap-2"
-    : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4";
+    : "grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-4";
 
   // Stale saved selections from earlier versions of this pipeline: "drafts"
   // was a tab here before the drafts strip existed (→ Active), and "sold" was
@@ -337,6 +340,15 @@ export function ListingsView({ search = "" }) {
     ? {} : Object.fromEntries(liveItems.map((i) => [i.id, true])));
   const clearLive = () => setLiveSelection({});
 
+  // Which cards have their Quick edit panel open. Several at once is fine —
+  // a seller going down a row fixing prices should not lose one panel's
+  // typing by opening the next. Kept here rather than in each card because
+  // the panel is laid out here, under the card (see the grid cell below).
+  // Stable toggle, for the memo'd card (see askDelete above).
+  const [quickEditing, setQuickEditing] = useState({});
+  const toggleQuickEdit = useCallback(
+    (id) => setQuickEditing((s) => ({ ...s, [id]: !s[id] })), []);
+
   // "Create Listing" from an empty tab. This used to need a scroll: the
   // uploader was at the top of the SAME screen, so startNew() landed you
   // where you already were and nothing visibly happened. It is a different
@@ -360,7 +372,9 @@ export function ListingsView({ search = "" }) {
   if (listingsState.loading && !listingsState.loaded) {
     body = (
       <div className={gridClass}>
-        {[0, 1, 2, 3, 4, 5].map((i) => <ListingCardSkeleton key={i} />)}
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <ListingCardSkeleton key={i} className={list ? undefined : "mb-4"} />
+        ))}
       </div>
     );
   } else if (!listingsState.dbConfigured) {
@@ -440,7 +454,13 @@ export function ListingsView({ search = "" }) {
         {items.map((item, i) => (
           <motion.div
             key={item.id}
-            className={list ? undefined : "h-full"}
+            /* Two rows of the grid per card, shared across the row of cards
+               (subgrid): the card, then whatever opens under it. The cards
+               in a row still line up — the first track is as tall as the
+               tallest of them — and a Quick edit panel opening under one
+               card grows only the second track, so the cards beside it keep
+               their size instead of stretching to match it. */
+            className={list ? undefined : "row-span-2 grid grid-rows-subgrid"}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: Math.min(i * 0.03, 0.3) }}
@@ -459,29 +479,50 @@ export function ListingsView({ search = "" }) {
               showEbayChip={otherMarketplaces}
               selectable={selectable && isLive(item)}
               selected={!!liveSelection[item.id]}
-              onSelect={() => toggleLive(item.id)} />
-            {/* Drafts carry their category on the card here too — the "All"
-                tab mixes them in with live listings, and a draft is exactly
-                where the category is still wrong and still free to fix. It
-                also decides which conditions eBay accepts, so it is the one
-                field worth fixing before Publish. */}
-            {isDraft(item) && (
-              <DraftCategoryEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
-            )}
-            {/* And how it sells. The same one control the drafts strip and
-                the dashboard carry, on drafts only — a live listing's format
-                is fixed once eBay has accepted it. */}
-            {isDraft(item) && (
-              <DraftFormatEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
-            )}
-            {/* And what it asks — the field its format actually uses, plus
-                eBay's own comps behind one tap. Drafts only, like the two
-                above: a live listing's price is revisable, but only through a
-                revise, and a number changed here would leave this app and
-                eBay disagreeing with nothing saying so. */}
-            {isDraft(item) && (
-              <DraftPriceEdit item={item} className={cn("mt-1.5", list && "sm:w-72")} />
-            )}
+              onSelect={() => toggleLive(item.id)}
+              /* Everything the grid can still change: live listings, drafts
+                 and finds. A sale or an ended listing opens the editor, as
+                 it always has — eBay does not revise a finished item. */
+              onQuickEdit={canQuickEdit(item) ? toggleQuickEdit : undefined}
+              quickEditOpen={!!quickEditing[item.id]} />
+            {/* Under the card. In the grid this is the card's second track,
+                and it carries the space down to the next row even when it
+                holds nothing (pb-4, the row gap the grid does not have). */}
+            <div className={cn(
+              "flex flex-col gap-1.5 pt-1.5",
+              list ? "empty:hidden" : "pb-4 empty:pt-0",
+            )}>
+              {/* The Quick edit panel, straight under the toggle that opened
+                  it. It saves a draft; on a live listing it saves AND sends
+                  the change to eBay, so the card and the listing never
+                  disagree (see QuickEdit). */}
+              {quickEditing[item.id] && canQuickEdit(item) && (
+                <QuickEditPanel item={item} layout={listingsLayout}
+                  onClose={() => toggleQuickEdit(item.id)} />
+              )}
+              {/* Drafts carry their category on the card here too — the "All"
+                  tab mixes them in with live listings, and a draft is exactly
+                  where the category is still wrong and still free to fix. It
+                  also decides which conditions eBay accepts, so it is the one
+                  field worth fixing before Publish. */}
+              {isDraft(item) && (
+                <DraftCategoryEdit item={item} className={cn(list && "sm:w-72")} />
+              )}
+              {/* And how it sells. The same one control the drafts strip and
+                  the dashboard carry, on drafts only — a live listing's format
+                  is fixed once eBay has accepted it. */}
+              {isDraft(item) && (
+                <DraftFormatEdit item={item} className={cn(list && "sm:w-72")} />
+              )}
+              {/* And what it asks — the field its format actually uses, plus
+                  eBay's own comps behind one tap. Drafts only here: a live
+                  listing's price is changed from its Quick edit, which sends
+                  it to eBay in the same breath — a number changed by this
+                  control would be saved here and nowhere else. */}
+              {isDraft(item) && (
+                <DraftPriceEdit item={item} className={cn(list && "sm:w-72")} />
+              )}
+            </div>
           </motion.div>
         ))}
       </div>

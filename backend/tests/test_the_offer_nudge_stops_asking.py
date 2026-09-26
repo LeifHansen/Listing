@@ -573,9 +573,3 @@ def test_a_store_nobody_watches_spends_no_sweep(seller, monkeypatch):
     r = client.get("/api/insights")
     assert r.status_code == 200, r.text
     assert asked == []
-
-
-def test_the_group_knows_how_big_one_press_is(seller):
-    """The dashboard renders the button, so it has to be told what one tap
-    reaches — or it promises the whole badge and then defers most of it."""
-    assert main._bulk_caps()["send_offers"] == main.BULK_OFFER_CAP

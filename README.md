@@ -902,9 +902,9 @@ one `PATCH /api/listings/{id}` per number, naming that field alone, never the
 summary the card is holding (see `main.patch_listing`). **Drafts only**, like
 the two controls above it: a live listing's price *is* revisable, but only
 through a revise, and a number changed here would leave this app and eBay
-disagreeing with nothing on either screen saying so. Repricing a live listing
-keeps its own routes — the editor's save, and the dashboard's "Lower prices"
-group — both of which push the change to eBay.
+disagreeing with nothing on either screen saying so. A live listing is repriced
+from its card's **Quick edit** instead (below), the editor's save, or the
+dashboard's "Lower prices" group — all of which push the change to eBay.
 
 **An auction is started, not priced,** and that is a different number rather
 than the same one relabelled. "Check market price" answers the Buy It Now
@@ -955,6 +955,44 @@ A lookup that failed is still not a market with nothing in it — the card runs
 the answer through the same `priceView` split the editor and Shop Mode use, so
 "we couldn't check" never arrives as "no comparable listings, try a simpler
 title".
+
+### Quick edit, on every card in Manage
+
+The grid on Manage could only *open* a live listing. Every card there now
+carries a collapsed **Quick edit** toggle — a strip along the foot of a grid
+tile, a labelled button among a list row's controls — that opens the fields a
+seller changes most right under the card, without leaving the grid: title,
+price (Buy It Now on an auction that has one), available quantity, condition
+(eBay's ladder for the listing's category, fetched when the panel opens),
+brand, shipping policy, and **You paid** — the cost basis the profit line
+reads, which never goes to any marketplace. Live listings, drafts and Shop
+Mode finds get it; a sale or an ended listing opens the editor as before,
+because eBay does not revise a finished item.
+
+It is one request, `POST /api/listings/{id}/quick-edit`, and it is what makes
+the panel safe on a live listing where the draft controls are not:
+
+- **A draft or a find is saved, and that is all.** A draft's price stays with
+  its own card control above, so a card never shows two price boxes.
+- **A live listing is saved and revised in the same request**, through the
+  same provider the editor's Update uses, on every marketplace it is live on —
+  eBay when the record carries an item id, anywhere else whose state says
+  published. It never creates a listing anywhere.
+- **Only what the seller touched is sent**, and only fields whose value
+  actually moved are marked for the revise (`dirty_fields`) — a stale card
+  re-sending eBay's own price sends nothing.
+- **A change no marketplace took is put back.** The card shows what the record
+  holds, and a refused price left there would be a card disagreeing with the
+  listing it shows. The panel stays open on eBay's reason with what was typed
+  still in the boxes. An answer that never came back is *not* undone — it may
+  well be live — and neither is a fan-out one marketplace accepted.
+- **Refused before anything is written:** an unconnected eBay account, a
+  listing with size/colour variations (eBay's revise would refuse it whole),
+  a live plain auction's price, an empty or over-80-character title.
+
+The grid is a CSS subgrid — each card owns two rows, the card and whatever
+opens under it — so a panel opening under one card pushes the next row down
+without stretching the cards beside it.
 
 ### A draft arrives finished
 
@@ -1034,6 +1072,7 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `PUT`  | `/api/listing-views` | Replace the strip. Stores the *question* and never the listings it matched, so a view called "Needs photos" empties as the photos get taken |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/{id}/quick-edit` | A card's **Quick edit**: named fields only (title, price, quantity, condition, brand, shipping policy, what you paid). Saves a draft; saves **and revises** a live listing on every marketplace it is live on, and puts the change back if none of them took it |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
@@ -1053,6 +1092,9 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/ebay/lower-all` | Lower every price in the dashboard's "Lower prices" group by one percentage, as a background job (`job_id`) |
+| `POST` | `/api/ebay/send-offers` | Offer the named listings' watchers one discount (capped per request) |
+| `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
@@ -1408,22 +1450,57 @@ front surface *is* an image, which is what keeps a mug with a boat printed on
 it a mug. A yes routes the photo to `services/artwork` and `images.art_cutout`
 instead, where the rule is geometric:
 
-> **Find the outer border. Keep everything inside it, whole. Never ask what is
+> **Find the outer outline. Keep everything inside it, whole. Never ask what is
 > interesting within it.**
 
-That makes the guarantee structural rather than statistical: `artwork.mask`
-returns a **filled rectangle**, so no code path on the art side can remove a
-pixel from the middle of a painting.
+That makes the guarantee structural rather than statistical:
+`artwork.outline_matte` fills the outline's four corners **solid**, so no code
+path on the art side can remove a pixel from the middle of a painting.
 
-Finding the border is two steps, both Pillow-only. A content mask (colour
-distance from the surround, ORed with local contrast) locates the picture and
-proves it is one — a picture **fills its own bounding box**, which is what
-still refuses the tree-at-one-edge-and-boat-at-the-other shape. Then each side
-is scanned **inward from the edge of the photo** to the first line that is not
-surround. Inward, because a white-mounted print leaves eighty pixels of blank
-paper between the printed area and the sheet's own edge, and a scan starting
-at the artwork has nothing in that gap to grow along; one starting at the wall
-crosses it without ever standing on it.
+**Finding the outline: flooded in from the edge of the photo.** The first
+version of this measured every pixel's distance from *one* background colour
+(the median of a band round the frame) and called anything far enough from it
+the picture. Flat-colour tests passed; photos taken in a room did not. A lamp
+lights a wall unevenly, a phone darkens its own corners, a frame throws a
+shadow, a floor has planks, and a picture propped up to be photographed has
+wall above it and floor below — each of those read as part of the picture,
+glued itself to the frame, and turned the rectangle into a shape that was not
+one. Sellers reported it as "fails nearly every time for art pieces despite the
+item being fully in frame", and on 300 generated room photos of that kind it
+produced a good cutout for 30 of them.
+
+`artwork.outline()` asks a different question: not how far a pixel is from the
+background colour, but **how strong an edge has to be crossed to reach it from
+outside the photo** (`_reach`, one pass of a bucket queue over a
+median-smoothed copy). A lit wall, a vignette, a soft shadow and a floor
+meeting a wall have no edge anywhere in them, so they are all reached for free;
+the frame's outer edge is a real step, so everything inside it costs at least
+that much. Thresholds are walked **upward** and the first one at which a clean
+four-cornered shape comes free is the answer — lowest first, so it is the
+frame that is found rather than the mount inside it. Then:
+
+- **Four corners, not a rectangle.** Hand-held shots tilt a picture and shots
+  from above or below taper it; each side is a line fitted to the region's own
+  edge, re-laid in stretches along the first real edge met coming in from
+  outside. The corners must fit the shape closely both ways, with no corner a
+  photograph of a rectangle cannot have and no side under 0.7 of the side
+  opposite it — a circle, a wreath, a figure, a lopsided kite are refused.
+- **Not a part of something larger.** As the bar rises, an object's weaker
+  edges give way first (a pale face before dark shoulders). If a solid piece
+  of what the shape belonged to has dissolved, the shape is refused.
+- **Not the mount inside a frame.** When a frame's outer edge is faint against
+  its wall the flood gets into the moulding, and the first clean shape is the
+  mount. An edge hugging that shape at a constant distance on three sides is
+  the frame, and the outline is grown out to it.
+- **Two pictures are two pictures** — both kept, and the photo refused if the
+  second large thing in it is not a picture.
+- An outline running a little past the photo's edge is clipped, which keeps
+  everything of the piece that is in the photo; only an outline that *is* the
+  photo is refused, because there is nothing to take away.
+
+On the same 300 photos: 270 good cutouts, 6 kept as shot, no piece cut into by
+more than 5%. Through the whole art path with the local model as the fallback,
+39 of 40 good against 11 before.
 
 **And when there is no clear border, nothing happens.** A picture bleeding off
 the frame, a shape that is not a rectangle, something too small to be the
@@ -1457,10 +1534,10 @@ were shot on, and the reason was "no paid API key".
 sign, a plaque, a boxed set, a record sleeve: the screen is right not to call
 these art — a tray with a map on it is a tray — so they go to the model like
 any other object, and the model drops them or keeps only the picture printed
-on their face. When nothing it returns survives the guards, `artwork.border()`
+on their face. When nothing it returns survives the guards, `artwork.outline()`
 is asked last, and the photo is cut to the rectangle if there is one
 (`bg_engine: "border"`). Only after the model has declined, so no photo that
-gets a cutout today changes, and `border()` answers None for anything that is
+gets a cutout today changes, and `outline()` answers None for anything that is
 not a rectangle, so a garment or a close-up is still kept as shot. The studio's
 **Remove background** button does the same thing, which matters most there:
 that is the button a seller presses *after* a batch left the photo as shot.
@@ -1468,7 +1545,9 @@ that is the button a seller presses *after* a batch left the photo as shot.
 One limit, stated plainly: a print with a blank white mount, on a white
 surface, under flat light with no shadow, has no detectable outer edge — there
 is nothing in the photo that distinguishes the paper from the table. The
-border then lands on the printed area and trims blank mount. The painted or
+outline then lands on the printed area and trims blank mount. The same is true
+of an unframed canvas whose painted edge is the colour of what it lies on:
+that one is kept as shot. The painted or
 printed image itself is never cut into, which is the property the tests hold.
 
 Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
@@ -1846,7 +1925,7 @@ problem:
   `test_an_offer_reaches_the_buyers_watching.py`, because each fails the
   same way from the outside — a refusal on one listing, mid-run, with nothing
   on screen to say why. eBay takes exactly **one listing per call**, so a bulk
-  send is a loop (`BULK_OFFER_CAP`, remainder `deferred`); the offer
+  send is a loop, one call per listing; the offer
   **duration is site-specific** and eBay refuses any other value, so none is
   sent and each marketplace applies its own; and **counter-offers** are not in
   this release of eBay's API, so `allowCounterOffer` is sent explicitly false
@@ -1854,13 +1933,38 @@ problem:
   on the input; the 50% ceiling is this app's, and lower than the price drop's
   75% because a buyer takes one of these with a single tap.
 
+  **"Send offers…" means all of them**, the same fix as "Lower all…" below.
+  The group button used to send the rows the dashboard was holding to
+  `POST /api/ebay/send-offers`, which offers at most `BULK_OFFER_CAP` per
+  request and defers the rest. The press sends no ids and has no cap now:
+  `POST /api/ebay/send-offers-all` works the group out from the same ranking
+  the dashboard renders (eBay's eligibility sweep included) and runs it as a
+  **background job** with the listing it is on under the group. One per
+  account at a time — a second press while one is running joins it, rather
+  than offering the same watchers again.
+
   A single row sends its own offer rather than opening the listing. Every
   other group's rows are a way into the editor, because that is where another
   photo or a new price gets made — there is nothing in the editor that sends
-  an offer, so that row would be a button that leads nowhere.
+  an offer, so that row would be a button that leads nowhere. It names its one
+  listing and goes through `POST /api/ebay/send-offers`: one call fits in any
+  request, and there is no group to work out.
 - **Lower prices → "Lower all…"** opens an amount field (*lower every price in
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
+
+  **"All" means all of them**, for the same reason as "Enrich all" below. The
+  button used to send the rows the dashboard was holding to
+  `POST /api/ebay/lower-prices`, which reprices at most `BULK_PRICE_CAP` per
+  request — and in an environment where that cap was **1**, *"Lower prices ·
+  41"* offered *"Lower 1 price by 20%"* and lowered one. The press sends no
+  ids and has no cap now: `POST /api/ebay/lower-all` works the group out from
+  the same ranking the dashboard renders (`_suggestion_set`) and runs it as a
+  **background job** (`job_id`, polled on `/api/bulk/status/{id}`, with the
+  listing it is on under the group). One per account at a time: a second press
+  while one is running joins it instead of cutting the same prices twice. The
+  capped, ids-in route is still there for a caller that means a selection;
+  nothing in the app does.
 
   **The group clears once the cut is made** (`Listing.price_lowered_at`), and
   until it did, this was the same broken-looking button as "Enrich all" below.
@@ -1971,8 +2075,9 @@ Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind
 a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 
-- **Scope is never implicit.** The client sends the group's own listing ids, so a
-  group of twelve can't turn into the whole store.
+- **Scope is never implicit.** A group button's set is worked out server-side
+  from the same ranking the dashboard renders, so a group of twelve can't turn
+  into the whole store; a call that names ids reaches only those.
 - **A listing that can't take the change is skipped with a reason**, not failed —
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
@@ -1982,9 +2087,10 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
   listing is its own serial eBay call — a revise, or, for an offer, the one
   listing eBay's Negotiation API takes per request; the remainder comes back
   as `deferred` for another pass instead of the request outliving the
-  gateway. The press that finishes the details list
-  names none, so it has no remainder to defer — it is a job from the first
-  moment, and the client polls it rather than holding a request open.
+  gateway. The group buttons — finish the details list, lower every price,
+  send every offer — name none, so they have no remainder to defer: each is
+  a job from the first moment, and the client polls it rather than holding a
+  request open.
 
 Every row also carries a **dismiss** (×). The engine rebuilds this list from
 scratch on every load, so advice the seller has already considered and decided
