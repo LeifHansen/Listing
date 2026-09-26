@@ -2,9 +2,9 @@
 
 What a handler needs that belongs to no one area: who and where the caller
 is, whether they own the listing they name, their eBay credentials, the
-sign-in rate limit, the opaque page cursor, the superadmin gate with its
-audit trail, the reference a failure quotes to the seller, and the runner
-for work the response should not wait on. They live here, not in main.py,
+tokens their AI calls cost, the sign-in rate limit, the opaque page cursor,
+the superadmin gate with its audit trail, the reference a failure quotes to
+the seller, and the runner for work the response should not wait on. They live here, not in main.py,
 because a route module cannot import main.py — main includes the routers,
 so the reverse is an import cycle.
 
@@ -23,7 +23,7 @@ from fastapi import HTTPException, Request
 from .. import auth, db, ratelimit
 from ..config import log
 from ..marketplaces import ebay_provider
-from ..services import background, errorlog
+from ..services import background, errorlog, tokens
 
 
 def uid(request: Request) -> Optional[str]:
@@ -63,6 +63,35 @@ def assert_session_owner(session_id: str, request: Request) -> None:
 def ebay_creds_for(request: Request):
     """Build live eBay creds for the logged-in user, or None if not connected."""
     return ebay_provider.creds_for(uid(request))
+
+
+# The AI token gate. An AI endpoint charges up front through these and
+# refunds on failure ("only pay for AI that worked"). The bulk batch spends
+# through tokens.spend itself: a seller who runs out mid-batch gets the
+# items left as stub drafts, not a 402. When billing is off (no
+# TOKENS_ENABLED / no DB) these are no-ops, so dev and self-hosted installs
+# stay free.
+
+def charge_uid(user_id: str, feature: str, units: int = 1):
+    """Debit a logged-in user. Returns the spend record for tokens.refund(),
+    or None when billing is off / the DB failed open. Raises 402 when broke."""
+    res = tokens.spend(user_id, feature, units)
+    if res is not None and not res.get("ok"):
+        raise HTTPException(402, tokens.insufficient_message(res))
+    return res
+
+
+def charge_ai(request: Request, feature: str, units: int = 1):
+    """Token gate for a request-context AI endpoint. 401s anonymous callers
+    when billing is on — balances are per-account, so metered AI requires a
+    login (the logged-out flows keep working wherever billing is off)."""
+    if not tokens.enabled():
+        return None
+    user_id = uid(request)
+    if user_id is None:
+        raise HTTPException(
+            401, "Log in to use AI features — your token balance is per account.")
+    return charge_uid(user_id, feature, units)
 
 
 def client_ip(request: Request) -> str:

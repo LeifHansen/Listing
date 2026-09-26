@@ -198,7 +198,7 @@ def test_an_offloaded_listing_is_not_billed_for_a_pass_that_never_ran(
                                 status="published", user_id=uid)
     _empty_bucket(monkeypatch)
     charged: list = []
-    monkeypatch.setattr(main, "_charge_uid",
+    monkeypatch.setattr(main.deps, "charge_uid",
                         lambda *a, **k: charged.append(a) or None)
     monkeypatch.setattr(main.marketplaces, "get", lambda name: _AcceptingEbay())
 

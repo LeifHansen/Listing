@@ -76,7 +76,7 @@ def test_identify_does_not_call_a_storage_failure_an_ai_failure(
     monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: tmp_path)
     monkeypatch.setattr(main.storage, "list_optimized", lambda sid: ["a.jpg"])
-    monkeypatch.setattr(main, "_charge_ai", lambda *a, **k: {"units": 1})
+    monkeypatch.setattr(main.deps, "charge_ai", lambda *a, **k: {"units": 1})
     monkeypatch.setattr(main.tokens, "refund", lambda spent: refunds.append(spent))
 
     def _boom(*a, **k):

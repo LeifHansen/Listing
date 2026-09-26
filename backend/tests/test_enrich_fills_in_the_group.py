@@ -294,7 +294,7 @@ def test_a_live_listing_we_cannot_revise_is_not_billed_for(seller, monkeypatch):
     _with_photo("live-one")
     monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: None)
     charged: list = []
-    monkeypatch.setattr(main, "_charge_uid",
+    monkeypatch.setattr(main.deps, "charge_uid",
                         lambda *a, **k: charged.append(a) or None)
     monkeypatch.setattr(main, "_enrich_listing", _enriched([]))
 
@@ -355,7 +355,7 @@ def test_the_charge_is_written_down_while_it_is_outstanding(seller, monkeypatch)
     _client, dbmod, uid = seller
     assert dbmod.upsert_listing("one", _listing("one"), status="draft", user_id=uid)
     _with_photo("one")
-    monkeypatch.setattr(main, "_charge_uid",
+    monkeypatch.setattr(main.deps, "charge_uid",
                         lambda u, feature, units=1: {"ok": True, "entry_id": "e1",
                                                      "user_id": u})
     monkeypatch.setattr(main, "_enrich_listing", _enriched([]))
@@ -374,7 +374,7 @@ def test_a_charge_for_a_fill_that_never_ran_goes_back(seller, monkeypatch):
     _client, dbmod, uid = seller
     assert dbmod.upsert_listing("one", _listing("one"), status="draft", user_id=uid)
     _with_photo("one")
-    monkeypatch.setattr(main, "_charge_uid",
+    monkeypatch.setattr(main.deps, "charge_uid",
                         lambda u, feature, units=1: {"ok": True, "entry_id": "e1",
                                                      "user_id": u})
     monkeypatch.setattr(main, "_enrich_listing", lambda listing, paths: None)

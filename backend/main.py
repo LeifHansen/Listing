@@ -1936,33 +1936,6 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
     return added
 
 
-# --- AI token gate (monetization) ------------------------------------------
-# Every AI endpoint charges up front through these and refunds on failure
-# ("only pay for AI that worked"). When billing is off (no TOKENS_ENABLED /
-# no DB) they are no-ops, so dev and self-hosted installs stay free.
-
-def _charge_uid(uid: str, feature: str, units: int = 1):
-    """Debit a logged-in user. Returns the spend record for tokens.refund(),
-    or None when billing is off / the DB failed open. Raises 402 when broke."""
-    res = tokens.spend(uid, feature, units)
-    if res is not None and not res.get("ok"):
-        raise HTTPException(402, tokens.insufficient_message(res))
-    return res
-
-
-def _charge_ai(request: Request, feature: str, units: int = 1):
-    """Token gate for a request-context AI endpoint. 401s anonymous callers
-    when billing is on — balances are per-account, so metered AI requires a
-    login (the logged-out flows keep working wherever billing is off)."""
-    if not tokens.enabled():
-        return None
-    uid = deps.uid(request)
-    if uid is None:
-        raise HTTPException(
-            401, "Log in to use AI features — your token balance is per account.")
-    return _charge_uid(uid, feature, units)
-
-
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
     """Make sure the optimized photo exists on the volume, pulling it back from
     R2 if the reclaim pass already freed the local copy.
@@ -5262,7 +5235,7 @@ async def upload(
     # Uploading + optimizing stays free; the AI background removal toggle is
     # metered per photo. Charged before any disk work so a broke/logged-out
     # caller gets a clean 402/401 instead of a half-done upload.
-    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -5301,7 +5274,7 @@ async def upload(
         # bg-removal charge given back) instead of after the photo work.
         uid = await run_in_threadpool(deps.uid, request)
         try:
-            identify_spent = await run_in_threadpool(_charge_ai, request, "identify")
+            identify_spent = await run_in_threadpool(deps.charge_ai, request, "identify")
         except HTTPException:
             await run_in_threadpool(tokens.refund, spent)
             await run_in_threadpool(storage.purge_session, session_id)
@@ -5418,7 +5391,7 @@ async def upload_more(
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
-    spent = await run_in_threadpool(_charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
+    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -5848,7 +5821,7 @@ async def image_auto_clean(
         img = _studio_load(request, session_id, name, data)
         return {"ok": True, "image": _data_url(images.auto_clean(img))}
 
-    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
+    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except Exception:
@@ -5882,7 +5855,7 @@ async def image_remove_bg(
         return {"ok": True, "image": _data_url(out), "engine": engine,
                 "degraded": images.engine_degraded(engine)}
 
-    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
+    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
     try:
         return await run_in_threadpool(_run)
     except images.CutoutBusy as exc:
@@ -5924,7 +5897,7 @@ async def image_smart_crop(
                     "message": "Already nicely framed — no crop needed."}
         return {"ok": True, "applied": True, "image": _data_url(cropped)}
 
-    spent = await run_in_threadpool(_charge_ai, request, "image_ai")
+    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
     try:
         res = await run_in_threadpool(_run)
     except Exception:
@@ -5950,7 +5923,7 @@ def identify(session_id: str, request: Request) -> dict:
     if not names:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
-    spent = _charge_ai(request, "identify")
+    spent = deps.charge_ai(request, "identify")
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(deps.uid(request)),
@@ -6037,7 +6010,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     paths = _photos_for_fill(session_id, listing)
     if not paths:
         raise HTTPException(400, _NO_PHOTOS)
-    spent = _charge_ai(request, "specifics")
+    spent = deps.charge_ai(request, "specifics")
     try:
         filled = claude_ai.fill_aspects(paths, listing, aspects,
                                         tag_text=_tag_text_for(paths, aspects))
@@ -6253,7 +6226,7 @@ def refine(req: RefineRequest, request: Request) -> dict:
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # Authorize before billing: never charge for a request we're about to 404.
     deps.assert_session_owner(req.session_id, request)
-    spent = _charge_ai(request, "refine")
+    spent = deps.charge_ai(request, "refine")
     try:
         updated = claude_ai.refine(req.listing, req.prompt)
     except Exception as exc:  # noqa: BLE001 - surface a clear reason to the UI
@@ -8758,7 +8731,7 @@ def identify_async(session_id: str, request: Request) -> dict:
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
     uid = deps.uid(request)
-    spent = _charge_ai(request, "identify")  # up front: a broke caller 402s here
+    spent = deps.charge_ai(request, "identify")  # up front: a broke caller 402s here
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
@@ -8790,7 +8763,7 @@ async def shelf_scan(request: Request, files: list[UploadFile] = File(...)) -> d
             frames.append(data)
     if not frames:
         raise HTTPException(400, "No readable frames.")
-    spent = await run_in_threadpool(_charge_ai, request, "shelf_scan")
+    spent = await run_in_threadpool(deps.charge_ai, request, "shelf_scan")
     try:
         result = await run_in_threadpool(claude_ai.scan_shelf, frames)
     except Exception as exc:  # noqa: BLE001
@@ -9751,7 +9724,7 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
 
     before_brand = (listing.brand or "").strip()
     before = [(s.name, s.value) for s in listing.item_specifics]
-    spent = _charge_uid(uid, "specifics")
+    spent = deps.charge_uid(uid, "specifics")
     if note_charge:
         note_charge(tokens.receipts(spent))
     try:

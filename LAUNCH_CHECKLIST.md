@@ -304,9 +304,9 @@ Ordered by what it costs a seller.
   path-traversal guard and truthy parse are re-typed 6–10× each). Started:
   `backend/routers/` holds the operator console, sign-in and the inbox, and
   `routers/deps.py` holds the caller's id, the ownership check, the eBay
-  credentials, the support reference and the background runner. 72 more
-  routes can move as they are. The other 51 read something tests patch on
-  `main`: the token charge pins 12 of them, the drafting chain's helpers 10,
+  credentials, the token charge, the support reference and the background
+  runner. 76 more routes can move as they are. The other 47 read something
+  tests patch on `main`: the drafting chain's helpers pin 10 of them,
   `LIST_CAP` 9, `_purge_session_images` and `_bulk_set` 7 each, then
   `_easypost_key`, `_finish_connect` and the expert-knowledge routes' direct
   `run_in_background` call. Move a shared helper into `routers/deps.py`, and
