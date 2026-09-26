@@ -432,6 +432,16 @@ def interrupted_message(record: dict) -> str:
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "lowered on eBay — run it again for the rest.")
+    if record.get("kind") == "offers":
+        # "Send offers…". Each offer is stamped on its listing as it goes out,
+        # which takes it out of the group — so running it again reaches only
+        # the listings this run never got to, never the same watchers twice.
+        total = record.get("total_items") or 0
+        current = record.get("current") or 0
+        where = f" ({min(current, total)} of {total} done)" if total else ""
+        return ("The server restarted while sending your offers"
+                f"{where}, so the run stopped early. The offers it sent are "
+                "with your buyers — run it again for the rest.")
     phase = record.get("phase")
     current = record.get("current") or 0
     photos = record.get("total_photos") or 0

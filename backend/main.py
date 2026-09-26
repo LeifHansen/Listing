@@ -10276,6 +10276,45 @@ def lower_all(payload: dict, request: Request) -> dict:
 BULK_OFFER_CAP = int(os.getenv("BULK_OFFER_CAP", "40") or "40")
 
 
+def _offer_one(rec: dict, percent: float, message: str, uid: str,
+               creds: dict, http: httpx.Client,
+               eligible: Optional[set]) -> dict:
+    """Offer ONE listing's watchers `percent` off, and stamp the listing.
+
+    `eligible` is eBay's sweep of the listings it will carry an offer for, or
+    None when it could not be read (the send then goes ahead and eBay refuses
+    what it will not carry). Returns a bulk_actions outcome. Shared by the
+    route that is handed ids and the job that works its own set out, so an
+    offer is one thing however it was asked for.
+    """
+    if rec.get("status") not in ("published", "live"):
+        return {"skip": "No longer live on eBay."}
+    data = rec.get("listing") or {}
+    item_id = str(data.get("ebay_listing_id") or "").strip()
+    if not item_id:
+        return {"skip": "This listing isn't on eBay."}
+    if eligible is not None and item_id not in eligible:
+        return {"skip": "eBay has no interested buyers for it right now."}
+    try:
+        sent = ebay_offers.send_offer(creds, item_id, percent,
+                                      message=message, client=http)
+    except ebay_offers.OfferRefused as exc:
+        if ebay_offers.skippable(exc):
+            return {"skip": str(exc)}
+        return {"message": str(exc)}
+    # Recorded on the listing, and this is the half of the button that
+    # makes the group shrink. The nudge is computed from the watch count,
+    # which an offer does not move — without the stamp the group comes
+    # straight back with the same listings and the same count, which is
+    # what a button that does nothing looks like. See
+    # recommender.OFFER_QUIET_DAYS, and price_lowered_at for the same
+    # lesson learned the hard way on the group above this one.
+    stamp = recommender.offer_sent_stamp()
+    db.mutate_listing_data(
+        rec["id"], lambda d: {**d, "offer_sent_at": stamp}, user_id=uid)
+    return {"ok": True, "percent": percent, "offer_id": sent.get("offer_id")}
+
+
 @app.post("/api/ebay/send-offers")
 def send_offers(payload: dict, request: Request) -> dict:
     """Offer several live listings to their watchers at one discount — eBay's
@@ -10353,37 +10392,10 @@ def send_offers(payload: dict, request: Request) -> dict:
         log.info("eligible-items sweep unavailable for user=%s: %s",
                  user["id"], exc)
 
-    def _apply(rec: dict) -> dict:
-        if rec.get("status") not in ("published", "live"):
-            return {"skip": "No longer live on eBay."}
-        data = rec.get("listing") or {}
-        item_id = str(data.get("ebay_listing_id") or "").strip()
-        if not item_id:
-            return {"skip": "This listing isn't on eBay."}
-        if eligible is not None and item_id not in eligible:
-            return {"skip": "eBay has no interested buyers for it right now."}
-        try:
-            sent = ebay_offers.send_offer(creds, item_id, percent,
-                                          message=message, client=http)
-        except ebay_offers.OfferRefused as exc:
-            if ebay_offers.skippable(exc):
-                return {"skip": str(exc)}
-            return {"message": str(exc)}
-        # Recorded on the listing, and this is the half of the button that
-        # makes the group shrink. The nudge is computed from the watch count,
-        # which an offer does not move — without the stamp the group comes
-        # straight back with the same listings and the same count, which is
-        # what a button that does nothing looks like. See
-        # recommender.OFFER_QUIET_DAYS, and price_lowered_at for the same
-        # lesson learned the hard way on the group above this one.
-        stamp = recommender.offer_sent_stamp()
-        db.mutate_listing_data(
-            rec["id"], lambda d: {**d, "offer_sent_at": stamp},
-            user_id=user["id"])
-        return {"ok": True, "percent": percent, "offer_id": sent.get("offer_id")}
-
     try:
-        result = bulk_actions.run(records, _apply)
+        result = bulk_actions.run(
+            records, lambda rec: _offer_one(rec, percent, message, user["id"],
+                                            creds, http, eligible))
     finally:
         http.close()
     missing = wanted - {r["id"] for r in mine}
@@ -10394,6 +10406,132 @@ def send_offers(payload: dict, request: Request) -> dict:
              "failed=%d deferred=%d", user["id"], percent, len(result.changed),
              len(result.skipped), len(result.failed), len(deferred))
     return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
+
+
+# The offer runs going right now: user id -> job id. One per account, for the
+# same reason as the price drop's: a second press mid-run would offer the
+# same watchers again, and eBay refuses a second seller offer while the first
+# is live — every one of those would come back as a refusal.
+_OFFER_JOBS: dict[str, str] = {}
+_OFFER_LOCK = threading.Lock()
+# The suggestion group "Send offers…" clears.
+SEND_OFFERS_ALL_TYPES = ("send_offers",)
+
+
+def _run_send_offers_job(job_id: str, records: list[dict], uid: str,
+                         creds: dict, percent: float, message: str) -> None:
+    """Background worker for "Send offers…": every listing in the group, one
+    Negotiation API call each, with the job saying which listing it is on."""
+    http = httpx.Client(timeout=30)
+    try:
+        # The same sweep, asked the same way, as the route that takes ids:
+        # once for the run, on the connection the offers then go out on.
+        eligible: Optional[set] = None
+        try:
+            eligible = ebay_offers.eligible_items(creds, client=http)
+        except ebay_offers.ScopeError:
+            jobstore.update(job_id, done=True, phase="failed", error=(
+                "Reconnect your eBay account to send offers to buyers, then "
+                "try again."))
+            return
+        except Exception as exc:  # noqa: BLE001 - the send can still be attempted
+            log.info("eligible-items sweep unavailable for user=%s: %s",
+                     uid, exc)
+
+        def _apply(rec: dict) -> dict:
+            # Re-read: the set was worked out when the button was pressed,
+            # and a listing may have sold, ended or been offered since.
+            fresh = db.get_listing(rec["id"])
+            if not fresh:
+                return {"skip": "This listing is gone.", "needs_you": False}
+            return _offer_one(fresh, percent, message, uid, creds, http,
+                              eligible)
+
+        result = bulk_actions.run(
+            records, _apply,
+            on_each=lambda i, title: jobstore.update(
+                job_id, phase="offering", current=i, current_title=title[:80]))
+        log.info("send-offers-all %s: user=%s percent=%s listings=%d sent=%d "
+                 "skipped=%d failed=%d", job_id, uid, percent, len(records),
+                 len(result.changed), len(result.skipped), len(result.failed))
+        jobstore.update(job_id, done=True, phase="done", current=len(records),
+                        result={"percent": percent, "deferred": 0,
+                                **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = _support_reference()
+        log.warning("send-offers-all job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish sending these offers. Try again in a moment — "
+            f"if it keeps happening, quote {reference} to support."))
+    finally:
+        http.close()
+        with _OFFER_LOCK:
+            if _OFFER_JOBS.get(uid) == job_id:
+                _OFFER_JOBS.pop(uid, None)
+
+
+@app.post("/api/ebay/send-offers-all")
+def send_offers_all(payload: dict, request: Request) -> dict:
+    """Offer every listing in the dashboard's "Send offers" group to its
+    watchers at one discount.
+
+    Takes NO ids, and has no cap — the same fix "Lower all…" got. The route
+    above is handed the group's rows and offers at most BULK_OFFER_CAP of them
+    per request, so the group button reached a slice of the badge and
+    deferred the rest. The set is worked out here from the same ranking the
+    dashboard renders, and run as a job so its length costs time rather than
+    a gateway timeout. A single row's offer still goes through the route
+    above: it names its one listing, and one call fits in any request.
+
+    Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    creds = _ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        percent = ebay_offers.validate_discount(payload.get("percent"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    message = ebay_offers.clean_message(payload.get("message"))
+    uid = user["id"]
+    # Check AND reserve in one critical section: a double tap that passed the
+    # check twice would start two runs offering the same watchers.
+    job_id = storage.new_session_id()
+    with _OFFER_LOCK:
+        running = _OFFER_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True, "total": 0,
+                        "deferred": 0}
+        _OFFER_JOBS[uid] = job_id
+    try:
+        items = db.list_listings(limit=LIST_CAP, user_id=uid)
+        records = _suggestion_set(items, creds, SEND_OFFERS_ALL_TYPES)
+        if not records:
+            raise HTTPException(400, "There's nobody left to send an offer to.")
+    except BaseException:
+        # The reservation stands for a job that will never start; without this
+        # the next press is told "already running".
+        with _OFFER_LOCK:
+            if _OFFER_JOBS.get(uid) == job_id:
+                _OFFER_JOBS.pop(uid, None)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "offers", "phase": "offering", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_send_offers_job,
+                     args=(job_id, records, uid, creds, percent, message),
+                     daemon=True).start()
+    log.info("send-offers-all %s: started for user=%s percent=%s listings=%d",
+             job_id, uid, percent, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records),
+            "deferred": 0}
 
 
 # How many listings one enrich run touches. Far below the price cap above
@@ -10416,11 +10554,13 @@ def _bulk_caps() -> dict:
     along with the recommendations so the group can say what this pass will
     actually do before the seller agrees to spend anything on it.
 
-    "lower_price" is absent because its button is no longer capped: "Lower
-    all…" runs /api/ebay/lower-all, which takes the whole group. Absent reads
-    on the dashboard as "one run covers the badge", which is now the truth.
+    "lower_price" and "send_offers" are absent because their buttons are no
+    longer capped: "Lower all…" runs /api/ebay/lower-all and "Send offers…"
+    runs /api/ebay/send-offers-all, and both take the whole group. Absent
+    reads on the dashboard as "one run covers the badge", which is now the
+    truth.
     """
-    return {"specifics": BULK_ENRICH_CAP, "send_offers": BULK_OFFER_CAP}
+    return {"specifics": BULK_ENRICH_CAP}
 
 
 # The enrichment runs as a background job, one per account at a time: it
