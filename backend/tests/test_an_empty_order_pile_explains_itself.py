@@ -53,7 +53,7 @@ def test_orders_total_is_never_invented(monkeypatch):
 @pytest.fixture()
 def seller(monkeypatch):
     monkeypatch.setattr(main.auth, "current_user", lambda request: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: {
         "access_token": "tok", "_uid": "u1", "ebay_username": "seller_x",
         "ship_from_postal": ""})
     monkeypatch.setattr(main.config, "EBAY_ENV", "production")

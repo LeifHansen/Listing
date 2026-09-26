@@ -76,7 +76,7 @@ def test_a_cap_of_zero_keeps_everything():
 def seller(dbmod, monkeypatch, tmp_path):
     monkeypatch.setattr(main, "db", dbmod)
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t"})
     # eBay's traffic report is a network call and says nothing about any of
     # this: every rec here comes from the record itself.

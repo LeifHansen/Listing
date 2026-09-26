@@ -176,7 +176,7 @@ def test_stopping_a_paused_batch_takes_its_photos_with_it(
     through the worker's `finally`, which drops it; a batch waiting on the
     seller has no worker at all, so the request has to."""
     staging, job = _paused_batch()
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
 
     client = _client()
     resp = client.post(f"/api/bulk/cancel/{job}")
@@ -242,7 +242,7 @@ def test_notes_for_a_job_that_has_moved_on_are_refused(monkeypatch):
     """A double tap, a tab left open on a batch that finished, an answer that
     crossed with a Stop. Starting a second drafting run over the same pile
     would draft — and charge for — every item twice."""
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
     jobstore.register("job-2", {"id": "job-2", "phase": "identifying",
                                 "done": False}, uid="owner")
     started = []
@@ -259,7 +259,7 @@ def test_notes_for_a_job_that_has_moved_on_are_refused(monkeypatch):
 def test_notes_for_someone_elses_job_are_a_404(monkeypatch):
     """Same answer as an id that never existed, so this cannot be used to ask
     whether somebody else's batch is real."""
-    monkeypatch.setattr(main, "_uid", lambda request: "someone-else")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "someone-else")
     jobstore.register("job-3", {"id": "job-3", "phase": "awaiting_notes",
                                 "done": False}, uid="owner")
 
@@ -277,7 +277,7 @@ def test_a_batch_whose_photos_went_away_while_it_waited_says_so(monkeypatch):
     """The pause is open-ended, so the orphan sweep can reach the pile first.
     There is nothing to draft from and nothing was ever charged, so the batch
     ends with a reason instead of a drafting run over an empty directory."""
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
     staging = storage.new_session_id()  # never given any photos
     jobstore.register("job-4", {
         "id": "job-4", "phase": "awaiting_notes", "done": False,
@@ -299,7 +299,7 @@ def test_the_question_is_asked_once_per_batch(split_in_two, monkeypatch):
     stop and ask again — an empty answer is still an answer, and a batch that
     re-asked after every Skip could never finish."""
     drafted = []
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
     for name in ("_resolve_category", "_assign_store_category",
                  "_enrich_listing", "_drop_answered_missing_info",
                  "_lookup_artwork", "_research_draft", "_price_against_comps",
@@ -343,7 +343,7 @@ def test_answering_twice_drafts_once(split_in_two, refuses_to_draft, monkeypatch
     and CHARGE for every item twice, and nothing afterwards would look wrong
     enough to notice — just two of everything in Drafts."""
     started = []
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
     _staging, job = _paused_batch()
     # Stubbed only AFTER the pile is paused — _paused_batch runs the real
     # worker to get there, which is the half of this that has to be real.

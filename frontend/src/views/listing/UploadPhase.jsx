@@ -70,7 +70,7 @@ function countHints(notes) {
 //                     would be the page hiding its own point. See the fold
 //                     below for why anywhere else still starts shut.
 export function UploadPhase({ defaultOpen = false }) {
-  const { setSession, runBulkUpload, bulkRetry, clearBulkRetry,
+  const { setSession, currentSession, runBulkUpload, bulkRetry, clearBulkRetry,
           invalidateListings } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
@@ -303,14 +303,24 @@ export function UploadPhase({ defaultOpen = false }) {
   // The draft has landed — the same ending for the pass that ran straight
   // through and the one that waited for the seller's notes.
   const finish = (sessionId, result) => {
-    setSession({
-      sessionId,
-      listing: result.listing,
-      confidence: result.confidence,
-      // Server already ran the specifics/maker enrichment for this draft —
-      // the editor's autofill effect skips its (re-charging) re-run.
-      specificsAutofilled: !!result.specifics_autofilled,
-    });
+    const open = currentSession();
+    if (open && open.sessionId !== sessionId) {
+      // The seller moved on while this drafted -- to Manage, into another
+      // listing, mid-edit. Taking the editor over now would throw that
+      // listing's unsaved edits away for a draft they did not ask to see yet.
+      // It is saved either way; say where it is.
+      toast("Your new draft is ready — it's waiting in Drafts.",
+        { kind: "success" });
+    } else {
+      setSession({
+        sessionId,
+        listing: result.listing,
+        confidence: result.confidence,
+        // Server already ran the specifics/maker enrichment for this draft —
+        // the editor's autofill effect skips its (re-charging) re-run.
+        specificsAutofilled: !!result.specifics_autofilled,
+      });
+    }
     // A listing that did not exist a moment ago now does. Nothing else asks
     // the server again on its own, so without this the new draft is absent
     // from Drafts, from the tab counts and from the dashboard until some

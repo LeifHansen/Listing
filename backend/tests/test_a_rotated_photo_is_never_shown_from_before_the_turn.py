@@ -33,11 +33,11 @@ def client(monkeypatch, tmp_path):
     opt = tmp_path / "optimized"
     opt.mkdir()
     Image.new("RGB", (8, 4), "white").save(opt / "img_1.jpg", "JPEG")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: opt)
     monkeypatch.setattr(main.storage, "snapshot_image", lambda *a, **k: None)
     monkeypatch.setattr(main.objstore, "enabled", lambda: False)
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
     c = TestClient(main.app)
     c.opt = opt
     return c

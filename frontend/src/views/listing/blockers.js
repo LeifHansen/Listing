@@ -364,7 +364,7 @@ export function etsyBlockers(listing = {},
     add("description", "description", "Description", "Etsy requires a description.");
   }
   if (!(Number(l.price) >= ETSY_MIN_PRICE)) {
-    add("price", "price", "Price", `Etsy's minimum is ${ETSY_MIN_PRICE.toFixed(2)}.`);
+    add("price", "price", "Price", `Etsy's minimum is $${ETSY_MIN_PRICE.toFixed(2)}.`);
   }
   if (!(Number(e.taxonomy_id) > 0)) {
     add("etsy_taxonomy", "etsy_taxonomy", "Etsy category",

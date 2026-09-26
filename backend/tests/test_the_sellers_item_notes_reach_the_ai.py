@@ -108,7 +108,7 @@ def answer(monkeypatch, drafts):
     Returns (job snapshot, what the model was handed) — the whole journey, as
     the seller makes it, through the real endpoint.
     """
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
 
     def _run(notes, pile_notes=PILE, photos=4):
         staging = storage.new_session_id()
@@ -240,7 +240,7 @@ def test_a_single_uploads_line_reaches_its_draft(monkeypatch, drafts):
     """The same question on the one-item path, answered through the same
     endpoint — the difference is only that there is one session to save it to
     and the identify chain runs directly."""
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
     session = storage.new_session_id()
     _photos(storage.original_dir(session), 2)
     storage.save_notes(session, PILE)

@@ -863,3 +863,27 @@ def test_an_unanswered_probe_still_blocks_the_account_verdict():
         _blocked(), CREDS, listing=_FullDraft(), verify=verify,
         payments=OK_PAYMENTS, privileges=HEALTHY_PRIV)
     assert "not over its wording" in issues[0]["title"]
+
+
+# --- which findings decide every other publish ------------------------------
+# A bulk publish stops at the first refusal marked `every_listing`
+# (DraftsStrip.publishRun). Only a verdict that names the ACCOUNT carries it:
+# the unexplained placeholder and the listing-level verdicts must not, or a
+# run would stop over one listing's title.
+
+def test_only_account_verdicts_decide_every_listing():
+    marked = {s for s in ("account", "account_words", "policies", "photos",
+                          "specifics", "condition", "title", "wording")
+              if ebay_account._scope_issue(s).get("every_listing")}
+    assert marked == {"account"}
+
+
+def test_an_unfinished_payments_setup_decides_every_listing():
+    exc = ebay_trading.TradingError(E240, code="240")
+    issues = ebay_account.publish_block_issues(
+        exc, {"access_token": "t"},
+        payments=lambda _t: {"status": "NOT_STARTED"},
+        privileges=lambda _t: {"registration_complete": True})
+    assert any(i.get("every_listing") for i in issues)
+    # ...and the placeholder eBay sent alongside it is not marked itself.
+    assert not any(i.get("every_listing") for i in issues if i.get("placeholder"))

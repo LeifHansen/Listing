@@ -73,7 +73,7 @@ def test_identify_does_not_call_a_storage_failure_an_ai_failure(
     main, api = client
     refunds: list = []
     monkeypatch.setattr(main.config, "ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: tmp_path)
     monkeypatch.setattr(main.storage, "list_optimized", lambda sid: ["a.jpg"])
     monkeypatch.setattr(main, "_charge_ai", lambda *a, **k: {"units": 1})

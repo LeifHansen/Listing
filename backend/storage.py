@@ -26,7 +26,7 @@ def new_session_id() -> str:
 
     12 hex characters is 48 bits with no uniqueness check against the
     database. Ids are not the security boundary — they travel in public
-    /media URLs by design, and the guard is _assert_session_owner — but a
+    /media URLs by design, and the guard is deps.assert_session_owner — but a
     birthday collision would silently merge two sellers' photos into one
     directory, which no error would ever report.
     """
@@ -467,7 +467,14 @@ def prune_originals(max_age_seconds: int) -> int:
     fall back to the optimized photo when it is gone, exactly as they do for a
     photo that never had a cutout. Reclaiming it costs an old listing a little
     fidelity if it is identified again months later, and keeping it costs
-    every seller the volume."""
+    every seller the volume.
+
+    vision/ is swept with them, and it is even more plainly a cache: one
+    right-sized JPEG per photo sent to a vision model (images.vision_copy),
+    rebuilt from the photo whenever it is missing or older than it. Nothing
+    reclaimed it at all -- not this, not prune_history, not the R2 offload,
+    which moves optimized/ only -- so every photo the AI had ever read kept a
+    copy on the volume for the life of its listing, offloaded or not."""
     freed = 0
     try:
         base = config.SESSIONS_DIR
@@ -475,7 +482,7 @@ def prune_originals(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            for sub in ("original", "as_shot"):
+            for sub in ("original", "as_shot", "vision"):
                 old_dir = d / sub
                 try:
                     if not old_dir.is_dir():

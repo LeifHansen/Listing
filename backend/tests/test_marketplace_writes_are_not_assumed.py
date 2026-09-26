@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 def app(monkeypatch, every_marketplace):
     from backend import main
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
 
     def _saves(landed: bool):
         calls: list[dict] = []
@@ -152,7 +152,7 @@ def test_a_settings_id_that_is_not_a_number_is_refused_before_the_write(app):
 def disconnects(monkeypatch, every_marketplace):
     from backend import main
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
 
     def _with(landed: bool):
         calls: list[str] = []

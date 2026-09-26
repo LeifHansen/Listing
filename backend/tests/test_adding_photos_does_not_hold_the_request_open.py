@@ -42,13 +42,13 @@ def client(monkeypatch, tmp_path):
     orig.mkdir()
     opt.mkdir()
     (opt / "img_000.jpg").write_bytes(_jpeg())      # the listing's one photo
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda request: "u1")
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
     monkeypatch.setattr(main.storage, "original_dir", lambda sid: orig)
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: opt)
     monkeypatch.setattr(main.storage, "list_optimized",
                         lambda sid: sorted(p.name for p in opt.iterdir()))
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
     seen: dict = {}
 
     def optimize_batch(jobs, remove_bg=False, progress=None, **kw):

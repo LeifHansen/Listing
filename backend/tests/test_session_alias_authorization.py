@@ -1,6 +1,6 @@
 """Possession of a session id must not reach another user's photos.
 
-The session-scoped write endpoints guard with _assert_session_owner, which
+The session-scoped write endpoints guard with deps.assert_session_owner, which
 asks the DATABASE whose listing this is. The file operation that follows asks
 STORAGE, under a different naming rule. Where the two disagreed, the guard
 answered about one session and the write landed on another.
@@ -49,7 +49,7 @@ def app_client(monkeypatch, tmp_path):
                      if sid == VICTIM else None))
     monkeypatch.setattr(db, "get_listing", lambda sid: None)
     # The caller is anonymous — no account at all.
-    monkeypatch.setattr(main, "_uid", lambda _r: "")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "")
 
     victim_dir = storage.ensure_session(VICTIM)
     photo = victim_dir / "optimized" / "img_000.jpg"

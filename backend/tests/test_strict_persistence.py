@@ -80,7 +80,7 @@ def test_settings_save_reports_503_not_ok_true(client, monkeypatch):
     that never landed."""
     from backend import auth, db, main
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "user-1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "user-1")
     monkeypatch.setattr(auth, "current_user", lambda _r: {"id": "user-1",
                                                           "email": "a@b.c"})
 

@@ -46,7 +46,7 @@ def _no_bucket(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _im_the_owner(monkeypatch):
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
 
 
 @pytest.fixture(autouse=True)

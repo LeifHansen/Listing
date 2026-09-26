@@ -1,6 +1,6 @@
 """"Listing not found" is a claim about the seller's account.
 
-The ownership guard already knows this. `_assert_session_owner` reads
+The ownership guard already knows this. `deps.assert_session_owner` reads
 `db.get_listing_strict` and spells the reasoning out: the check answers from
 the database, "so if a read failure were treated like 'no such listing', one
 Neon blip would quietly disable the guard on every session-scoped endpoint at
@@ -123,9 +123,10 @@ def test_a_listing_that_really_is_missing_still_answers_404(seller, monkeypatch)
 
 def test_the_media_route_already_learned_this():
     """Named so the pattern is visible: this is the same fix `/media` got when
-    a presign failure was answering 404 for an object that exists."""
+    a presign failure was answering 404 for an object that exists, and the
+    ownership guard is where the reasoning is written down."""
     import inspect
-    src = inspect.getsource(main)
+    src = inspect.getsource(main.deps.assert_session_owner)
     assert "get_listing_strict" in src
 
 

@@ -686,14 +686,3 @@ def from_trading_error(exc: Exception) -> list[dict]:
         # replaced them with a plainer explanation.
         issues[0]["ebay_detail"] = detail
     return issues
-
-
-def headline(issues: list[dict], step: str, status: Optional[int] = None) -> str:
-    """A one-line summary for the top of the fix panel."""
-    n = len(issues)
-    where = {"createOffer": "creating the offer",
-             "updateOffer": "updating the offer",
-             "publishOffer": "publishing",
-             "createOrReplaceInventoryItem": "saving the item"}.get(step, step or "publishing")
-    return (f"eBay stopped {where} — {n} thing{'s' if n != 1 else ''} to fix"
-            + (f" (error {status})" if status else "") + ":")

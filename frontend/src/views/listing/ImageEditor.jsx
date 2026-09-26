@@ -250,20 +250,29 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     ctx.restore();
   }, []);
 
+  // Answers whether the photo landed on the canvas. It does not when the
+  // seller has moved to another photo while this one downloaded: every open is
+  // a fresh download (the ?v= below), so photo A's bytes can arrive after
+  // photo B's -- and painted then, Save would write A's pixels into B's file.
+  // Same guard, same reason, as removeBg's.
   const load = useCallback(async () => {
     const canvas = canvasRef.current;
-    if (!canvas || !name) return;
+    if (!canvas || !name) return false;
+    const startedOn = name;
     try {
       // Same-origin so the canvas isn't tainted and toBlob() works.
       const img = await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
+      if (nameRef.current !== startedOn) return false;
       layersRef.current = layersFrom(img);
       strokesRef.current = [];
       historyRef.current = createHistory();
       syncHistory();
       redraw();
       clearOverlay();
+      return true;
     } catch (e) {
-      toast(e.message, { kind: "error" });
+      if (nameRef.current === startedOn) toast(e.message, { kind: "error" });
+      return false;
     }
   }, [sessionId, name, clearOverlay, redraw, syncHistory, toast]);
 
@@ -394,15 +403,20 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   // above); everything left here is genuinely async work against the canvas
   // and the API, so it has to stay in an effect.
   useEffect(() => {
-    if (!name) return;
+    if (!name) return undefined;
+    let left = false;
     (async () => {
-      await load();
+      // A photo left before it loaded gets neither its pixels painted nor
+      // the action it was opened for run against whatever is on the canvas.
+      const landed = await load();
+      if (left || !landed) return;
       if (initialAction === "removebg") removeBg();
       else if (initialAction === "manualcrop" || initialAction === "crop") {
         clearOverlay();
         setTool("crop");
       }
     })();
+    return () => { left = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
 

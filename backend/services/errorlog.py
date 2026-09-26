@@ -59,7 +59,7 @@ from ..redact import scrub
 # rather than a thread local because FastAPI runs async handlers on a shared
 # loop: a thread local would hand one request's id to another's error.
 #
-# `reference` is the 8 hex characters main._support_reference() shows the
+# `reference` is the 8 hex characters deps.support_reference() shows the
 # seller and writes into the log line. Reusing it as the request id is what
 # ties "the app told me a1b2c3d4" to a row in this table — the only join
 # between a complaint and a cause the app has ever had.
@@ -273,7 +273,7 @@ def note_user(user_id: str) -> None:
     """Attach the signed-in seller to the current request, if there is one.
 
     The id, never the email: the id finds the account in the console and is
-    not itself personal data the way an address is. Called from main._uid,
+    not itself personal data the way an address is. Called from deps.uid,
     the one place the id is already in hand — resolving it here instead would
     add a database read to every request, and auth.current_user now RAISES on
     a database blip, which would turn one Neon hiccup into a failing health
@@ -539,6 +539,12 @@ def install() -> None:
         return
     _installed = True
     config.log.addHandler(CaptureHandler())
+
+
+def writer_started() -> bool:
+    """Whether this process runs the writer -- the one place a shutdown flush
+    has anything to save that nothing else will."""
+    return _writer_started
 
 
 def start_writer() -> None:

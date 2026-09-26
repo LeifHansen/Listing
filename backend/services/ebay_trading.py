@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
 import math
 import re
 from typing import Any, Optional
@@ -455,9 +456,19 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element],
     detail = " ".join(x for x in extras if x)[:600]
     # Always logged in full: a rejection the app can't explain is the one thing
     # a seller can't debug from the UI, and the fly logs are where it has to be.
-    log.warning("trading: %s rejected — code=%s ack-errors=%d warnings=%d "
-                "msg=%s detail=%s", call, code or "?", len(errors),
-                len(warnings or []), headline[:200], detail[:300] or "(none)")
+    #
+    # A Verify call's refusal is logged at INFO, though. Nothing but a
+    # diagnosis asks one (ebay_account.probe_block_scope and the
+    # diagnose-block route), its refusal is the ANSWER to a question asked on
+    # purpose, and the probe logs its own conclusion at WARNING. At WARNING
+    # each dry run became an error_events row of its own — graded high, since
+    # the probe runs inside the publish's `except` and the capture handler
+    # attached that live traceback — so one account-level 240 read in the
+    # feed as a second, separate bug (09-24: x9 beside the publish's x18).
+    level = logging.INFO if call.startswith("Verify") else logging.WARNING
+    log.log(level, "trading: %s rejected — code=%s ack-errors=%d warnings=%d "
+            "msg=%s detail=%s", call, code or "?", len(errors),
+            len(warnings or []), headline[:200], detail[:300] or "(none)")
     all_codes = [c for c in (_text(e, "ErrorCode") or "" for e in errors) if c]
     # Checked before the branches below, because a call limit is not a
     # rejection of the request: nothing about the listing needs fixing, and

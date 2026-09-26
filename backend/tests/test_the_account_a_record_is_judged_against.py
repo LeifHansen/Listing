@@ -74,7 +74,7 @@ def started(monkeypatch):
                 "failed": 0}
 
     monkeypatch.setattr(main.auth, "current_user", lambda _r: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda _r: dict(CREDS))
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda _r: dict(CREDS))
     monkeypatch.setattr(main.db, "enabled", lambda: True)
     monkeypatch.setattr(main.listing_sync, "import_active", _import_active)
 
@@ -109,9 +109,9 @@ def _endable(monkeypatch, owner: str):
            "listing": {"title": "Simon Pearce Hand Blown Glass Heart",
                        "source": "ebay", "ebay_listing_id": "123456789012",
                        "ebay_account": owner}}
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.auth, "current_user", lambda _r: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda _r: dict(CREDS))
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda _r: dict(CREDS))
     monkeypatch.setattr(main.db, "get_listing", lambda _i: rec)
     monkeypatch.setattr(main.db, "upsert_listing",
                         lambda *a, **k: None)

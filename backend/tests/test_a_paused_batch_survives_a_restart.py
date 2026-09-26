@@ -145,7 +145,7 @@ def test_the_seller_can_still_answer_a_re_adopted_batch(workers, monkeypatch):
     started, ran = workers
     staging = _pile(storage.new_session_id())
     main._resume_interrupted_batches([_mirror(staging)])
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
 
     client = _client()
     resp = client.post("/api/bulk/notes/job-1",

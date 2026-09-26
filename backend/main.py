@@ -57,8 +57,7 @@ from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        ebay_trading, ebay_video, image_import, images,
                        imagesearch, jobstore,
                        listing_export, listing_merge, listing_prompt,
-                       listing_sync,
-                       messages as messages_service, metrics, notifications,
+                       listing_sync, metrics, notifications,
                        owed_refunds, preflight, pricing,
                        recommender, store_category, sync_guard, sync_merge,
                        taxonomy, tokens)
@@ -75,6 +74,8 @@ from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
 from .services import errorlog
 from .services.background import run_in_background
+from .routers import (admin as admin_routes, auth as auth_routes, deps,
+                      inbox as inbox_routes)
 
 
 @asynccontextmanager
@@ -99,12 +100,22 @@ async def _lifespan(_app: FastAPI):
     # must not hold up serving. It is a thread rather than a durable worker
     # (that is still open), but the OBLIGATION is durable now, so a process
     # that dies mid-pass leaves the remaining rows for the next one.
-    _in_background(_finish_pending_deletions, what="deletion backlog")
+    deps.in_background(_finish_pending_deletions, what="deletion backlog")
     # Money a seller is owed for AI that did not work. Same shape as the
     # deletion backlog above: the obligation outlived the process, so the next
     # one settles it.
-    _in_background(_settle_owed_refunds, what="owed refunds")
+    deps.in_background(_settle_owed_refunds, what="owed refunds")
     yield
+    # The error writer is a daemon thread, so the failures still queued when
+    # the process stops -- the last seconds before a deploy or a restart, often
+    # the ones worth reading -- died with it. errorlog.flush() drains them on
+    # the way out; bounded, because Fly gives a stopping machine seconds and a
+    # slow database must not hold up the release replacing it.
+    if errorlog.writer_started():
+        try:
+            await asyncio.wait_for(run_in_threadpool(errorlog.flush), timeout=3)
+        except Exception as exc:  # noqa: BLE001 - never block shutdown
+            log.info("errorlog: shutdown flush incomplete: %s", exc)
 
 
 # No /docs, /redoc or /openapi.json: the schema enumerates every admin and
@@ -505,7 +516,7 @@ async def _request_context(request: Request, call_next):
     the whole point, since a line logged before the context exists carries no
     reference and joins to nothing.
 
-    The id is the same 8 hex characters _support_reference() has always
+    The id is the same 8 hex characters deps.support_reference() has always
     minted, and it is now the SAME VALUE the seller is shown. Before this,
     each failure site minted its own, so the reference in a toast joined to
     exactly one log line; it now joins to every line that request emitted,
@@ -794,9 +805,9 @@ def _db_status_loop() -> None:
 
 def _warm_models() -> None:
     """Startup daemons (don't block uvicorn binding the port): warm the in-house
-    background-removal model, resolve the R2 bucket check so /api/health tells
+    background-removal model, resolve the R2 bucket check so /api/ready tells
     the truth from the first request, keep the db-status cache warm so the
-    liveness probe never blocks on Postgres, and keep the volume from filling
+    readiness read never blocks on Postgres, and keep the volume from filling
     up."""
     threading.Thread(target=images.warm, daemon=True).start()
     threading.Thread(target=objstore.probe, daemon=True).start()
@@ -812,26 +823,18 @@ def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _client_ip(request: Request) -> str:
-    """The caller's IP. Fly puts the real client in Fly-Client-IP; uvicorn
-    runs with --proxy-headers so request.client is already the forwarded
-    address, but the explicit header is the one Fly guarantees."""
-    return (request.headers.get("Fly-Client-IP")
-            or (request.client.host if request.client else "?"))
-
-
-def _rate_limit_auth(request: Request, bucket: str) -> None:
-    """429 when one client floods an auth endpoint (see backend/ratelimit)."""
-    ip = _client_ip(request)
-    if not ratelimit.check(f"{bucket}:{ip}"):
-        log.warning("auth: rate limited %s from %s", bucket, ip)
-        raise HTTPException(
-            429, "Too many attempts. Wait a few minutes and try again.")
-
-
 @app.get("/api/health")
-def health() -> dict:
+async def health() -> dict:
     """Liveness, and nothing else.
+
+    `async def`, and that is load-bearing. Fly's check hits this every 15s
+    with a 5s timeout and replaces the machine -- killing any batch in flight
+    -- when it misses. A plain `def` runs on the threadpool, where it queued
+    behind whatever held the slots: forty-odd sync handlers each waiting on
+    eBay (four sequential policy lookups at 30s apiece on a slow day), a
+    Lower-prices run revising listings one by one, cutouts queued on the
+    inference lock. Everything below is a read of module constants, so it
+    answers on the event loop and says the process is alive whenever it is.
 
     This is anonymous and unrate-limited, so what it returns is published to
     anyone who asks. It used to answer with 26 operator-diagnostic keys: the
@@ -878,377 +881,10 @@ def health() -> dict:
     }
 
 
-def _diagnostics() -> dict:
-    """Everything an operator needs to tell "not configured" apart from
-    "misconfigured". Served only from the admin route above."""
-    return {
-        "ok": True,
-        # The commit actually running. A deploy can report success while the
-        # image serving traffic is older (a poisoned builder cache has done
-        # this here before), and without this the only way to tell was to
-        # diff response shapes against git history and guess.
-        "build": config.BUILD_SHA or "unknown",
-        "anthropic_configured": config.anthropic_ready(),
-        "google_ai_configured": config.google_ai_ready(),
-        "identify_provider": config.identify_provider(),
-        "ebay_configured": config.ebay_ready(),
-        "ebay_missing": config.ebay_status()["missing"],
-        "taxonomy_configured": config.taxonomy_ready(),
-        "ebay_env": config.EBAY_ENV,
-        "ebay_oauth_ready": config.ebay_oauth_ready(),
-        "ebay_deletion_endpoint_ready": bool(config.EBAY_VERIFICATION_TOKEN),
-        # Etsy, where "configured" is only half the answer: which of Etsy's
-        # three access tiers the app is on decides how many shops may connect
-        # at all, and the roster is how the operator seats them. Counts, never
-        # the addresses — this is a diagnostics endpoint, not a place to hand
-        # out the beta's email list to anyone holding the admin token.
-        # `etsy_seats: 0` means no ceiling (Commercial Access); a roster
-        # larger than the ceiling also gets its own config_warnings() line,
-        # because the overflow is refused on Etsy's page rather than here.
-        "etsy_configured": config.etsy_oauth_ready(),
-        "etsy_access_tier": config.etsy_access_tier(),
-        "etsy_seats": config.etsy_seat_ceiling(),
-        "etsy_roster": len(config.ETSY_OWNER_EMAILS),
-        "etsy_gate_active": config.etsy_gate_active(),
-        # True when the two above disagree about who is protected: the tier
-        # still restricts who may authorize, and an empty roster leaves the
-        # gate inert — so every seller reaches Etsy's refusal page. Carries
-        # its own config_warnings() line; reported here too because this is
-        # the endpoint an operator opens when a seller says Connect is broken.
-        "etsy_access_unverified": config.etsy_access_unverified(),
-        # Photo storage: is the R2 bucket wired up — and if not, exactly which
-        # pieces are missing (four credentials sat deployed for a week while a
-        # bare `false` here hid that two more vars were expected) — plus how
-        # much room is left on the volume (a full one breaks every upload).
-        "objstore_configured": objstore.enabled(),
-        "objstore_missing": config.r2_missing(),
-        "objstore_bucket": config.R2_BUCKET if objstore.enabled() else None,
-        "objstore_url_mode": (("public" if config.r2_public_urls() else "presigned")
-                              if objstore.enabled() else None),
-        "objstore_error": objstore.last_error(),
-        "disk_free_mb": round(storage.disk_free_bytes() / 1e6),
-        "storage": "r2" if objstore.enabled() else "local",
-        # Monetization, reported like every other integration: whether metering
-        # is actually on, what's still missing before money can move, and which
-        # Stripe mode the keys are in — a test key on a production deploy
-        # accepts nothing and otherwise looks identical to a working one.
-        "tokens_enabled": config.tokens_enabled(),
-        "tokens_missing": config.tokens_missing(),
-        "stripe_live_mode": config.stripe_live_mode(),
-        # Misconfigurations that look exactly like "not configured yet": a
-        # secret set under a name one word off from the one the code reads, or
-        # an on/off flag set to something that isn't on. Every `*_missing` list
-        # above reports those two cases identically to never having set them,
-        # which is how production ran with the paid tier off and a Stripe key
-        # visibly deployed. [] means nothing adjacent was found.
-        "config_warnings": config.config_warnings(),
-        "db": db.db_status(),
-        # Erasures this deployment still owes: photos whose account is already
-        # deleted, and eBay account-deletion notices acknowledged but not yet
-        # carried out. Both are promises already made to somebody, so a number
-        # here that does not come back down is the alert. Counts only — the
-        # ids belong to people who asked to be forgotten.
-        "deletion_backlog": deletion_queue.backlog(),
-        # Refunds that did not commit and are still owed. Like the deletion
-        # backlog, a number here that does not come back down is a promise
-        # already made to somebody — in this case, their money.
-        "owed_refunds": owed_refunds.backlog(),
-    }
-
-
-def _token_matches(supplied: str, expected: str) -> bool:
-    """Constant-time equality for a header-borne token.
-
-    On bytes, not str: secrets.compare_digest raises TypeError for a str with
-    a character outside ASCII, and Starlette hands headers over as latin-1
-    text -- so one probe with a byte >= 0x80 in it was a 500 and an
-    error_events row, where a wrong token is a 401.
-    """
-    return secrets.compare_digest(supplied.encode("utf-8", "replace"),
-                                  expected.encode("utf-8", "replace"))
-
-
-def _require_admin(request: Request) -> None:
-    """Fail CLOSED: an unset ADMIN_TOKEN denies rather than admits.
-
-    An absent secret reading as "no check required" is exactly how this
-    endpoint would end up public again on a deploy that forgot to set it --
-    which is the state it is being moved out of.
-    """
-    expected = (config.ADMIN_TOKEN or "").strip()
-    supplied = (request.headers.get("x-admin-token") or "").strip()
-    if not expected or not supplied or not _token_matches(supplied, expected):
-        raise HTTPException(401, "Not authorised.")
-
-
-@app.get("/api/admin/diagnostics")
-def admin_diagnostics(request: Request) -> dict:
-    """The deployment detail /api/health used to hand out anonymously."""
-    _require_admin(request)
-    return _diagnostics()
-
-
-# --- superadmin console ------------------------------------------------------
-#
-# The operator console: cross-user reads and a handful of account actions,
-# gated by users.role rather than the shared header token above. The two
-# doors deliberately coexist: /api/admin/diagnostics keeps working with the
-# database down (curl/CI), while everything below authenticates a PERSON,
-# so every action can be written down with a name on it.
-#
-# These handlers live in THIS module on purpose. The ownership guardrail
-# (tests/test_every_scoped_route_checks_the_owner.py) AST-scans main.py and
-# nothing else — an admin route in a separate module would silently leave
-# that scan, which is exactly how the next cross-user read ships unreviewed.
-# If main.py is ever split, extend that test's MAIN/FUNCS first.
-
-def _require_superadmin(request: Request) -> dict:
-    """The signed-in superadmin, or 404. Fail CLOSED.
-
-    404 rather than 401/403, on purpose: (a) it does not confirm an admin
-    surface exists to whoever is probing for one; (b) lib/api.js treats any
-    401 as "session expired" and signs the caller out client-side — the
-    wrong outcome for a curious logged-in seller who typed /api/admin into
-    devtools. A database outage propagates as StorageUnavailable → 503, like
-    every other authenticated route: "cannot check" is never "not an admin".
-    The role is re-read from the user row on every request (current_user's
-    per-request read), so revoking it takes effect immediately — there is no
-    role claim inside the 30-day JWT to wait out.
-    """
-    user = auth.current_user(request)
-    if not user or (user.get("role") or "") != "superadmin":
-        raise HTTPException(404, "Not found")
-    return user
-
-
-def _audit_admin(admin: dict, request: Request, action: str,
-                 target_type: str = "", target_id: str = "",
-                 data: Optional[dict] = None) -> str:
-    """Write the audit row for an admin action, BEFORE the action runs.
-
-    Raises (→ 503) when it cannot: an admin action that cannot be written
-    down does not run. Returns the row id — token grants carry it in their
-    ledger `ref`, so the two trails reconcile mechanically.
-    """
-    return db.admin_audit(admin, action, target_type=target_type,
-                          target_id=target_id, ip=_client_ip(request),
-                          data=data)
-
-
-def _admin_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:
-    """The same opaque "<stamp>|<id>" token _cursor_for mints, for admin
-    pages keyed on their own timestamp columns. None when the row cannot
-    name a place in the order — the page then honestly offers no button."""
-    if not stamp or not row_id:
-        return None
-    raw = f"{stamp}|{row_id}"
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-
-
-@app.get("/api/admin/system")
-def admin_system(request: Request) -> dict:
-    """_diagnostics(), for the console's System tab. Same payload as
-    /api/admin/diagnostics behind the session gate instead of the header."""
-    _require_superadmin(request)
-    return _diagnostics()
-
-
-@app.get("/api/admin/overview")
-def admin_overview(request: Request, days: int = 30) -> dict:
-    """The platform KPIs plus the two obligation backlogs. Reads raise
-    rather than answering zeros — the console renders "couldn't check"."""
-    _require_superadmin(request)
-    if days not in (7, 30, 90):
-        days = 30
-    kpis = db.admin_platform_kpis(days)
-    kpis["deletion_backlog"] = deletion_queue.backlog()
-    kpis["owed_refunds"] = owed_refunds.backlog()
-    return kpis
-
-
-@app.get("/api/admin/users")
-def admin_users(request: Request, q: str = "", before: str = "",
-                limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 100))
-    cursor = _cursor_from(before) if before else None
-    # One row more than will be returned, so the answer can say whether it
-    # is the whole list — same probe-row trade as /api/listings.
-    rows = db.admin_list_users(limit=limit + 1, before=cursor, q=q)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    out = {"users": rows,
-           "rollups": db.admin_user_rollups([u["id"] for u in rows]),
-           "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                         rows[-1].get("id"))
-                           if truncated and rows else None)}
-    try:
-        out["total"] = db.admin_count_users()
-    except errors.StorageUnavailable:
-        # The page is honest without it; a total must never be invented.
-        pass
-    return out
-
-
-@app.get("/api/admin/users/{user_id}")
-def admin_user_detail(user_id: str, request: Request) -> dict:
-    _require_superadmin(request)
-    detail = db.admin_get_user(user_id)
-    if detail is None:
-        raise HTTPException(404, "No such account.")
-    return {"user": detail}
-
-
-# The most an admin can hand out in one grant. Not a product limit — a
-# typo guard: 1000000 where 1000 was meant is a real balance someone
-# spends, and there is no undo that claws back what was already used.
-_ADMIN_GRANT_CAP = 100_000
-
-
-@app.post("/api/admin/users/{user_id}/grant-tokens")
-def admin_grant_tokens(user_id: str, request: Request,
-                       payload: Optional[dict] = None) -> dict:
-    """Credit an account (a support goodwill, a refund made right). The
-    ledger row's ref carries the audit row's id, and token_credit's unique
-    ref makes a retried grant a no-op rather than a double credit."""
-    admin = _require_superadmin(request)
-    body = payload or {}
-    try:
-        amount = int(body.get("tokens"))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "How many tokens? Send a whole number.")
-    if not 1 <= amount <= _ADMIN_GRANT_CAP:
-        raise HTTPException(
-            400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
-    note = str(payload.get("note") or "").strip()[:200]
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    audit_id = _audit_admin(admin, request, "grant_tokens", "user", user_id,
-                            data={"tokens": amount, "note": note})
-    res = db.token_credit(user_id, amount, ref=f"admin:{audit_id}",
-                          kind="grant",
-                          note=note or f"granted by {admin['email']}")
-    if res is None:
-        raise HTTPException(
-            503, "The grant was recorded but could not be applied — it was "
-                 "NOT credited. Try again in a moment.")
-    return {"ok": True, "granted": amount,
-            "already": bool(res.get("already"))}
-
-
-@app.post("/api/admin/users/{user_id}/revoke-sessions")
-def admin_revoke_sessions(user_id: str, request: Request) -> dict:
-    """Force-sign-out one account everywhere (a stolen token, a support
-    request). db.revoke_sessions is strict, so success here means the write
-    landed."""
-    admin = _require_superadmin(request)
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    _audit_admin(admin, request, "revoke_sessions", "user", user_id)
-    db.revoke_sessions(user_id)
-    return {"ok": True}
-
-
-@app.post("/api/admin/users/{user_id}/disable")
-def admin_set_disabled(user_id: str, request: Request,
-                       payload: Optional[dict] = None) -> dict:
-    """Lock an account out ({"disabled": true}) or back in (false).
-
-    Two refusals: your own account (locking yourself out of the console
-    that unlocks accounts), and another superadmin (demote them with
-    scripts/grant_superadmin.py --revoke first, so removing an operator is
-    a deliberate, audited, out-of-band step rather than a console click).
-    Disabling also revokes sessions: the lockout must reach tokens that are
-    already minted, not just the next login.
-    """
-    admin = _require_superadmin(request)
-    body = payload or {}
-    disabled = body.get("disabled")
-    if not isinstance(disabled, bool):
-        raise HTTPException(400, 'Send {"disabled": true} or false.')
-    if user_id == admin["id"]:
-        raise HTTPException(400, "You can't disable your own account.")
-    target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
-    if not target:
-        raise HTTPException(404, "No such account.")
-    if (target.get("role") or "") == "superadmin":
-        raise HTTPException(
-            400, "That account is a superadmin — revoke its role first "
-                 "(scripts/grant_superadmin.py --revoke).")
-    _audit_admin(admin, request,
-                 "disable_account" if disabled else "enable_account",
-                 "user", user_id)
-    updated = db.set_user_disabled(user_id, disabled)
-    if updated is None:
-        raise HTTPException(404, "No such account.")
-    if disabled:
-        db.revoke_sessions(user_id)
-    return {"ok": True, "disabled_at": updated.get("disabled_at")}
-
-
-@app.get("/api/admin/listings")
-def admin_listings(request: Request, q: str = "", status: str = "",
-                   user_id: str = "", before: str = "",
-                   limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 100))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
-                                  status=status, user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"listings": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("updated_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/listings/{listing_id}")
-def admin_get_listing(listing_id: str, request: Request) -> dict:
-    """One listing in full, whoever owns it — the read-only detail behind a
-    row in the console's cross-user browse. See the ownership test's EXEMPT
-    entry: cross-user is the point here, and the gate above is the check."""
-    _require_superadmin(request)
-    rec = db.get_listing_strict(listing_id)
-    if rec is db.UNAVAILABLE:
-        raise HTTPException(
-            503, "Couldn't read that listing just now. Try again in a "
-                 "moment.")
-    if rec is None:
-        raise HTTPException(404, "Listing not found")
-    return rec
-
-
-@app.get("/api/admin/ledger")
-def admin_ledger_view(request: Request, kind: str = "", user_id: str = "",
-                      before: str = "", limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
-                           user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/compliance")
-def admin_compliance(request: Request) -> dict:
-    """The two obligation queues. The counts raise on a read failure (a zero
-    here is a claim that nothing is owed), so an outage 503s the tab rather
-    than rendering 'Nothing owed' over queue rows nobody could read."""
-    _require_superadmin(request)
-    return {
-        "deletion_backlog": db.count_pending_deletion_notices(),
-        "media_purge_backlog": db.count_pending_media_purges(),
-        "deletion_notices": db.pending_deletion_notices(100),
-        "media_purges": db.pending_media_purges(100),
-    }
+# The operator console and the machine doors (/api/admin, /api/ops) live in
+# routers/admin.py. Included here, where they were defined, so they keep
+# their place in the route order.
+app.include_router(admin_routes.router)
 
 
 @app.post("/api/admin/compliance/run")
@@ -1256,124 +892,16 @@ def admin_run_compliance(request: Request) -> dict:
     """Kick the recovery passes now instead of waiting for the next boot —
     the button an operator presses when the backlog number is not coming
     down. Inline rather than backgrounded so the response can say what
-    actually happened."""
-    admin = _require_superadmin(request)
-    _audit_admin(admin, request, "run_compliance_queue", "system")
+    actually happened.
+
+    The one console route not in routers/admin.py: the passes are this
+    module's own, run at every boot, and they read _purge_session_images,
+    which tests patch here."""
+    admin = deps.require_superadmin(request)
+    deps.audit_admin(admin, request, "run_compliance_queue", "system")
     finished = _finish_pending_deletions()
     refunds = _settle_owed_refunds()
     return {"ok": True, "deletions": finished, "refunds_settled": refunds}
-
-
-def _require_error_feed(request: Request) -> None:
-    """The triage job's door. Fails CLOSED, like _require_admin.
-
-    A twin of _require_admin rather than a reuse of it, reading its own
-    ERROR_FEED_TOKEN. The distinction is the point: ADMIN_TOKEN also opens
-    /api/admin/diagnostics, which reports raw database and object-store
-    exception text — the Neon host, the role, the R2 account. A scheduled job
-    that reads which bugs are open has no business holding that, and a
-    credential in CI is the one most likely to leak.
-    """
-    expected = (config.ERROR_FEED_TOKEN or "").strip()
-    supplied = (request.headers.get("x-error-feed-token") or "").strip()
-    if not expected or not supplied or not _token_matches(supplied, expected):
-        raise HTTPException(401, "Not authorised.")
-
-
-def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
-                  min_severity: str = "", include_resolved: bool = True
-                  ) -> dict:
-    """The distinct failures, newest-seen first. Shared by both doors below.
-
-    `sink` rides along because a queue that is dropping rows would otherwise
-    look exactly like a quiet day — the most dangerous thing a monitor can
-    do. It is the lesson check_health.py's docstring records, one layer down:
-    an alarm that cannot tell "nothing happened" from "I could not see" is
-    worse than no alarm.
-    """
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.error_events_list(limit=limit + 1, before=cursor,
-                                since_hours=since_hours,
-                                min_severity=min_severity,
-                                include_resolved=include_resolved)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"errors": rows,
-            "sink": errorlog.stats(),
-            "next_cursor": (_admin_cursor(rows[-1].get("last_seen"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
-
-
-@app.get("/api/admin/errors")
-def admin_errors(request: Request, before: str = "", limit: int = 50,
-                 since_hours: int = 0, severity: str = "",
-                 include_resolved: bool = True) -> dict:
-    """The console's Errors tab. Session-gated, like the rest of the console."""
-    _require_superadmin(request)
-    return _error_report(before=before, limit=limit, since_hours=since_hours,
-                         min_severity=severity,
-                         include_resolved=include_resolved)
-
-
-@app.get("/api/ops/error-feed")
-def ops_error_feed(request: Request, limit: int = 50, since_hours: int = 36,
-                   severity: str = "") -> dict:
-    """The same report, for the daily triage job. Token-gated.
-
-    Two doors onto one payload, exactly as /api/admin/system and
-    /api/admin/diagnostics already coexist: the session door authenticates a
-    PERSON, which is right for the console and wrong for a robot that would
-    have to hold a human's long-lived session to use it.
-
-    Under /api/ops rather than /api/admin, and that is not cosmetic.
-    test_every_console_route_is_gated walks app.routes and requires EVERY
-    /api/admin/ path to answer 404 to a non-superadmin — "the next admin route
-    is born tested". It carries exactly one exception, /api/admin/diagnostics,
-    described in its own docstring as the older door. Adding two more would
-    turn a guardrail that cannot be forgotten into a list somebody maintains,
-    which is how the next unreviewed cross-user read ships. Machine doors get
-    their own prefix instead, and the console's guarantee stays absolute.
-
-    Defaults to a 36-hour window rather than 24: the job runs on a daily cron,
-    and a calendar-day read drops anything that happened in the seam between
-    one run and the next. Overlap costs nothing, because the fingerprint
-    dedupes.
-    """
-    _require_error_feed(request)
-    return _error_report(limit=limit, since_hours=since_hours,
-                         min_severity=severity, include_resolved=False)
-
-
-@app.post("/api/ops/errors/{fingerprint}/fixed")
-def ops_error_fixed(fingerprint: str, request: Request,
-                    payload: Optional[dict] = None) -> dict:
-    """Mark a failure as having a fix proposed, so the job stops proposing one.
-
-    Token-gated, and under /api/ops for the reason the feed above gives. It
-    is never cleared automatically — if the bug returns, `last_seen` moves and
-    the row surfaces again on its own, which is a fact rather than a guess
-    about whether the fix worked.
-    """
-    _require_error_feed(request)
-    pr = str((payload or {}).get("pr") or "")[:200]
-    return {"ok": db.mark_error_fixed(fingerprint, pr)}
-
-
-@app.get("/api/admin/audit")
-def admin_audit_view(request: Request, before: str = "",
-                     limit: int = 50) -> dict:
-    _require_superadmin(request)
-    limit = max(1, min(limit, 200))
-    cursor = _cursor_from(before) if before else None
-    rows = db.admin_audit_list(limit=limit + 1, before=cursor)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (_admin_cursor(rows[-1].get("created_at"),
-                                          rows[-1].get("id"))
-                            if truncated and rows else None)}
 
 
 # Disk below this and photo work will start failing mid-upload. Reporting it
@@ -1418,7 +946,7 @@ async def client_error(request: Request) -> dict:
     except (TypeError, ValueError):
         return ok
 
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"clienterr:{ip}",
                            max_attempts=config.CLIENT_ERROR_MAX_PER_WINDOW):
         return ok
@@ -2408,17 +1936,6 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
     return added
 
 
-def _uid(request: Request):
-    user = auth.current_user(request)
-    # The one choke point where the seller's id is already resolved. Doing
-    # this in the request middleware instead would add a database read to
-    # every asset fetch — and auth.current_user RAISES StorageUnavailable on
-    # a database blip, which would turn one Neon hiccup into a failing
-    # liveness probe on the only machine.
-    errorlog.note_user(user["id"] if user else "")
-    return user["id"] if user else None
-
-
 # --- AI token gate (monetization) ------------------------------------------
 # Every AI endpoint charges up front through these and refunds on failure
 # ("only pay for AI that worked"). When billing is off (no TOKENS_ENABLED /
@@ -2439,38 +1956,11 @@ def _charge_ai(request: Request, feature: str, units: int = 1):
     login (the logged-out flows keep working wherever billing is off)."""
     if not tokens.enabled():
         return None
-    uid = _uid(request)
+    uid = deps.uid(request)
     if uid is None:
         raise HTTPException(
             401, "Log in to use AI features — your token balance is per account.")
     return _charge_uid(uid, feature, units)
-
-
-def _assert_session_owner(session_id: str, request: Request) -> None:
-    """404 when this session's saved listing belongs to a DIFFERENT user.
-    Session ids appear in media URLs and can leak, so possession of an id
-    must not grant write access. Unsaved or unowned (anonymous) sessions
-    pass — the app supports logged-out flows.
-
-    Fails CLOSED on a database outage. This check is the only thing standing
-    between a leaked session id and write access to someone else's photos,
-    and it answers from the database — so if a read failure were treated like
-    "no such listing", one Neon blip would quietly disable the guard on every
-    session-scoped endpoint at once, while the rest of the app (on-disk
-    sessions, /media) kept serving. A brief 503 is the right trade.
-    """
-    rec = db.get_listing_strict(session_id)
-    if rec is db.UNAVAILABLE:
-        raise HTTPException(
-            503, "Can't verify who this listing belongs to right now — "
-                 "please try again in a moment.")
-    if rec and rec.get("user_id") and rec["user_id"] != _uid(request):
-        raise HTTPException(404, "Listing not found")
-
-
-# Moved to services/background.py so marketplace providers share it; the
-# local name keeps every existing call site unchanged.
-_in_background = run_in_background
 
 
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
@@ -2567,8 +2057,8 @@ def _photos_for_fill(session_id: str, listing: Listing,
         return paths
     # Straight back to the bucket, or the next offload pass frees a local copy
     # it never uploaded and the download repeats on every fill.
-    _in_background(objstore.upload_optimized, session_id, opt_dir, redone,
-                   what="re-imported photo R2 push")
+    deps.in_background(objstore.upload_optimized, session_id, opt_dir, redone,
+                       what="re-imported photo R2 push")
     # Onto the listing being filled, for the same reason adoption writes them:
     # the save at the end of the fill would otherwise put the stale names back.
     listing.images = redone
@@ -2652,88 +2142,11 @@ def _settle_owed_refunds() -> int:
 
 
 # --- auth ------------------------------------------------------------------
+#
+# Sign up, sign in, sign out: routers/auth.py, included where the routes
+# were defined so they keep their place in the route order.
 
-@app.post("/api/auth/signup")
-def auth_signup(request: Request, response: Response, payload: dict) -> dict:
-    _rate_limit_auth(request, "signup")
-    email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", ""))
-    if not email or "@" not in email:
-        raise HTTPException(400, "A valid email is required")
-    if len(password) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters")
-    if not db.enabled():
-        raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
-    user = auth.signup(email, password)
-    if user is db.EMAIL_TAKEN:
-        raise HTTPException(409, "An account with that email already exists")
-    if not user:
-        raise HTTPException(
-            503, "Account service is temporarily unavailable (database error). "
-                 "Please try again shortly.")
-    auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
-    return {"user": user, "token": auth.make_token(user["id"])}
-
-
-@app.post("/api/auth/login")
-def auth_login(request: Request, response: Response, payload: dict) -> dict:
-    _rate_limit_auth(request, "login")
-    email = str(payload.get("email", "")).strip().lower()
-    password = str(payload.get("password", ""))
-    if not db.enabled():
-        raise HTTPException(400, "Accounts require a database (set DATABASE_URL).")
-    # A database that cannot be reached raises StorageUnavailable out of
-    # auth.login, and the central handler answers 503. That used to be read
-    # off the status CACHE here instead, which is refreshed every ten
-    # seconds: for the gap after an outage began a right password was
-    # "wrong", and for the gap after it ended a wrong one was "the database
-    # is down". None from auth.login now means exactly refused.
-    user = auth.login(email, password)
-    if not user:
-        raise HTTPException(401, "Invalid email or password")
-    auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
-    return {"user": user, "token": auth.make_token(user["id"])}
-
-
-@app.post("/api/auth/logout")
-def auth_logout(response: Response) -> dict:
-    """Sign out THIS browser. The token itself stays valid until it expires —
-    see /api/auth/logout-everywhere for the one that cancels it."""
-    auth.clear_session_cookie(response)
-    return {"ok": True}
-
-
-@app.post("/api/auth/logout-everywhere")
-def auth_logout_everywhere(request: Request, response: Response) -> dict:
-    """Cancel every session token this account has, including this one.
-
-    Clearing the cookie ends nothing for anyone else holding a copy of the
-    token: it is self-contained and good for 30 days. A shared or borrowed
-    device, a browser profile left signed in, a token out of a backup or a
-    log — all of them kept working, and the seller had no way to end it. This
-    is that way.
-
-    It raises rather than reporting a failure as success (db.revoke_sessions
-    is strict). Telling someone their other sessions are gone when the write
-    never landed is the worst outcome available: they stop looking, and
-    whoever holds the token keeps it.
-    """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
-    db.revoke_sessions(user["id"])
-    # This browser too. Anything else would leave the seller looking at a
-    # screen that says everything is signed out while it demonstrably is not.
-    auth.clear_session_cookie(response)
-    log.info("sessions revoked: user=%s", user["id"])
-    return {"ok": True,
-            "message": "Signed out everywhere. Sign in again to keep using "
-                       "Thryft Shop on this device."}
-
-
-@app.get("/api/auth/me")
-def auth_me(request: Request) -> dict:
-    return {"user": auth.current_user(request)}
+app.include_router(auth_routes.router)
 
 
 # --- AI tokens (monetization) ----------------------------------------------
@@ -2743,12 +2156,12 @@ def tokens_status(request: Request) -> dict:
     """Balance, feature costs, packs, and the next free reset — everything the
     balance chip and the buy dialog render. Anonymous callers get the catalog
     without a balance."""
-    return tokens.status(_uid(request))
+    return tokens.status(deps.uid(request))
 
 
 @app.get("/api/tokens/history")
 def tokens_history(request: Request) -> dict:
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to see your token history.")
     return {"entries": db.token_history(uid)}
@@ -2759,7 +2172,7 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
     """Start a Stripe Checkout for a token pack; returns the payment URL."""
     if not tokens.enabled():
         raise HTTPException(400, "Token billing isn't enabled on this server.")
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to buy tokens.")
     pack_id = str(payload.get("pack_id", "")).strip()
@@ -2773,7 +2186,7 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
         # "Invalid API Key provided: sk_live_51H4x***". The last of those puts
         # a fragment of a live secret in a toast, on the screen where someone
         # is trying to give us money.
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("tokens: checkout failed for %s [%s]: %s",
                     uid, reference, exc)
         # The reference goes IN the sentence rather than beside it: the
@@ -2794,7 +2207,7 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
 def tokens_confirm(request: Request, session_id: str = "") -> dict:
     """Post-redirect fallback credit: verifies the Checkout session with
     Stripe and credits idempotently (the webhook may have won the race)."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to confirm your purchase.")
     try:
@@ -2802,7 +2215,7 @@ def tokens_confirm(request: Request, session_id: str = "") -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("tokens: confirm failed for %s [%s]: %s",
                     uid, reference, exc)
         # The opposite reassurance from checkout above: here the money may
@@ -2902,7 +2315,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
 
     # Password-guessing here is the same attack as on /login, with a worse
     # payoff for the victim — throttle it the same way.
-    _rate_limit_auth(request, "account-delete")
+    deps.rate_limit_auth(request, "account-delete")
 
     # Re-authenticate: a leaked session token must not be enough to erase an
     # account. (A password is always set — signup is the only way in.)
@@ -2932,7 +2345,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     # behind costs nothing here. If this thread dies part-way, the rows it did
     # not reach are still owed and the next pass finds them — which is the
     # whole difference from what this used to be.
-    _in_background(_finish_pending_deletions, what="account-delete cleanup")
+    deps.in_background(_finish_pending_deletions, what="account-delete cleanup")
 
     auth.clear_session_cookie(response)
     log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))
@@ -2943,11 +2356,6 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
 # The token cache, per-user creds bundle, promotion helpers and the whole
 # publish pipeline moved to marketplaces/ebay_provider.py; these same-named
 # wrappers keep every existing /api/ebay/* route below unchanged.
-
-
-def _ebay_creds_for(request: Request):
-    """Build live eBay creds for the logged-in user, or None if not connected."""
-    return ebay_provider.creds_for(_uid(request))
 
 
 EBAY_NONCE_COOKIE = "ebay_oauth_nonce"
@@ -2961,7 +2369,7 @@ def connect_ticket(request: Request) -> dict:
     flow from the native shell, where the connect NAVIGATION can carry
     neither the Bearer header nor the cross-origin session cookie. Scoped so
     a leaked URL is useless for anything but opening a connect screen."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     return {"ticket": auth.make_ticket(uid, "connect")}
@@ -2970,7 +2378,7 @@ def connect_ticket(request: Request) -> dict:
 def _connect_uid(request: Request, ticket: str) -> Optional[str]:
     """Who is starting this connect flow: the session (web) or a ticket
     (native shell's full-page navigation)."""
-    return _uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
+    return deps.uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
 
 
 def _mark_native_flow(resp, request: Request, native: str) -> None:
@@ -3242,7 +2650,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
 
 @app.get("/api/ebay/status")
 def ebay_status(request: Request) -> dict:
-    uid = _uid(request)
+    uid = deps.uid(request)
     acct = db.get_ebay_account(uid) if uid else None
     connected = bool(acct and acct.get("refresh_token"))
     # Which server-side OAuth vars are absent (names only, never values) — so
@@ -3308,7 +2716,7 @@ def release_foreign_listings(request: Request,
     items is still the one connected. Publishes stamp the owner now, so this
     legacy pool only ever shrinks.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     include_unowned = bool((payload or {}).get("include_unowned"))
@@ -3356,11 +2764,11 @@ def get_ebay_policies(request: Request) -> dict:
     """The connected seller's eBay business policies + which ones are set as
     this account's defaults. These are eBay's 'templates' for shipping,
     payment, and returns; a listing's offer references them."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first to load your policies.")
     lists = ebay_auth.list_business_policies(creds["access_token"])
-    acct = db.get_ebay_account(_uid(request)) or {}
+    acct = db.get_ebay_account(deps.uid(request)) or {}
     return {
         "policies": lists,
         "selected": {
@@ -3384,11 +2792,11 @@ def get_store_categories(request: Request, refresh: bool = False) -> dict:
     itself; or we could not ask eBay just now — which is not evidence of
     either, and says so instead of quietly reporting an empty store.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first to load your store categories.")
     try:
-        cats = _store_categories(_uid(request), creds["access_token"], refresh)
+        cats = _store_categories(deps.uid(request), creds["access_token"], refresh)
     except ebay_trading.NoStore:
         return {"store": False, "checked": True, "categories": []}
     except ebay_trading.TradingError as exc:
@@ -3458,7 +2866,7 @@ def ebay_policy_preview(service_code: str = "",
 def ensure_policy(request: Request, payload: dict) -> dict:
     """Find — or create — a fulfillment policy for any catalog shipping
     service, and make it the account default if none is set yet."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     svc = ebay_auth.service_by_code(str(payload.get("service_code", "")))
@@ -3510,7 +2918,7 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     are saved as the account defaults only where none is set: a seller who
     deliberately chose a policy keeps it.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     # Before the account is read and before anything is saved: an unreviewed
@@ -3548,7 +2956,7 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
             # of silently getting a duplicate.
             detail = getattr(exc, "description", "") or str(exc)
             log.warning("ensure-all-policies: %s failed for uid=%s: %s",
-                        kind, _uid(request), detail)
+                        kind, deps.uid(request), detail)
             out["errors"][kind] = detail[:300]
             continue
         out["policies"][kind] = pol
@@ -3577,7 +2985,7 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
 
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
-    return ebay_provider.preflight_issues(_uid(request), listing, mode)
+    return ebay_provider.preflight_issues(deps.uid(request), listing, mode)
 
 
 @app.post("/api/publish-preflight")
@@ -3601,7 +3009,7 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     others = [k for k in targets if k != "ebay"]
     named = [(k, marketplaces.get(k)) for k in others]
     named = [(k, p) for k, p in named if p is not None]
-    uid = (await run_in_threadpool(_uid, request)) if named else None
+    uid = (await run_in_threadpool(deps.uid, request)) if named else None
     # Every marketplace's checklist is read-only HTTP against that
     # marketplace, so run them concurrently: preflight costs the slowest
     # checklist rather than the sum of all of them.
@@ -3639,13 +3047,13 @@ def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
     Everything eBay said comes back verbatim under `ebay`, so the answer can
     be read here, quoted to eBay Customer Service, or pasted into a bug report.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     session_id, listing = req.session_id, req.listing
     out: dict = {"env": config.EBAY_ENV,
                  "ebay_username": creds.get("ebay_username") or "",
@@ -3722,7 +3130,7 @@ def ebay_opt_in_policies(request: Request) -> dict:
     ready". The response says which, because promising the second and
     delivering the first is worse than not offering the button.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds or not creds.get("access_token"):
         raise HTTPException(400, "Connect eBay first.")
     token = creds["access_token"]
@@ -3734,13 +3142,13 @@ def ebay_opt_in_policies(request: Request) -> dict:
     try:
         ebay_auth.opt_in_to_program(token, ebay_auth.SELLING_POLICY_MANAGEMENT)
     except ebay_auth.AccountApiError as exc:
-        log.warning("ebay opt-in refused for uid=%s: %s | %s", _uid(request),
+        log.warning("ebay opt-in refused for uid=%s: %s | %s", deps.uid(request),
                     exc, exc.description)
         raise HTTPException(
             502, "eBay wouldn't switch business policies on for this account. "
                  "You can turn them on directly in eBay: Seller Hub → Account "
                  "→ Business policies.") from exc
-    log.info("ebay: business-policy opt-in requested for uid=%s", _uid(request))
+    log.info("ebay: business-policy opt-in requested for uid=%s", deps.uid(request))
     return {"ok": True, "already": False, "pending": True,
             "message": "Asked eBay to switch business policies on. eBay can "
                        "take up to 24 hours, after which your shipping, "
@@ -3753,7 +3161,7 @@ def ebay_account_overview(request: Request) -> dict:
     business policies (with the current defaults), ship-from locations, opted-in
     programs, and managed-payments status. Best-effort; {connected: false} when
     eBay isn't linked."""
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds or not creds.get("access_token"):
         return {"connected": False}
     try:
@@ -3761,7 +3169,7 @@ def ebay_account_overview(request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001 - never fail the page
         log.warning("account-overview failed: %s", exc)
         ov = {}
-    acct = db.get_ebay_account(_uid(request)) or {}
+    acct = db.get_ebay_account(deps.uid(request)) or {}
     ov["connected"] = True
     ov["account"] = {
         "username": acct.get("ebay_username", ""),
@@ -3782,7 +3190,7 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
     """Save the account's default shipping/payment/return policy selections and
     (optionally) a ship-from ZIP, which we use to create the eBay inventory
     location that publishing requires."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     fields = {
@@ -3799,7 +3207,7 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         # for having emptied a text box.
         fields["ship_from_postal"] = ""
     elif postal:
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         if not creds:
             raise HTTPException(400, "Connect eBay first to set a ship-from location.")
         try:
@@ -3877,14 +3285,14 @@ def _owned_knowledge(record_id: str, uid: str) -> dict:
 @app.get("/api/experts")
 def list_experts(request: Request) -> dict:
     """The experts a reference can be filed under."""
-    _uid(request)
+    deps.uid(request)
     return {"experts": [{"name": name} for name in experts.names()]}
 
 
 @app.get("/api/expert-knowledge")
 def list_expert_knowledge(request: Request, expert: str = "") -> dict:
     """This seller's references, plus the globals they inherit (read-only)."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Sign in to manage references.")
     rows = db.expert_knowledge_list(uid, expert=_known_expert(expert))
@@ -3902,7 +3310,7 @@ def add_expert_knowledge(request: Request, payload: dict) -> dict:
     settings screen failing forever, and refusing it here is the only moment
     the person who typed it is still looking.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Sign in to manage references.")
     expert = _known_expert(payload.get("expert"))
@@ -3940,9 +3348,9 @@ def add_expert_knowledge(request: Request, payload: dict) -> dict:
             400, f"You can save {KNOWLEDGE_PER_ACCOUNT} references per expert. "
                  f"Remove one first.")
     if scope == "global":
-        _audit_admin(user, request, "add_global_reference",
-                     target_type="expert", target_id=expert,
-                     data={"url": safe_url[:300]})
+        deps.audit_admin(user, request, "add_global_reference",
+                         target_type="expert", target_id=expert,
+                         data={"url": safe_url[:300]})
 
     record_id = db.expert_knowledge_add(expert, safe_url, note, scope=scope,
                                         account_id=uid, added_by=uid)
@@ -3958,7 +3366,7 @@ def update_expert_knowledge(request: Request, record_id: str,
                             payload: dict) -> dict:
     """Turn a reference off, or reword the note. The URL is not editable —
     a changed URL is a different reference and gets a fresh fetch."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     _owned_knowledge(record_id, uid)
     changes: dict = {}
     if "enabled" in payload:
@@ -3977,7 +3385,7 @@ def update_expert_knowledge(request: Request, record_id: str,
 
 @app.delete("/api/expert-knowledge/{record_id}")
 def delete_expert_knowledge(request: Request, record_id: str) -> dict:
-    uid = _uid(request)
+    uid = deps.uid(request)
     _owned_knowledge(record_id, uid)
     db.expert_knowledge_delete(record_id)
     return {"ok": True}
@@ -3987,9 +3395,9 @@ def delete_expert_knowledge(request: Request, record_id: str) -> dict:
 def refresh_expert_knowledge(request: Request, record_id: str) -> dict:
     """Read the page again. Rate limited: it is an outbound fetch somebody
     else pays for."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     _owned_knowledge(record_id, uid)
-    if not ratelimit.check(f"reference:{_client_ip(request)}"):
+    if not ratelimit.check(f"reference:{deps.client_ip(request)}"):
         raise HTTPException(429, "Too many refreshes. Try again in a few "
                                  "minutes.")
     run_in_background(_distill_reference_row, record_id)
@@ -4151,7 +3559,7 @@ def get_profile(request: Request) -> dict:
 @app.post("/api/profile")
 def save_profile(request: Request, payload: dict) -> dict:
     """Save profile customizations (currently: display name)."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     display_name = str(payload.get("display_name", "")).strip()[:80]
@@ -4203,7 +3611,7 @@ _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 @app.get("/api/prefs")
 def get_prefs(request: Request) -> dict:
     """The user's new-listing defaults (weight/dims/quantity/condition)."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     return {"prefs": db.get_prefs(uid)}
@@ -4213,7 +3621,7 @@ def get_prefs(request: Request) -> dict:
 def save_prefs(request: Request, payload: dict) -> dict:
     """Save new-listing defaults. Only known fields are stored, clamped to
     sane ranges; they pre-fill every future AI draft."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     clean: dict = {}
@@ -4343,7 +3751,7 @@ def _clean_listing_views(raw: object) -> list:
 @app.get("/api/listing-views")
 def listing_views(request: Request) -> dict:
     """The seller's saved listing views."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     # Strict: this screen REPORTS what is saved, and `[]` from a failed read
@@ -4360,7 +3768,7 @@ def put_listing_views(request: Request, payload: dict) -> dict:
     short list the client already holds, and a per-view endpoint would need
     its own merge rules for a race that a single write does not have.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     views = _clean_listing_views((payload or {}).get("views"))
@@ -4550,7 +3958,7 @@ ART_LOOKUP = os.getenv("ART_LOOKUP", "auto").strip().lower() or "auto"
 # Thin wrappers rather than call-site edits: `_artwork_category` and
 # `_is_artwork` are what four call sites below and two test files name, and
 # keeping the local name is this file's established idiom for a body that has
-# moved (see the note above _in_background).
+# moved (see the note above _auto_promote_enabled).
 def _artwork_category(listing: Listing) -> bool:
     return art_match.category_is_art(listing)
 
@@ -4877,7 +4285,6 @@ def _apply_art_markers(listing: Listing, found: dict, artist: str,
 # come back in the filtered search a buyer is actually using.
 _FRAMING_ASPECT = "Framing"
 _FRAME_MATERIAL_ASPECT = "Frame Material"
-_FEATURES_ASPECT = "Features"
 
 # mount -> the word eBay's Framing aspect takes. Not every mount has one:
 # rolled, shrink-wrapped and loose sheets are all "Unframed", and a stretched
@@ -5473,20 +4880,27 @@ def _apply_listing_defaults(listing: Listing, uid: Optional[str],
 def sync_profile_from_ebay(request: Request) -> dict:
     """Auto-pull profile info from the connected eBay account: identity
     (username/email), business policies, and inventory location."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
     access = creds["access_token"]
     fields: dict = {}
     try:
         ident = ebay_auth.identity_display(ebay_auth.fetch_user_identity(access))
-        fields["ebay_username"] = ident["username"]
-        fields["ebay_email"] = ident["email"]
-        if ident.get("user_id"):
-            fields["ebay_user_id"] = ident["user_id"]
+        # Only what eBay actually told us -- the connect callback's rule, for
+        # its reason: identity_display answers "" for anything the response
+        # left out (the email needs its own scope and is usually absent), and
+        # "" is "we don't know", not a name. Written anyway, pressing "Sync
+        # from eBay" erased a username and email the app already had, and a
+        # blank username makes listing_sync.belongs_to scope nothing.
+        for field, value in (("ebay_username", ident["username"]),
+                             ("ebay_email", ident["email"]),
+                             ("ebay_user_id", ident.get("user_id"))):
+            if value:
+                fields[field] = value
     except Exception as exc:  # noqa: BLE001 - identity scope may be missing
         log.info("profile sync: identity fetch failed for %s: %s", uid, exc)
     # Only fill policy/location gaps — never overwrite explicit selections.
@@ -5508,7 +4922,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
 def ebay_disconnect(request: Request) -> dict:
     """Unlink the current user's eBay account so they can connect a different
     one (or the correct one, if the wrong account got linked)."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     # Keep saved policy/location prefs so reconnecting the same account restores
@@ -5519,25 +4933,6 @@ def ebay_disconnect(request: Request) -> dict:
         raise HTTPException(503, "Couldn't disconnect eBay just now — nothing "
                                  "changed. Try again in a moment.")
     return {"ok": True}
-
-
-def _support_reference() -> str:
-    """A short id tying what the seller was told to what the logs recorded.
-
-    Short because someone has to read it out or paste it into an email. It is
-    not a secret and identifies nothing on its own — it exists so mapping a
-    failure to a product state does not throw the evidence away.
-
-    It now returns the CURRENT REQUEST's id rather than minting a fresh one
-    per failure. Same alphabet, same width, and every existing call site is
-    unchanged — but the reference a seller quotes now identifies the whole
-    request, so it joins to every line that request logged and to its row in
-    error_events, instead of to the single line at one failure site.
-
-    Falls back to a fresh value off-request (a background sweep, a startup
-    task), where there is no context to belong to.
-    """
-    return errorlog.current_reference() or errorlog.new_reference()
 
 
 def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:
@@ -5566,7 +4961,7 @@ def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPExcepti
     talks to eBay, and knowing whose side the problem is on is most of what
     they wanted. What goes is the URL, the status line and the MDN link.
     """
-    reference = _support_reference()
+    reference = deps.support_reference()
     log.warning("lookup failed (%s) [%s]: %s", doing, reference, exc)
     return HTTPException(status, _try_again(doing, reference))
 
@@ -5631,9 +5026,9 @@ def ebay_payments_status(request: Request) -> dict:
     The raw detail is not discarded; it goes to the log under `reference`,
     which comes back to the seller so support can join the two.
     """
-    if not _uid(request):
+    if not deps.uid(request):
         raise HTTPException(401, "Log in first.")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
     try:
@@ -5662,7 +5057,7 @@ def _payments_failure_state(exc: Exception) -> dict:
     are different buttons, and sending a seller to the wrong one costs them a
     support round trip.
     """
-    reference = _support_reference()
+    reference = deps.support_reference()
     resp = getattr(exc, "response", None)
     status = getattr(resp, "status_code", 0) or 0
     log.warning("payments check failed [%s]: status=%s detail=%s",
@@ -5805,7 +5200,7 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
         log.info("ebay deletion %s: state=%s users=%d listings=%d",
                  notif_id, result["state"], result["users"], result["listings"])
 
-    _in_background(_erase, what="eBay account-deletion purge")
+    deps.in_background(_erase, what="eBay account-deletion purge")
     return Response(status_code=200)
 
 
@@ -5904,7 +5299,7 @@ async def upload(
         # progress. The identify charge is taken up front like
         # /api/identify-async does, so a broke caller 402s here (with the
         # bg-removal charge given back) instead of after the photo work.
-        uid = await run_in_threadpool(_uid, request)
+        uid = await run_in_threadpool(deps.uid, request)
         try:
             identify_spent = await run_in_threadpool(_charge_ai, request, "identify")
         except HTTPException:
@@ -5963,9 +5358,9 @@ async def upload(
     # yet. Anything this misses (a restart mid-push) gets picked up by the
     # reclaim pass, which uploads what the bucket is missing before it frees
     # anything.
-    _in_background(objstore.upload_optimized, session_id,
-                   storage.optimized_dir(session_id), optimized,
-                   what="R2 push (upload)")
+    deps.in_background(objstore.upload_optimized, session_id,
+                       storage.optimized_dir(session_id), optimized,
+                       what="R2 push (upload)")
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -5994,7 +5389,7 @@ async def upload_more(
     with the work still running -- "adding photos is taking forever / not
     working". The request now returns the moment the originals are on disk.
     """
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     if not files:
         raise HTTPException(400, "No files uploaded")
     # What this listing already HAS, which is not the same as what is on the
@@ -6046,7 +5441,7 @@ async def upload_more(
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
-    uid = await run_in_threadpool(_uid, request)
+    uid = await run_in_threadpool(deps.uid, request)
     job_id = storage.new_session_id()
     # The background-removal charge is deliberately NOT written to the job
     # mirror: it can be refunded in PART (one photo's worth per failed
@@ -6093,7 +5488,7 @@ def _run_upload_more_job(job_id: str, session_id: str,
         return
     except Exception as exc:  # noqa: BLE001 - the job must always answer
         tokens.refund(spent)
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("upload-more %s: optimize failed [%s]: %s",
                     job_id, reference, exc)
         _bulk_set(job_id, done=True, phase="failed",
@@ -6119,8 +5514,8 @@ def _run_upload_more_job(job_id: str, session_id: str,
         return
     if spent and bg_failed:
         tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
-    _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
-                   what="R2 push (upload-more)")
+    deps.in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
+                       what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     # optimize_results carries each photo's bg_error, exactly as /api/upload
     # returns it: a photo that kept its background has to be SAID, or the
@@ -6155,7 +5550,7 @@ async def edit_image(
     if not session_id or not name:
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     # Guard against path traversal in `name`.
@@ -6182,7 +5577,7 @@ async def edit_image(
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("edit-image: could not process (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -6233,7 +5628,7 @@ async def image_restore_original(
     session_id, name = (session_id or "").strip(), (name or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo to restore.")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents:  # path-traversal guard
@@ -6282,7 +5677,7 @@ async def image_restore_original(
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("restore-original failed (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -6317,7 +5712,7 @@ def _studio_guard(request: Request) -> None:
     They deliberately are NOT token-metered — the border re-check fires
     automatically after every crop and save, so charging it would bill people
     for ordinary editing — which makes a rate ceiling the only brake."""
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"studio:{ip}", max_attempts=ratelimit.STUDIO_MAX_CALLS):
         log.warning("studio: rate limited %s", ip)
         raise HTTPException(
@@ -6343,7 +5738,7 @@ def _studio_load(request: Request, session_id: str, name: str,
     # holding one must not let a caller run the studio against someone else's
     # photos. The inline-`file` path above is the editor's own canvas blob and
     # touches nothing stored, so it stays open to the logged-out flows.
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
@@ -6374,7 +5769,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name") or "").strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     opt_dir = storage.optimized_dir(session_id).resolve()
     path = (opt_dir / name).resolve()
     if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
@@ -6398,7 +5793,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("rotate failed (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -6411,18 +5806,20 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     # back down, and the rotation is simply gone. Worse, eBay is handed the R2
     # public URL at publish, so the sideways photo is the one that goes live.
     # A rotate is not done until the copy the world sees is rotated too.
+    #
+    # Read off the RETURN value, like edit-image and restore-original beside
+    # it: objstore.upload never raises -- it logs and answers None -- so the
+    # try/except this used to be wrapped in could not fire, a failed push
+    # answered 200, and every consequence described above still happened.
     if objstore.enabled():
-        try:
-            await run_in_threadpool(
-                objstore.upload, path, objstore.key_for(session_id, name))
-        except Exception as exc:  # noqa: BLE001 - the local file IS rotated
-            log.warning("rotate: R2 push failed for %s/%s: %s",
-                        session_id, name, exc)
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("rotate: R2 push failed for %s/%s", session_id, name)
             raise HTTPException(
                 502, "The photo was rotated here but the copy we publish from "
-                     "didn't update. Try the rotation again in a moment."
-            ) from exc
-    _in_background(db.touch_listing, session_id, what="rotate touch")
+                     "didn't update. Try the rotation again in a moment.")
+    deps.in_background(db.touch_listing, session_id, what="rotate touch")
     # The rotated file's own timestamp, for the client's cache-buster. Its
     # per-open counter restarted at 0 on every open of the editor, and a
     # browser reuses an image it has already loaded in the same page for an
@@ -6547,7 +5944,7 @@ def identify(session_id: str, request: Request) -> dict:
     that comes back has the same shape, so nothing below this line changes."""
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     opt_dir = storage.optimized_dir(session_id)
     names = storage.list_optimized(session_id)
     if not names:
@@ -6556,7 +5953,7 @@ def identify(session_id: str, request: Request) -> dict:
     spent = _charge_ai(request, "identify")
     try:
         result = claude_ai.identify(paths, names,
-                                    strategy=_pricing_strategy(_uid(request)),
+                                    strategy=_pricing_strategy(deps.uid(request)),
                                     notes=storage.load_notes(session_id),
                                     item_notes=storage.load_item_notes(session_id))
     except errors.StorageUnavailable:
@@ -6575,13 +5972,13 @@ def identify(session_id: str, request: Request) -> dict:
     # it from the record, and the record is all that outlives this request
     # (see Listing.ai_confidence).
     result.listing.ai_confidence = result.confidence
-    _apply_listing_defaults(result.listing, _uid(request))
+    _apply_listing_defaults(result.listing, deps.uid(request))
     # Before the category and before the comps: a verified UPC is both an
     # item specific and the sharpest possible comp query, and both of the
     # passes below are better for having it.
     barcodes.apply_to_listing(result.listing, result.identifiers)
     _resolve_category(result.listing)
-    _assign_store_category(result.listing, _uid(request))
+    _assign_store_category(result.listing, deps.uid(request))
     # Research BEFORE comps: it can rewrite a hedged title into the real one,
     # and the comp search is only as good as the title it searches for.
     _research_draft(result.listing, paths, result.raw_observations,
@@ -6593,7 +5990,7 @@ def identify(session_id: str, request: Request) -> dict:
     # After the category: comps are sharper filtered to it. See
     # _price_against_comps — the photos alone never see a comparable listing.
     market: dict = {}
-    _price_against_comps(result.listing, _uid(request), market_out=market)
+    _price_against_comps(result.listing, deps.uid(request), market_out=market)
     # ...and then the item's own tag, which the comps' order-of-magnitude bar
     # cannot act on and which is the only evidence at all when they were
     # silent. Capped by what that same market said it is worth.
@@ -6608,7 +6005,7 @@ def identify(session_id: str, request: Request) -> dict:
     # exists; "Buy" promotes it to "unlisted" (/api/inventory/add) and that is
     # the first point the seller has asked for anything. See db.SCANNED.
     db.upsert_listing(session_id, result.listing.model_dump(),
-                      status=db.SCANNED, user_id=_uid(request))
+                      status=db.SCANNED, user_id=deps.uid(request))
     return result.model_dump()
 
 
@@ -6621,7 +6018,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     seller already set."""
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     listing = req.listing
     if not listing.category_id:
         raise HTTPException(400, "Pick an eBay category first — specifics are per category.")
@@ -6672,7 +6069,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
                       status=_sticky_status(db.get_listing_best_effort(session_id)),
-                      user_id=_uid(request))
+                      user_id=deps.uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics],
             "added": added, "enriched_at": listing.enriched_at}
@@ -6709,7 +6106,7 @@ def _taxonomy_guard(request: Request) -> None:
     ONE budget across all three: they draw on the same eBay allowance, so
     metering them separately would let a caller spend it three times over.
     """
-    ip = _client_ip(request)
+    ip = deps.client_ip(request)
     if not ratelimit.check(f"taxonomy:{ip}",
                            max_attempts=ratelimit.TAXONOMY_MAX_CALLS):
         log.warning("taxonomy: rate limited %s", ip)
@@ -6769,7 +6166,7 @@ def price_suggestions(payload: dict, request: Request) -> dict:
             query,
             category_id=str(payload.get("category_id") or "").strip() or None,
             condition=str(payload.get("condition") or "").strip() or None,
-            strategy=_pricing_strategy(_uid(request)),
+            strategy=_pricing_strategy(deps.uid(request)),
         )
     except errors.StorageUnavailable:
         # eBay was fine. Relabelling this as an eBay failure sends the seller
@@ -6855,7 +6252,7 @@ def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     # Authorize before billing: never charge for a request we're about to 404.
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     spent = _charge_ai(request, "refine")
     try:
         updated = claude_ai.refine(req.listing, req.prompt)
@@ -6868,13 +6265,13 @@ def refine(req: RefineRequest, request: Request) -> dict:
     prev = _restore_server_state(req.session_id, updated)
     storage.save_listing(req.session_id, updated)
     db.upsert_listing(req.session_id, updated.model_dump(),
-                      status=_sticky_status(prev), user_id=_uid(request))
+                      status=_sticky_status(prev), user_id=deps.uid(request))
     return updated.model_dump()
 
 
 @app.post("/api/save/{session_id}")
 def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     prev = _restore_server_state(session_id, listing)
     storage.save_listing(session_id, listing)
     # Checked, like the PATCH route directly below: `db.upsert_listing`
@@ -6884,7 +6281,7 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     # db.upsert_listing(...)` short-circuits, so without one the write would
     # never run at all.
     landed = db.upsert_listing(session_id, listing.model_dump(),
-                               status=_sticky_status(prev), user_id=_uid(request))
+                               status=_sticky_status(prev), user_id=deps.uid(request))
     if db.enabled() and not landed:
         raise errors.StorageUnavailable(
             "Couldn't save your changes just now. They're still on screen — "
@@ -6930,11 +6327,11 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     rather than from the copy it already had — which is the copy that was
     stale.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec = db.get_listing(session_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
 
     changes = {k: v for k, v in (payload or {}).items() if k in _PATCHABLE}
@@ -7083,7 +6480,7 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     never the client's doing, and the seller was told their photos had changed
     somewhere else when they had not changed at all.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec = db.get_listing(session_id) or {}
     stored = _listing_image_order(session_id, rec)
     if not stored:
@@ -7100,7 +6497,7 @@ def reorder_images(session_id: str, req: ImageOrderRequest,
     if wanted == stored:
         return {"images": stored}
 
-    saved = _save_image_order(session_id, rec, wanted, _uid(request))
+    saved = _save_image_order(session_id, rec, wanted, deps.uid(request))
     log.info("reorder: session=%s %d photos", session_id, len(saved))
     return {"images": saved}
 
@@ -7130,7 +6527,7 @@ def item_conditions(payload: dict, request: Request) -> dict:
     cid = str(payload.get("category_id", "")).strip()
     if not cid:
         raise HTTPException(400, "category_id is required")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     token = creds.get("access_token") if creds else None
     try:
         return {**taxonomy.item_conditions(cid, access_token=token),
@@ -7184,7 +6581,7 @@ def _drop_optimized_image(session_id: str, name: str,
         try:
             path.unlink()
         except OSError as exc:
-            reference = _support_reference()
+            reference = deps.support_reference()
             log.warning("delete-image failed (session=%s name=%s) [%s]: %s",
                         session_id, name, reference, exc)
             raise HTTPException(
@@ -7192,8 +6589,8 @@ def _drop_optimized_image(session_id: str, name: str,
     # R2 mirror delete is a network round-trip the user shouldn't wait on —
     # the local file (which /media serves first) is already gone.
     if objstore.enabled():
-        _in_background(objstore.delete, objstore.key_for(session_id, name),
-                       what="delete-image R2")
+        deps.in_background(objstore.delete, objstore.key_for(session_id, name),
+                           what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
     return images
 
@@ -7205,8 +6602,8 @@ def delete_image(payload: dict, request: Request) -> dict:
     name = str(payload.get("name", "")).strip()
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
-    _assert_session_owner(session_id, request)
-    images = _drop_optimized_image(session_id, name, _uid(request))
+    deps.assert_session_owner(session_id, request)
+    images = _drop_optimized_image(session_id, name, deps.uid(request))
     remaining = storage.list_optimized(session_id)
     # `images` is the listing's own order with the photo gone — what the
     # editor should now be holding, and what the next reorder is checked
@@ -7409,7 +6806,7 @@ async def add_listing_video(session_id: str, request: Request,
     176MB cutout model and three bulk workers, is an OOM waiting for the day
     two sellers upload at once.
     """
-    await run_in_threadpool(_assert_session_owner, session_id, request)
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
     rec, data = await run_in_threadpool(_listing_record_for, session_id)
     if data is None:
         raise HTTPException(404, "Listing not found")
@@ -7477,7 +6874,7 @@ async def add_listing_video(session_id: str, request: Request,
 
     entry = {"file": name, "size": written, "status": "", "message": "",
              "ebay_video_id": ""}
-    uid = await run_in_threadpool(_uid, request)
+    uid = await run_in_threadpool(deps.uid, request)
     try:
         videos = await run_in_threadpool(
             _save_listing_videos, session_id, rec, existing + [entry], uid)
@@ -7487,8 +6884,8 @@ async def add_listing_video(session_id: str, request: Request,
         # listing first, then off the disk").
         await run_in_threadpool(dest.unlink, True)
         raise
-    _in_background(_run_video_upload, session_id, name, uid,
-                   what="video upload (R2 + eBay)")
+    deps.in_background(_run_video_upload, session_id, name, uid,
+                       what="video upload (R2 + eBay)")
     log.info("video: session=%s added %s (%.1f MB)", session_id, name, written / 1e6)
     return {"ok": True, "videos": _video_payload(session_id, videos)}
 
@@ -7502,12 +6899,12 @@ def listing_video_status(session_id: str, request: Request) -> dict:
     or BLOCKED is terminal, so an open tab does not turn into a request per
     second for the life of the listing.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     rec, data = _listing_record_for(session_id)
     if data is None:
         raise HTTPException(404, "Listing not found")
     listing = Listing(**data)
-    uid = _uid(request)
+    uid = deps.uid(request)
     creds = _ebay_creds(uid)
     if creds and listing_sync.refresh_video_status(creds["access_token"], listing):
         try:
@@ -7533,7 +6930,7 @@ def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
     call on eBay is one more thing that can fail while the seller waits for a
     button that has already done its job here.
     """
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     try:
         safe = storage.safe_video_name(name)
     except ValueError as exc:
@@ -7544,7 +6941,7 @@ def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
     existing = [dict(v) for v in (data.get("videos") or [])]
     remaining = [v for v in existing if (v.get("file") or "") != safe]
     if len(remaining) != len(existing):
-        remaining = _save_listing_videos(session_id, rec, remaining, _uid(request))
+        remaining = _save_listing_videos(session_id, rec, remaining, deps.uid(request))
     path = storage.video_path(session_id) / safe
     if path.is_file():
         try:
@@ -7553,8 +6950,8 @@ def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
             log.warning("video: couldn't unlink %s for %s: %s",
                         safe, session_id, exc)
     if objstore.enabled():
-        _in_background(objstore.delete, objstore.video_key_for(session_id, safe),
-                       what="delete-video R2")
+        deps.in_background(objstore.delete, objstore.video_key_for(session_id, safe),
+                           what="delete-video R2")
     log.info("video: session=%s removed %s", session_id, safe)
     return {"ok": True, "videos": _video_payload(session_id, remaining)}
 
@@ -8575,12 +7972,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 "The server ran out of photo storage mid-batch. Space has been "
                 "reclaimed automatically — please run this batch again."))
         else:
-            reference = _support_reference()
+            reference = deps.support_reference()
             log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
             _bulk_set(job_id, done=True,
                       error=_try_again("process this batch", reference))
     except Exception as exc:  # noqa: BLE001 - job-level failure
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
         _bulk_set(job_id, done=True,
                   error=_try_again("process this batch", reference))
@@ -8624,7 +8021,7 @@ async def bulk_upload(
         raise HTTPException(400, NO_VISION_BACKEND)
     # The worker thread can't return a 401, so the login requirement (billing
     # is per-account) is enforced before the upload is accepted.
-    if tokens.enabled() and await run_in_threadpool(_uid, request) is None:
+    if tokens.enabled() and await run_in_threadpool(deps.uid, request) is None:
         raise HTTPException(
             401, "Log in to use AI features — your token balance is per account.")
     if not files:
@@ -8669,7 +8066,7 @@ async def bulk_upload(
                  "minute, or delete a few old listings to free some up.") from exc
 
     # Capture per-request context now — the worker thread has no Request.
-    uid = await run_in_threadpool(_uid, request)
+    uid = await run_in_threadpool(deps.uid, request)
     job_id = storage.new_session_id()
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     await run_in_threadpool(_register_bulk_job, job_id, {
@@ -8704,7 +8101,7 @@ def bulk_status(job_id: str, request: Request) -> Response:
     pre-serialized: a 30-item batch is a ~1MB dict and every client polls this
     every 1.5s, on the same shared CPUs running photo inference.
     """
-    body = jobstore.snapshot_json(job_id, _uid(request))
+    body = jobstore.snapshot_json(job_id, deps.uid(request))
     if body is None:
         raise HTTPException(404, "Unknown bulk job.")
     return Response(content=body, media_type="application/json")
@@ -8724,7 +8121,7 @@ def bulk_cancel(job_id: str, request: Request) -> dict:
     listing and stays in Drafts. 404 covers both an unknown id and someone
     else's, exactly as the status endpoints do.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     # Read BEFORE the cancel, which is what marks the job finished. A batch
     # paused at the guidance step has no worker to stand down, so nothing else
     # is ever going to drop its photo pile -- the purge that normally happens
@@ -8778,7 +8175,7 @@ def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
     Every box left blank is the same request as pressing Skip, and lands on
     the same drafts a run without the step at all would have produced.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     seen = jobstore.internal(job_id, uid)
     if seen is None:
         raise HTTPException(404, "Unknown job.")
@@ -8914,7 +8311,7 @@ def delete_pending_photo(job_id: str, req: PendingPhotoRequest,
         (including months later, on a "Start over"). So the file goes, the
         same way the editor's own delete takes one off a saved listing.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     seen = jobstore.internal(job_id, uid)
     if seen is None:
         raise HTTPException(404, "Unknown job.")
@@ -9058,7 +8455,7 @@ def delete_pending_item(job_id: str, req: PendingItemRequest,
     renumbered — except one the model also put under another item, which
     that item still needs.
     """
-    uid = _uid(request)
+    uid = deps.uid(request)
     seen = jobstore.internal(job_id, uid)
     if seen is None:
         raise HTTPException(404, "Unknown job.")
@@ -9142,7 +8539,7 @@ def bulk_status_brief(job_id: str, request: Request) -> Response:
     items. The app shell watches a running batch from every screen so its
     "a bulk batch is processing" banner stops the moment the batch ends; the
     full body is ~1MB and is for the queue screen that actually renders it."""
-    body = jobstore.brief_json(job_id, _uid(request))
+    body = jobstore.brief_json(job_id, deps.uid(request))
     if body is None:
         raise HTTPException(404, "Unknown bulk job.")
     return Response(content=body, media_type="application/json")
@@ -9311,8 +8708,8 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
         # results for the rotation/bg toasts, the photo list) rides on the job.
         _bulk_set(job_id, upload={"optimized": optimized,
                                   "optimize_results": opt_results})
-        _in_background(objstore.upload_optimized, session_id, opt_dir,
-                       optimized, what="R2 push (pipeline)")
+        deps.in_background(objstore.upload_optimized, session_id, opt_dir,
+                           optimized, what="R2 push (pipeline)")
     except OSError as exc:
         tokens.refund(bg_spent)
         tokens.refund(identify_spent)
@@ -9327,7 +8724,7 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
     except Exception as exc:  # noqa: BLE001 - job-level failure must surface
         tokens.refund(bg_spent)
         tokens.refund(identify_spent)
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("pipeline %s: optimize failed [%s]: %s",
                     job_id, reference, exc)
         _bulk_set(job_id, done=True,
@@ -9357,10 +8754,10 @@ def identify_async(session_id: str, request: Request) -> dict:
     synchronous request open, so slow vision calls can't time out the browser."""
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     if not storage.list_optimized(session_id):
         raise HTTPException(404, "No optimized images found for this session.")
-    uid = _uid(request)
+    uid = deps.uid(request)
     spent = _charge_ai(request, "identify")  # up front: a broke caller 402s here
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
@@ -9416,10 +8813,10 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     db.SCANNED): the scan is invisible to every seller-facing read, and this
     is the first point the seller has asked for the item to become a listing.
     Writing the same id is what carries the scan's photos and draft across."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
-    _assert_session_owner(req.session_id, request)
+    deps.assert_session_owner(req.session_id, request)
     storage.save_listing(req.session_id, req.listing)
     # Shop Mode's "Buy" is a decision made in a shop, on this answer: the
     # seller taps it and then pays for the item. A write that did not land
@@ -9484,52 +8881,15 @@ def _projected_for_list(rec: dict) -> dict:
 
 
 def _cursor_for(rec: dict) -> Optional[str]:
-    """The opaque token naming one row, for the page that follows it.
+    """The page cursor naming one listing (deps.page_cursor has the format).
 
-    Base64url of "<updated_at>|<id>" — encoded so the timestamp's colons and
-    offset sign survive a query string untouched, and opaque so nobody starts
-    hand-assembling one. It is the server's own words handed back; the read it
-    feeds is scoped by `user_id` exactly like every other, so a cursor says
-    WHERE to start and never whose store to start in.
-
-    None when the row cannot name a place in the order. The column is
-    non-nullable so this is defensive, but the failure it prevents is the loud
-    kind: a blank half mints a token the next request rejects as malformed —
-    a 400 in the middle of a walk the seller started. No cursor degrades
-    honestly instead: the page still says it was cut, and the button that
-    could not have worked is simply not offered.
+    The read it feeds is scoped by `user_id` exactly like every other, so a
+    cursor says WHERE to start and never whose store to start in. None when
+    the row cannot name a place in the order — defensive, as `updated_at` is
+    non-nullable, but a blank half would mint a token the next request
+    refuses mid-walk.
     """
-    stamp, rid = rec.get("updated_at"), rec.get("id")
-    if not stamp or not rid:
-        return None
-    raw = f"{stamp}|{rid}"
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-
-
-def _cursor_from(token: str) -> tuple[datetime, str]:
-    """Parse one, or raise 400.
-
-    Refused rather than ignored. An ignored cursor answers with page one,
-    which the client reads as the listings that FOLLOW the ones it has — so
-    the store looks like it ends where it began, which is the bug paging
-    exists to fix, arriving through the fix.
-    """
-    try:
-        pad = "=" * (-len(token) % 4)
-        raw = base64.urlsafe_b64decode(token + pad).decode()
-        stamp, sep, last_id = raw.partition("|")
-        if not sep or not last_id:
-            raise ValueError("no separator")
-        when = datetime.fromisoformat(stamp)
-        # Same rule as everywhere else a stored timestamp is read: a naive one
-        # is UTC, not local, or the comparison silently moves the page edge.
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        return when, last_id
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            400, "That listing page link is no longer valid — reload the page "
-                 "to start from the top.") from exc
+    return deps.page_cursor(rec.get("updated_at"), rec.get("id"))
 
 
 @app.get("/api/listings")
@@ -9559,7 +8919,7 @@ def listings(request: Request, limit: int = LIST_CAP,
     # The last row of the previous page, when the client is walking older
     # ones. Empty means "from the top", which is what a client sends on first
     # load and is not a malformed cursor.
-    cursor = _cursor_from(before) if before else None
+    cursor = deps.cursor_from(before) if before else None
     rows = (db.list_listings(limit=limit + 1, user_id=user["id"], before=cursor)
             if user else [])
     items, truncated = rows[:limit], len(rows) > limit
@@ -9641,7 +9001,7 @@ def _export_pages(uid: str, first: list[dict]):
         if not token:
             return
         try:
-            cursor = _cursor_from(token)
+            cursor = deps.cursor_from(token)
         except HTTPException:
             return
         try:
@@ -9777,7 +9137,7 @@ def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
     items = db.list_listings_best_effort(limit=LIST_CAP, user_id=user["id"],
                                          statuses=("published", "live"))
     status: dict = {}
-    by_id = _metrics_by_record_id(_ebay_creds_for(request), items, status,
+    by_id = _metrics_by_record_id(deps.ebay_creds_for(request), items, status,
                                   fresh=bool(refresh))
     return {"metrics": by_id,
             "traffic_ok": bool(status.get("traffic_ok")),
@@ -10008,7 +9368,7 @@ def insights(request: Request) -> dict:
                 "bulk_caps": _bulk_caps()}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         recs = recommender.ranked(
             items, metrics_by_id=metrics_by_id,
@@ -10061,7 +9421,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
     the revise is rejected, and neither stops the rest of the run.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
     try:
@@ -10172,7 +9532,7 @@ def send_offers(payload: dict, request: Request) -> dict:
     skip nor a failure stops the rest of the run.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user or not creds:
         raise HTTPException(400, "Connect eBay first.")
     try:
@@ -10519,7 +9879,7 @@ def _run_enrich_job(job_id: str, records: list[dict], uid: str,
                         result={"deferred": deferred, "filled": filled,
                                 "stopped": stopped, **result.as_dict()})
     except Exception as exc:  # noqa: BLE001 - the job must always answer
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("enrich job %s failed for user=%s [%s]: %s",
                     job_id, uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
@@ -10586,7 +9946,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
         records, deferred = mine[:BULK_ENRICH_CAP], mine[BULK_ENRICH_CAP:]
         if not records:
             raise HTTPException(404, "None of those listings are here anymore.")
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without
@@ -10743,7 +10103,7 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
                                 "accepted": accepted, "stopped": stopped,
                                 **result.as_dict()})
     except Exception as exc:  # noqa: BLE001 - the job must always answer
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("finish-all job %s failed for user=%s [%s]: %s",
                     job_id, uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
@@ -10810,7 +10170,7 @@ def finish_all(request: Request) -> dict:
         _ENRICH_JOBS[uid] = job_id
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
-        creds = _ebay_creds_for(request)
+        creds = deps.ebay_creds_for(request)
         records = _finish_all_set(items, creds)
         if not records:
             raise HTTPException(400, "There's nothing left on your list.")
@@ -10841,7 +10201,7 @@ def get_listing(listing_id: str, request: Request) -> dict:
     if not rec:
         raise HTTPException(404, "Listing not found")
     # Enforce ownership for listings that belong to an account.
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
     # Deliberately no photo adoption here. This used to download every remote
     # photo, write them to disk, upsert the row and start an R2 upload — on a
@@ -10874,7 +10234,7 @@ def prepare_for_editing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
     names = _adopt_imported_images(listing_id, rec)
     return {"ok": True, "images": names,
@@ -10898,7 +10258,7 @@ def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
     rec = db.get_listing(listing_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
 
     listing = Listing(**(rec.get("listing") or {}))
@@ -10977,9 +10337,9 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
         return []
     # Mirror to R2 like uploads do — otherwise imported listings are the one
     # kind of session the offload sweep can never free from the volume.
-    _in_background(objstore.upload_optimized, listing_id,
-                   storage.optimized_dir(listing_id), names,
-                   what="adopted-import R2 push")
+    deps.in_background(objstore.upload_optimized, listing_id,
+                       storage.optimized_dir(listing_id), names,
+                       what="adopted-import R2 push")
     listing["images"] = names
     rec["listing"] = listing
     try:
@@ -11039,7 +10399,7 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     rec = db.get_listing(listing_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    uid = _uid(request)
+    uid = deps.uid(request)
     if rec.get("user_id") and rec["user_id"] != uid:
         raise HTTPException(404, "Listing not found")
 
@@ -11096,11 +10456,11 @@ def delete_listing(listing_id: str, request: Request) -> dict:
     not-owned) listing is a 404. One DB round-trip — delete_listing does its
     own ownership check — and the disk/R2 cleanup runs in the background, so
     the button doesn't hang on a cold database + file I/O."""
-    if not db.delete_listing(listing_id, _uid(request)):
+    if not db.delete_listing(listing_id, deps.uid(request)):
         raise HTTPException(404, "Listing not found")
-    _in_background(_purge_session_images_best_effort, listing_id,
+    deps.in_background(_purge_session_images_best_effort, listing_id,
                        what="delete cleanup")
-    log.info("listing deleted: id=%s user=%s", listing_id, _uid(request))
+    log.info("listing deleted: id=%s user=%s", listing_id, deps.uid(request))
     return {"ok": True}
 
 
@@ -11114,7 +10474,7 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
     ids = list(dict.fromkeys(ids))[:200]
     if not ids:
         raise HTTPException(400, "No listings selected.")
-    uid = _uid(request)
+    uid = deps.uid(request)
     # Each id on its own: the documented behaviour is that ids which do not
     # exist or are not owned are skipped and reported back, and a row the
     # database refused belongs in the same list rather than sinking the other
@@ -11130,7 +10490,7 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
             log.warning("bulk delete: couldn't remove %s: %s", lid, exc)
             refused.append(lid)
     for lid in deleted:
-        _in_background(_purge_session_images_best_effort, lid,
+        deps.in_background(_purge_session_images_best_effort, lid,
                            what="bulk-delete cleanup")
     log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
     return {"ok": True, "deleted": deleted,
@@ -11152,9 +10512,9 @@ def _merge_ids(payload: dict, request: Request) -> tuple[str, list[str]]:
     source_ids = [s for s in dict.fromkeys(raw_sources) if s and s != target_id]
     if not target_id or not source_ids:
         raise HTTPException(400, "Pick a target and at least one duplicate to merge.")
-    _assert_session_owner(target_id, request)
+    deps.assert_session_owner(target_id, request)
     for sid in source_ids:
-        _assert_session_owner(sid, request)
+        deps.assert_session_owner(sid, request)
     return target_id, source_ids
 
 
@@ -11225,7 +10585,7 @@ def merge_listings(payload: dict, request: Request) -> dict:
     blanks fill in."""
     target_id, source_ids = _merge_ids(payload, request)
     trec, sources = _merge_records(target_id, source_ids)
-    uid = _uid(request)
+    uid = deps.uid(request)
 
     data, applied = listing_merge.resolve(
         [(target_id, trec.get("listing") or {}), *sources],
@@ -11518,8 +10878,8 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     """
     if req.mode not in ("draft", "live"):
         raise HTTPException(400, "mode must be 'draft' or 'live'")
-    _assert_session_owner(req.session_id, request)
-    uid = _uid(request)
+    deps.assert_session_owner(req.session_id, request)
+    uid = deps.uid(request)
     prev_rec = db.get_listing(req.session_id) or {}
     # A sold listing is an archive record, not a draft: it says what one
     # finished sale was, and republishing it in place would overwrite that
@@ -11578,9 +10938,9 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     rec = db.get_listing(req.session_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     # Ending goes through EndItem, which needs the seller's own token. The
     # env-configured single-tenant credentials used to serve here via
     # withdrawOffer; they are the OPERATOR's, and with the Inventory engine
@@ -11639,7 +10999,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # happen, or the record goes on saying the listing is live with
         # nothing left to edit or relist it from.
         landed = db.upsert_listing(req.session_id, data,
-                                   status="sold", user_id=_uid(request))
+                                   status="sold", user_id=deps.uid(request))
         if db.enabled() and not landed:
             log.error("end-listing: eBay ended %s but the status write failed "
                       "— photos kept", req.session_id)
@@ -11648,12 +11008,12 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
                 "Refresh in a moment — don't end it again.")
         if rec.get("status") != "sold":
             notifications.notify_sold(
-                _uid(request) or rec.get("user_id"), req.session_id, data,
+                deps.uid(request) or rec.get("user_id"), req.session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
             # Same item, same box: a copy still live on Etsy is taking
             # orders for stock this seller no longer has.
             inventory_mirror.on_ebay_finished(
-                _uid(request) or rec.get("user_id"), req.session_id, data,
+                deps.uid(request) or rec.get("user_id"), req.session_id, data,
                 "sold on eBay")
             _purge_session_images_best_effort(req.session_id)
         res = {**res, "status": "sold"}
@@ -11666,12 +11026,12 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # Ended on eBay by the seller: the Etsy copy was listed as one of a
         # pair and is now the only one for sale. Down it comes too.
         inventory_mirror.on_ebay_finished(
-            _uid(request) or rec.get("user_id"), req.session_id,
+            deps.uid(request) or rec.get("user_id"), req.session_id,
             rec.get("listing") or {}, "ended on eBay")
         try:
             removed = listing_sync.settle_ended(
                 req.session_id, rec.get("listing") or {}, rec,
-                _uid(request), why="ended by the seller")
+                deps.uid(request), why="ended by the seller")
         except errors.StorageUnavailable as exc:
             log.error("end-listing: eBay ended %s but the record didn't "
                       "settle: %s", req.session_id, exc)
@@ -11686,7 +11046,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # there if they want it gone.
         data = rec.get("listing") or {}
         landed = db.upsert_listing(req.session_id, data, status="draft",
-                                   user_id=_uid(request))
+                                   user_id=deps.uid(request))
         if db.enabled() and not landed:
             raise errors.StorageUnavailable(
                 "We couldn't update your copy here — refresh in a moment.")
@@ -11715,7 +11075,7 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     _SWEEP_COOLDOWN); the cheap finished-list reconcile always runs, so an
     item that ended or sold on eBay still moves on the very next sync.
     """
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     user = auth.current_user(request)
     if not (creds or config.ebay_ready()) or not user:
         return {"checked": 0, "changed": 0}
@@ -11876,7 +11236,7 @@ def _run_import_job(job_id: str, token: str, uid: str,
         # The TradingError arm above carries eBay's own mapped sentence. This
         # one is whatever was thrown, and for an httpx failure that is the API
         # base, the path and a status line — rendered in the import panel.
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("import-listings failed for user=%s [%s]: %s",
                     uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
@@ -11903,7 +11263,7 @@ def import_listings(request: Request) -> dict:
     (or a reload mid-sync) would otherwise double the eBay calls this spends.
     """
     user = auth.current_user(request)
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not user:
         raise HTTPException(401, "Log in first.")
     if not creds:
@@ -11946,167 +11306,25 @@ def import_status(job_id: str, request: Request) -> Response:
     """A store import's live progress, or the mirrored record of how it ended
     (see services/jobstore) — an import cut short by a restart reports itself
     done with the reason, so the client settles instead of polling forever."""
-    body = jobstore.snapshot_json(job_id, _uid(request))
+    body = jobstore.snapshot_json(job_id, deps.uid(request))
     if body is None:
         raise HTTPException(404, "Unknown import job.")
     return Response(content=body, media_type="application/json")
 
 
-# --- notifications ----------------------------------------------------------
-
-@app.get("/api/notifications")
-def notifications_list(request: Request, limit: int = 50,
-                       unread_only: bool = False) -> dict:
-    """The signed-in user's notifications (newest first) + unread count.
-    Empty for logged-out users — the bell just stays quiet.
-
-    `checked` says whether the read actually happened. A 503 would be wrong
-    here: the shell polls this every 60 seconds from every screen, so a blip
-    would turn the whole app noisy. But an empty list is not a neutral answer
-    either — the bell renders it as "Nothing yet", which is a claim about the
-    seller's sales on the surface they check to find out whether they owe a
-    buyer a parcel. So it answers 200 and says which of the two it is.
-    """
-    uid = _uid(request)
-    if not uid:
-        return {"notifications": [], "unread": 0, "checked": True}
-    try:
-        return {
-            "notifications": db.list_notifications(
-                uid, limit=max(1, min(limit, 200)), unread_only=unread_only),
-            "unread": db.unread_notification_count(uid),
-            "checked": True,
-        }
-    except errors.StorageUnavailable:
-        return {"notifications": [], "unread": 0, "checked": False}
-
-
-@app.post("/api/notifications/read")
-def notifications_mark_read(request: Request, payload: dict) -> dict:
-    """Mark notifications read: {"ids": [...]} for specific ones, or
-    {"all": true} for everything unread."""
-    uid = _uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    if payload.get("all"):
-        return {"marked": db.mark_notifications_read(uid)}
-    ids = [str(i) for i in (payload.get("ids") or []) if i]
-    return {"marked": db.mark_notifications_read(uid, ids)}
-
-
-# --- buyer messages (the unified P2P inbox) ---------------------------------
+# --- notifications and buyer messages --------------------------------------
 #
-# One inbox across every marketplace that can carry a buyer conversation.
-# Person-to-person only: each marketplace adapter excludes its own automated
-# mail at the source (eBay asks for conversation_type=FROM_MEMBERS), because
-# the whole point of this surface is that it is NOT the notifications bell.
-#
-# Conversation ids are namespaced "<marketplace>:<id>", which is how one merged
-# list routes a click back to the provider that owns the thread.
+# The bell and the inbox: routers/inbox.py, included where the routes were
+# defined so they keep their place in the route order.
 
-@app.get("/api/messages")
-def messages_list(request: Request, marketplace: str = "",
-                  limit: int = 25) -> dict:
-    """The merged inbox: {conversations, unread, sources, available, reason}.
-
-    ALWAYS 200, never raises. A header icon polls this every minute, and the
-    smoke test fails the build on any failed request — so an eBay outage has
-    to read as an empty inbox that explains itself, not as a 502 storm.
-    `sources` drives the marketplace toggle and is populated even when a
-    source has nothing to give.
-    """
-    uid = _uid(request)
-    if not uid:
-        return {"conversations": [], "unread": 0, "sources": [],
-                "available": False, "reason": "signed_out", "message": ""}
-    try:
-        out = messages_service.list_conversations(
-            uid, marketplace=marketplace, limit=max(1, min(limit, 100)))
-    except Exception as exc:  # noqa: BLE001 - a poll must never 500
-        log.info("messages: inbox read failed: %s", exc)
-        return {"conversations": [], "unread": 0, "sources": [],
-                "available": False, "reason": "error", "message": str(exc)}
-    live = [s for s in out["sources"] if s.get("available")]
-    # The worst reason among supported sources is the one worth showing: with
-    # nothing live, "reconnect eBay" is actionable where "no messages" isn't.
-    reason = ""
-    message = ""
-    if not live:
-        for s in out["sources"]:
-            if s.get("supported") and s.get("reason") not in ("", "disabled"):
-                reason, message = s["reason"], s.get("message", "")
-                break
-        else:
-            reason = "disabled"
-    out.update({"available": bool(live), "reason": reason, "message": message})
-    return out
-
-
-@app.get("/api/messages/{conversation_id}")
-def messages_thread(conversation_id: str, request: Request,
-                    limit: int = 50) -> dict:
-    """One conversation: {conversation, messages} oldest-first.
-
-    User-initiated, so this one fails honestly rather than soft-emptying.
-    """
-    uid = _uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    try:
-        return messages_service.get_conversation(
-            uid, conversation_id, limit=max(1, min(limit, 200)))
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - adapter errors carry the reason
-        raise HTTPException(502, str(exc)) from exc
-
-
-@app.post("/api/messages/send")
-def messages_send(request: Request, payload: dict) -> dict:
-    """Reply into a conversation: {"conversation_id": ..., "text": ...}.
-
-    Returns the refreshed thread, so the client renders what the marketplace
-    actually stored rather than the optimistic bubble it drew.
-    """
-    uid = _uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    text = str(payload.get("text") or "").strip()
-    cid = str(payload.get("conversation_id") or "").strip()
-    if not text:
-        raise HTTPException(400, "Write a message first.")
-    if not cid:
-        raise HTTPException(400, "No conversation was named.")
-    # Chattier than an auth endpoint by design, but still bounded: a runaway
-    # client must not burn the seller's marketplace API quota, because that
-    # quota is shared with publishing.
-    if not ratelimit.check(f"msg-send:{uid}", max_attempts=60):
-        raise HTTPException(429, "Too many messages just now — give it a minute.")
-    try:
-        return messages_service.send(uid, cid, text)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, str(exc)) from exc
-
-
-@app.post("/api/messages/read")
-def messages_mark_read(request: Request, payload: dict) -> dict:
-    """Mark one conversation read. Best-effort: the badge re-syncs on the next
-    poll, so a marketplace that refuses this never becomes an error the seller
-    has to look at."""
-    uid = _uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    cid = str(payload.get("conversation_id") or "").strip()
-    return {"ok": bool(cid) and messages_service.mark_read(uid, cid)}
+app.include_router(inbox_routes.router)
 
 
 
 # --- sold orders + shipping labels ------------------------------------------
 
 def _orders_creds(request: Request) -> dict:
-    creds = _ebay_creds_for(request)
+    creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
     return creds
@@ -12266,7 +11484,7 @@ def _easypost_status(uid: Optional[str]) -> dict:
 def _easypost_key(request: Request) -> tuple[str, str]:
     """(uid, api_key). 401 with nobody signed in; 400 until the seller has
     connected EasyPost, because that account is what pays for the label."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     acct = db.get_marketplace_account(uid, _EASYPOST)
@@ -12306,14 +11524,14 @@ def _remember_ship_from(creds: dict, payload: dict) -> dict:
 def easypost_status(request: Request) -> dict:
     """Whether this seller has connected EasyPost. 200 {connected: false}
     when nobody is signed in: the shell asks at boot, before login."""
-    return _easypost_status(_uid(request))
+    return _easypost_status(deps.uid(request))
 
 
 @app.post("/api/easypost/connect")
 def easypost_connect(request: Request, payload: dict) -> dict:
     """Store the seller's EasyPost API key — after proving it works with one
     read, so a mistyped key is refused here rather than at the first label."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     key = str(payload.get("api_key") or "").strip()
@@ -12350,7 +11568,7 @@ def easypost_connect(request: Request, payload: dict) -> dict:
 
 @app.post("/api/easypost/disconnect")
 def easypost_disconnect(request: Request) -> dict:
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     if not db.disconnect_marketplace_account(uid, _EASYPOST):
@@ -12514,7 +11732,7 @@ def easypost_refund(shipment_id: str, request: Request) -> dict:
     of the purchase: a shipment id that isn't this seller's is a 404 here,
     never a lookup at EasyPost."""
     uid, key = _easypost_key(request)
-    label = db.get_shipping_label_by_shipment(_uid(request), shipment_id)
+    label = db.get_shipping_label_by_shipment(deps.uid(request), shipment_id)
     if not label:
         raise HTTPException(404, "No label with that id on your account.")
     try:
@@ -12678,7 +11896,7 @@ def about():
 def marketplace_roster(request: Request) -> dict:
     """Every registered marketplace + this user's connection state — drives
     the Settings connection cards and the publish-target chips in one call."""
-    uid = _uid(request)
+    uid = deps.uid(request)
     out = []
     for p in marketplaces.all_providers():
         status = p.account_status(uid)
@@ -12730,7 +11948,7 @@ ETSY_SETTING_KEYS = ("shipping_profile_id", "return_policy_id", "readiness_state
 @app.get("/api/etsy/settings-options")
 def etsy_settings_options(request: Request) -> dict:
     provider = _marketplace_or_404("etsy")
-    creds = provider.creds_for(_uid(request))
+    creds = provider.creds_for(deps.uid(request))
     if not creds:
         raise HTTPException(400, "Connect Etsy first.")
     try:
@@ -12760,7 +11978,7 @@ def etsy_settings_options(request: Request) -> dict:
 @app.post("/api/etsy/settings-options")
 def save_etsy_settings_options(request: Request, payload: dict) -> dict:
     _marketplace_or_404("etsy")
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     fields = {k: str(payload.get(k) or "").strip()
@@ -12797,14 +12015,14 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
         raise HTTPException(400, "Etsy isn't configured on the server.")
     # A login, and a ceiling per login: this is a Claude call, and it used to
     # be the one AI route anyone could press without signing in.
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in to get an Etsy category suggestion.")
     if not ratelimit.check(f"etsy-taxonomy:{uid}",
                            max_attempts=ratelimit.ETSY_SUGGEST_MAX_CALLS):
         raise HTTPException(
             429, "Too many category lookups at once. Wait a moment and try again.")
-    _assert_session_owner(session_id, request)
+    deps.assert_session_owner(session_id, request)
     listing = Listing(**(payload.get("listing") or {}))
     try:
         return etsy_service.suggest_taxonomy(listing)
@@ -12832,7 +12050,7 @@ def _etsy_provider_for(request: Request):
     """The Etsy provider and this user's credentials, or a 400 saying which
     part is missing — withheld, not connected, or not yet seated by Etsy."""
     provider = _marketplace_or_404("etsy")
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     pending, note = marketplaces.access_pending(provider, uid)
@@ -13239,13 +12457,13 @@ def marketplace_callback(marketplace: str, request: Request,
 @app.get("/api/{marketplace}/status")
 def marketplace_status(marketplace: str, request: Request) -> dict:
     provider = _marketplace_or_404(marketplace)
-    return provider.account_status(_uid(request))
+    return provider.account_status(deps.uid(request))
 
 
 @app.post("/api/{marketplace}/disconnect")
 def marketplace_disconnect(marketplace: str, request: Request) -> dict:
     provider = _marketplace_or_404(marketplace)
-    uid = _uid(request)
+    uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
     # A disconnect that did not land is a failed disconnect, and saying so
@@ -13276,9 +12494,9 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
     rec = db.get_listing(req.session_id)
     if not rec:
         raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != _uid(request):
+    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
-    uid = _uid(request)
+    uid = deps.uid(request)
     creds = provider.creds_for(uid)
     if not creds:
         raise HTTPException(400, f"Connect {provider.label} first.")

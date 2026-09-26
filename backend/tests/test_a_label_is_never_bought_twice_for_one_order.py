@@ -33,7 +33,7 @@ def shop(dbmod, monkeypatch):
     from backend import main
 
     monkeypatch.setattr(main.auth, "current_user", lambda request: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: {
         "access_token": "tok", "_uid": "u1", "ebay_username": "seller_x",
         "ship_from_postal": ""})
     monkeypatch.setattr(main, "_easypost_key", lambda request: ("u1", "EZTKkey"))

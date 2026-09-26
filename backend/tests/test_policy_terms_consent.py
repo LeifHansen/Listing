@@ -38,7 +38,7 @@ from fastapi.testclient import TestClient
 def connected(monkeypatch):
     from backend import main
 
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: {
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: {
         "access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main.db, "save_ebay_account", lambda uid, **kw: None)
     monkeypatch.setattr(main.ebay_account, "note_verified", lambda uid: None)

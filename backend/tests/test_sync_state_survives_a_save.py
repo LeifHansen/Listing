@@ -57,8 +57,8 @@ def api(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "get_listing_strict", lambda lid: None)
     monkeypatch.setattr(db, "upsert_listing",
                         lambda lid, data, **k: saved.update(data) or True)
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     return TestClient(main.app), saved
 
 

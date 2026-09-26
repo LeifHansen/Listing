@@ -221,9 +221,9 @@ Ordered by what it costs a seller.
       `backend/ratelimit.py`. (Done: `/api/etsy/suggest-taxonomy` needs a
       login and has a per-user ceiling, `ratelimit.ETSY_SUGGEST_MAX_CALLS`;
       it is still not charged.)
-- [ ] **R2 client init holds a lock across un-timed network calls** and
-      `objstore.probe()` has no caller; give boto3 a `Config` with timeouts
-      and probe from the startup thread. No `statement_timeout` /
+- [ ] **R2 client init holds a lock across un-timed network calls**; give
+      boto3 a `Config` with timeouts. (`objstore.probe()` does run now, from
+      the startup thread in `main._warm_models`.) No `statement_timeout` /
       `lock_timeout` toward Neon either. `backend/objstore.py`, `db.py`.
 - [ ] Smaller, each a few lines: `ImageEditor` Escape/backdrop bypass the
       AI-busy lock and its layer canvases are never released; object URLs leak
@@ -300,9 +300,21 @@ Ordered by what it costs a seller.
 
 ## After launch (known, not on the critical path)
 
-- Split `backend/main.py` (9.5k lines; the same owner check, path-traversal
-  guard and truthy parse are re-typed 6–10× each) and `cards.jsx` /
-  `BulkMode.jsx` / `useListingForm.js` (1–2k lines each), with
+- Finish splitting `backend/main.py` (12.5k lines; the same owner check,
+  path-traversal guard and truthy parse are re-typed 6–10× each). Started:
+  `backend/routers/` holds the operator console, sign-in and the inbox, and
+  `routers/deps.py` holds the caller's id, the ownership check, the eBay
+  credentials, the support reference and the background runner. 72 more
+  routes can move as they are. The other 51 read something tests patch on
+  `main`: the token charge pins 12 of them, the drafting chain's helpers 10,
+  `LIST_CAP` 9, `_purge_session_images` and `_bulk_set` 7 each, then
+  `_easypost_key`, `_finish_connect` and the expert-knowledge routes' direct
+  `run_in_background` call. Move a shared helper into `routers/deps.py`, and
+  an area's own into its router, repointing the patches in the same change,
+  the way `_uid` moved (`test_a_patch_on_main_never_silently_misses.py`
+  explains why a patch left on `main` would stop reaching the moved code
+  without failing). Then
+  `cards.jsx` / `BulkMode.jsx` / `useListingForm.js` (1–2k lines each), with
   characterisation tests first. URL routing (deep links, back/forward).
 - Normalised tables for external listings, marketplace operations and
   durable jobs (still one JSON document per listing; the publish lock is

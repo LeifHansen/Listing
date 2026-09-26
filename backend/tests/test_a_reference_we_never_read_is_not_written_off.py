@@ -67,6 +67,7 @@ def bench(monkeypatch):
     store = FakeStore()
     scheduled = []
     monkeypatch.setattr(main, "db", store)
+    monkeypatch.setattr(main.deps, "db", store)
     monkeypatch.setattr(main, "run_in_background",
                         lambda fn, *a, **k: scheduled.append((fn, a)))
     monkeypatch.setattr(main.claude_ai, "distill_reference",
