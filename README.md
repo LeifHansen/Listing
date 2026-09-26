@@ -1041,6 +1041,9 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
+| `POST` | `/api/ebay/lower-all` | Lower every price in the dashboard's "Lower prices" group by one percentage, as a background job (`job_id`) |
+| `POST` | `/api/ebay/send-offers` | Offer the named listings' watchers one discount (capped per request) |
+| `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
@@ -1827,7 +1830,7 @@ problem:
   `test_an_offer_reaches_the_buyers_watching.py`, because each fails the
   same way from the outside — a refusal on one listing, mid-run, with nothing
   on screen to say why. eBay takes exactly **one listing per call**, so a bulk
-  send is a loop (`BULK_OFFER_CAP`, remainder `deferred`); the offer
+  send is a loop, one call per listing; the offer
   **duration is site-specific** and eBay refuses any other value, so none is
   sent and each marketplace applies its own; and **counter-offers** are not in
   this release of eBay's API, so `allowCounterOffer` is sent explicitly false
@@ -1835,13 +1838,38 @@ problem:
   on the input; the 50% ceiling is this app's, and lower than the price drop's
   75% because a buyer takes one of these with a single tap.
 
+  **"Send offers…" means all of them**, the same fix as "Lower all…" below.
+  The group button used to send the rows the dashboard was holding to
+  `POST /api/ebay/send-offers`, which offers at most `BULK_OFFER_CAP` per
+  request and defers the rest. The press sends no ids and has no cap now:
+  `POST /api/ebay/send-offers-all` works the group out from the same ranking
+  the dashboard renders (eBay's eligibility sweep included) and runs it as a
+  **background job** with the listing it is on under the group. One per
+  account at a time — a second press while one is running joins it, rather
+  than offering the same watchers again.
+
   A single row sends its own offer rather than opening the listing. Every
   other group's rows are a way into the editor, because that is where another
   photo or a new price gets made — there is nothing in the editor that sends
-  an offer, so that row would be a button that leads nowhere.
+  an offer, so that row would be a button that leads nowhere. It names its one
+  listing and goes through `POST /api/ebay/send-offers`: one call fits in any
+  request, and there is no group to work out.
 - **Lower prices → "Lower all…"** opens an amount field (*lower every price in
   this group by X %*) with its own submit. Each listing is repriced and pushed to
   eBay through the same revise path a single edit uses.
+
+  **"All" means all of them**, for the same reason as "Enrich all" below. The
+  button used to send the rows the dashboard was holding to
+  `POST /api/ebay/lower-prices`, which reprices at most `BULK_PRICE_CAP` per
+  request — and in an environment where that cap was **1**, *"Lower prices ·
+  41"* offered *"Lower 1 price by 20%"* and lowered one. The press sends no
+  ids and has no cap now: `POST /api/ebay/lower-all` works the group out from
+  the same ranking the dashboard renders (`_suggestion_set`) and runs it as a
+  **background job** (`job_id`, polled on `/api/bulk/status/{id}`, with the
+  listing it is on under the group). One per account at a time: a second press
+  while one is running joins it instead of cutting the same prices twice. The
+  capped, ids-in route is still there for a caller that means a selection;
+  nothing in the app does.
 
   **The group clears once the cut is made** (`Listing.price_lowered_at`), and
   until it did, this was the same broken-looking button as "Enrich all" below.
@@ -1955,8 +1983,9 @@ Photos, finish and relist deliberately have none: photos need a human holding
 the item, and the last two create listings, which isn't something to put behind
 a single button. The rules bulk runs follow — `services/bulk_actions.py`:
 
-- **Scope is never implicit.** The client sends the group's own listing ids, so a
-  group of twelve can't turn into the whole store.
+- **Scope is never implicit.** A group button's set is worked out server-side
+  from the same ranking the dashboard renders, so a group of twelve can't turn
+  into the whole store; a call that names ids reaches only those.
 - **A listing that can't take the change is skipped with a reason**, not failed —
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
@@ -1966,9 +1995,10 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
   listing is its own serial eBay call — a revise, or, for an offer, the one
   listing eBay's Negotiation API takes per request; the remainder comes back
   as `deferred` for another pass instead of the request outliving the
-  gateway. The press that finishes the details list
-  names none, so it has no remainder to defer — it is a job from the first
-  moment, and the client polls it rather than holding a request open.
+  gateway. The group buttons — finish the details list, lower every price,
+  send every offer — name none, so they have no remainder to defer: each is
+  a job from the first moment, and the client polls it rather than holding a
+  request open.
 
 Every row also carries a **dismiss** (×). The engine rebuilds this list from
 scratch on every load, so advice the seller has already considered and decided

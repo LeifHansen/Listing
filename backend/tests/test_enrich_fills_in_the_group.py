@@ -436,7 +436,6 @@ def test_the_dashboard_is_told_what_one_run_holds(seller, monkeypatch):
     monkeypatch.setattr(main.marketplaces, "get", lambda name: _AcceptingEbay())
 
     caps = client.get("/api/insights").json()["bulk_caps"]
-    assert caps["lower_price"] == main.BULK_PRICE_CAP
 
     body = client.post("/api/listings/enrich", json={"listing_ids": ids}).json()
     assert body["total"] == caps["specifics"] == 2
