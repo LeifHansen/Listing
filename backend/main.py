@@ -9099,6 +9099,22 @@ def _metrics_by_record_id(creds: Optional[dict], items: list,
     return {id_by_ebay[eid]: m for eid, m in raw.items() if eid in id_by_ebay}
 
 
+def _offer_eligible(creds: Optional[dict], metrics_by_id: dict):
+    """The eBay listing ids eBay will carry an offer for right now, or None.
+
+    What the "Send offers" suggestion is gated on, so it names only listings
+    the button can actually send to (see recommender.recommend_for). Only
+    asked when some listing HAS watchers — the rule needs one, so on a store
+    nobody is watching the answer could not change anything and the call is
+    not spent. None when eBay could not be asked; the rule then falls back to
+    the watch count.
+    """
+    if not creds or not any((m or {}).get("watchers")
+                            for m in (metrics_by_id or {}).values()):
+        return None
+    return ebay_offers.eligible_cached(creds)
+
+
 @app.get("/api/ebay/listing-metrics")
 def listing_metrics_route(request: Request, refresh: int = 0) -> dict:
     """eBay views/impressions/watchers/pending offers for the user's live
@@ -9356,7 +9372,8 @@ def insights(request: Request) -> dict:
         metrics_by_id = _metrics_by_record_id(creds, items)
         recs = recommender.ranked(
             items, metrics_by_id=metrics_by_id,
-            blanks_by_id=_blank_specifics_by_id(items))
+            blanks_by_id=_blank_specifics_by_id(items),
+            offer_eligible=_offer_eligible(creds, metrics_by_id))
         return {"recommendations": recommender.capped_by_type(
                     recs, INSIGHTS_GROUP_CAP),
                 # How big each group actually is, counted on the whole
@@ -10108,9 +10125,11 @@ def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
     set assembled from its own rules would drift from the badge the moment
     either side changed.
     """
+    metrics_by_id = _metrics_by_record_id(creds, items)
     recs = recommender.ranked(
-        items, metrics_by_id=_metrics_by_record_id(creds, items),
-        blanks_by_id=_blank_specifics_by_id(items))
+        items, metrics_by_id=metrics_by_id,
+        blanks_by_id=_blank_specifics_by_id(items),
+        offer_eligible=_offer_eligible(creds, metrics_by_id))
     wanted = {r["listing_id"] for r in recs if r["type"] in FINISH_ALL_TYPES}
     return [it for it in items if it.get("id") in wanted]
 

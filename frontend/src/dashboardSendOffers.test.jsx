@@ -180,6 +180,30 @@ describe("send offers", () => {
     await act(async () => { root.unmount(); });
   });
 
+  it("says why a listing was skipped", async () => {
+    /* "1 skipped" alone is a button that did nothing and will not say why —
+       which is how this was reported. The server sends the reason per
+       listing; the toast carries it. */
+    const { root, text } = await mount([], {
+      groupTotals: { send_offers: 2 },
+      result: {
+        changed: 1, skipped: 1, failed: 0, deferred: 0, percent: 10,
+        results: {
+          changed: [{ listing_id: "a", title: "Nike hoodie" }],
+          skipped: [{ listing_id: "b", title: "Canon AE-1",
+                      message: "eBay has no interested buyers for it right now." }],
+          failed: [],
+        },
+      },
+    });
+    await click(byText("Send offers…"));
+    await click(buttons().find((b) =>
+      (b.textContent || "").startsWith("Offer 2 listings at")));
+    expect(text()).toContain(
+      "Canon AE-1: eBay has no interested buyers for it right now.");
+    await act(async () => { root.unmount(); });
+  });
+
   it("names the part of the group one pass reaches", async () => {
     /* Each offer is its own eBay call, so a run is capped and the remainder
        comes back for a second press — said before the seller agrees to it. */

@@ -167,6 +167,99 @@ def test_the_traffic_price_nudge_still_owns_the_unwatched_listing():
     assert _types(item, {"views": 40, "watchers": 0}) == ["lower_price"]
 
 
+# ------------------------------------------- only what eBay will carry
+
+def test_a_watched_listing_ebay_will_not_offer_is_not_suggested():
+    """The report: the button skipped every listing it was pressed on, and
+    the group came straight back. A watcher is not what eBay counts, and the
+    send skips anything its sweep leaves out — so the suggestion has to leave
+    it out too, or it is advice the button can only refuse."""
+    recs = recommender.recommend_for(_live(), metrics={"watchers": 3},
+                                     offer_eligible=frozenset({"999"}))
+    assert "send_offers" not in [r["type"] for r in recs]
+
+
+def test_a_listing_ebay_names_is_still_offered():
+    recs = recommender.recommend_for(
+        _live(), metrics={"watchers": 3},
+        offer_eligible=frozenset({"110040602158"}))
+    assert recs[0]["type"] == "send_offers"
+
+
+def test_ebay_unasked_falls_back_to_the_watch_count():
+    """None is "could not ask", not "nothing is eligible" — reading it as the
+    second would hide every offer on a store that has interested buyers."""
+    recs = recommender.recommend_for(_live(), metrics={"watchers": 3},
+                                     offer_eligible=None)
+    assert recs[0]["type"] == "send_offers"
+
+
+def test_the_ranking_carries_ebays_answer_through():
+    item = _live()
+    item["created_at"] = _days_ago(recommender.STALE_DAYS + 5)
+    recs = recommender.ranked([item], {item["id"]: {"watchers": 2}},
+                              offer_eligible=frozenset())
+    # Not offered, so the listing falls to the next thing it has earned.
+    assert recs[0]["type"] == "lower_price"
+
+
+class _Sweep:
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = 0
+
+    def __call__(self, _creds, client=None):
+        self.calls += 1
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.fixture()
+def fresh_cache(monkeypatch):
+    monkeypatch.setattr(ebay_offers, "_ELIGIBLE_CACHE", {})
+
+
+def test_the_suggestion_sweep_is_ebays_answer(fresh_cache, monkeypatch):
+    monkeypatch.setattr(ebay_offers, "eligible_items", _Sweep({"110"}))
+    assert ebay_offers.eligible_cached({"access_token": "tok-a"}) == {"110"}
+
+
+def test_an_unreadable_sweep_is_not_an_empty_one(fresh_cache, monkeypatch):
+    for failure in (RuntimeError("eligible items failed (500)"),
+                    ebay_offers.ScopeError()):
+        monkeypatch.setattr(ebay_offers, "eligible_items", _Sweep(failure))
+        assert ebay_offers.eligible_cached({"access_token": "tok-b"}) is None
+
+
+def test_no_token_is_not_asked(fresh_cache, monkeypatch):
+    sweep = _Sweep({"110"})
+    monkeypatch.setattr(ebay_offers, "eligible_items", sweep)
+    assert ebay_offers.eligible_cached({}) is None
+    assert ebay_offers.eligible_cached(None) is None
+    assert sweep.calls == 0
+
+
+def test_the_dashboard_asks_once_per_few_minutes(fresh_cache, monkeypatch):
+    """Every dashboard load with a watched listing asks, and eBay's allowance
+    is shared by the whole app."""
+    sweep = _Sweep({"110"})
+    monkeypatch.setattr(ebay_offers, "eligible_items", sweep)
+    for _ in range(3):
+        ebay_offers.eligible_cached({"access_token": "tok-c"})
+    assert sweep.calls == 1
+
+
+def test_a_failed_sweep_is_asked_again_next_time(fresh_cache, monkeypatch):
+    """A failure is not cached: it answers None, which is the fallback, and
+    the next load gets another chance at the real answer."""
+    sweep = _Sweep(RuntimeError("eligible items failed (503)"))
+    monkeypatch.setattr(ebay_offers, "eligible_items", sweep)
+    ebay_offers.eligible_cached({"access_token": "tok-d"})
+    ebay_offers.eligible_cached({"access_token": "tok-d"})
+    assert sweep.calls == 2
+
+
 # ------------------------------------------------------------ the run itself
 
 pytest.importorskip("fastapi")
@@ -431,6 +524,55 @@ def test_an_unbounded_selection_is_refused_rather_than_run(seller, monkeypatch):
               "listing_ids": [str(i) for i in range(main.BULK_SELECT_CAP + 1)]})
     assert res.status_code == 400
     assert fake.sent == []
+
+
+def _offer_group(client) -> list[dict]:
+    r = client.get("/api/insights")
+    assert r.status_code == 200, r.text
+    return [rec for rec in r.json()["recommendations"]
+            if rec["type"] == "send_offers"]
+
+
+def test_the_dashboard_only_suggests_what_ebay_will_carry(seller, monkeypatch):
+    """End to end: two watched listings, eBay's sweep names one of them, and
+    the group is that one — the same answer the button will give."""
+    client, dbmod, uid = seller
+    _stock(dbmod, uid, "a", images=["1.jpg", "2.jpg", "3.jpg"])
+    _stock(dbmod, uid, "b", images=["1.jpg", "2.jpg", "3.jpg"])
+    monkeypatch.setattr(main, "_metrics_by_record_id",
+                        lambda creds, items, status=None, fresh=False:
+                        {"a": {"watchers": 2}, "b": {"watchers": 4}})
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached",
+                        lambda creds: frozenset({"11a"}))
+    assert [r["listing_id"] for r in _offer_group(client)] == ["a"]
+
+
+def test_the_dashboard_falls_back_to_watchers_when_ebay_cannot_say(
+        seller, monkeypatch):
+    client, dbmod, uid = seller
+    _stock(dbmod, uid, "a", images=["1.jpg", "2.jpg", "3.jpg"])
+    monkeypatch.setattr(main, "_metrics_by_record_id",
+                        lambda creds, items, status=None, fresh=False:
+                        {"a": {"watchers": 2}})
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached", lambda creds: None)
+    assert [r["listing_id"] for r in _offer_group(client)] == ["a"]
+
+
+def test_a_store_nobody_watches_spends_no_sweep(seller, monkeypatch):
+    client, dbmod, uid = seller
+    _stock(dbmod, uid, "a")
+    monkeypatch.setattr(main, "_metrics_by_record_id",
+                        lambda creds, items, status=None, fresh=False:
+                        {"a": {"watchers": 0, "views": 3}})
+
+    # Recorded rather than raised: /api/insights swallows its own failures,
+    # so a raise here would pass by emptying the page.
+    asked: list = []
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached",
+                        lambda creds: asked.append(creds) or None)
+    r = client.get("/api/insights")
+    assert r.status_code == 200, r.text
+    assert asked == []
 
 
 def test_the_group_knows_how_big_one_press_is(seller):

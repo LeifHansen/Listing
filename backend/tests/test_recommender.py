@@ -3,11 +3,11 @@ the grouped dashboard view depends on (pure module, CI-safe)."""
 from backend.services import recommender
 
 
-def _published(i: int) -> dict:
-    # No metrics, no photos -> each yields at least the priority-50 "Add more
-    # photos" rec (and "Fill in details" at 45, which the dedupe drops).
+def _published(i: int, **item) -> dict:
+    # No metrics, no specifics -> each yields at least the priority-45 "Fill
+    # in details" rec.
     return {"id": f"rec{i}", "status": "published", "title": f"Item {i}",
-            "listing": {"title": f"Item {i}", "images": []}}
+            "listing": {"title": f"Item {i}", "images": []}, **item}
 
 
 def test_default_limit_caps_at_eight():
@@ -22,12 +22,14 @@ def test_raised_limit_returns_full_membership():
 
 
 def test_one_rec_per_listing_keeps_strongest():
-    items = [_published(i) for i in range(20)]
+    # Live since 2020: each also earns the age-driven "Lower the price" (68).
+    items = [_published(i, created_at="2020-01-01T00:00:00+00:00")
+             for i in range(20)]
     recs = recommender.recommendations(items, limit=50)
     ids = [r["listing_id"] for r in recs]
     assert len(ids) == len(set(ids))
-    # Every item's specifics rec (priority 45) lost to its photos rec (50).
-    assert all(r["type"] == "photos" for r in recs)
+    # Every item's specifics rec (priority 45) lost to its price rec (68).
+    assert all(r["type"] == "lower_price" for r in recs)
 
 
 def test_sorted_by_priority_desc():
