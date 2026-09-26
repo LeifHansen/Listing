@@ -93,13 +93,14 @@ function json(body) {
 // (/api/insights); `statuses` are polls to serve before the finished one, for
 // the live progress line.
 function server(calls, { jobResult, recs, bulkCaps, groupTotals,
-                        statuses, finishAll, tokens } = {}) {
+                        statuses, finishAll, tokens, lowerResult } = {}) {
   let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
     if (path === "/api/ebay/lower-prices") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
-      return json({ changed: 1, skipped: 0, failed: 0, deferred: 0 });
+      return json(lowerResult
+        || { changed: 1, skipped: 0, failed: 0, deferred: 0 });
     }
     if (path === "/api/listings/finish-all") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
@@ -547,6 +548,29 @@ describe("nothing on the list is hidden any more", () => {
     await click(buttons().find(
       (b) => (b.textContent || "").startsWith("Lower 2 prices")));
     expect(calls[0].body.listing_ids).toEqual(["a", "b"]);
+    await act(async () => { root.unmount(); });
+  });
+
+  it("says why a price was left alone", async () => {
+    // "1 skipped" and nothing else is how "Lower all" was reported as not
+    // working: the seller could not tell what was wrong with the listing.
+    const { root, text } = await mount([], {
+      recs: PRICE_RECS,
+      lowerResult: {
+        changed: 1, skipped: 1, failed: 0, deferred: 0,
+        results: {
+          changed: [{ listing_id: "a", title: "Nike hoodie" }],
+          skipped: [{ listing_id: "b", title: "Canon AE-1",
+                      message: "No longer live on eBay." }],
+          failed: [],
+        },
+      },
+    });
+    await click(byText("Lower all…"));
+    await click(buttons().find(
+      (b) => (b.textContent || "").startsWith("Lower 2 prices")));
+    expect(text()).toContain("1 skipped");
+    expect(text()).toContain("Canon AE-1: No longer live on eBay.");
     await act(async () => { root.unmount(); });
   });
 });

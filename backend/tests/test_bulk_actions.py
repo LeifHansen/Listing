@@ -36,10 +36,21 @@ def test_the_floor_holds():
 def test_a_cut_that_changes_nothing_is_not_a_change():
     """Counting no-ops as 'changed' would report work that never happened."""
     assert bulk_actions.lower_price(bulk_actions.MIN_PRICE, 10) is None
-    # A percentage too small to move the price off its own charm point. The
-    # rounding is where a no-op now comes from: 0.1% of $24.99 is 2 cents, and
-    # the nearest .99 to $24.97 is the $24.99 it started on.
-    assert bulk_actions.lower_price(24.99, 0.1) is None
+
+
+# A cheap listing, where the nearest .99 to the cut is the price it started
+# on. These came back as no-ops, so "Lower all" at its default 10% skipped
+# every listing under about $5 and the suggestion never cleared. The cut the
+# seller asked for is what they get, to the cent and rounded down.
+@pytest.mark.parametrize("price, percent, expected", [
+    (4.99, 10, 4.49),
+    (2.99, 10, 2.69),
+    (1.99, 10, 1.79),
+    (5.99, 5, 5.69),
+    (24.99, 0.1, 24.96),
+])
+def test_a_cut_the_charm_point_would_undo_is_still_a_cut(price, percent, expected):
+    assert bulk_actions.lower_price(price, percent) == expected
 
 
 def test_a_listing_with_no_real_price_is_left_alone():

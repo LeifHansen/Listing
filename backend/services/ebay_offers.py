@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -77,6 +78,14 @@ MESSAGE_MAX = 2000
 # and a store with more eligible listings than that has more than any single
 # run would reach anyway.
 ELIGIBLE_LIMIT = 200
+
+# How long the dashboard reuses one seller's eligibility sweep. The dashboard
+# asks on every load that has a watched listing on it (see eligible_cached),
+# and a store's interested buyers do not change by the minute — while eBay's
+# call allowance is shared by the whole app. Same shape as the metrics cache.
+_ELIGIBLE_TTL = 300
+_ELIGIBLE_CACHE: dict[str, tuple[float, frozenset]] = {}
+_ELIGIBLE_CACHE_MAX = 200
 
 
 class ScopeError(Exception):
@@ -242,6 +251,46 @@ def eligible_items(creds: Optional[dict], client: Optional[httpx.Client] = None
     finally:
         if owned:
             client.close()
+
+
+def eligible_cached(creds: Optional[dict]) -> Optional[frozenset]:
+    """eligible_items for deciding what to SUGGEST — None when it can't be read.
+
+    The "Send offers" suggestion was built off the watch count alone, and a
+    watcher is not what eBay counts: its sweep leaves out listings whose
+    watchers it will not carry an offer to. The send has always trusted the
+    sweep and skipped those, so the group kept suggesting listings the button
+    could only ever skip: pressed, it reported them skipped, and the group
+    came back unchanged — a button that does not work. Asked here too, the
+    suggestion and the button give the same answer.
+
+    None, never an empty set, when eBay could not be asked (no token, no
+    scope, a failed call), because the caller then falls back to the watch
+    count. Reading an unreadable sweep as "nothing is eligible" would hide
+    every suggestion on a store that has interested buyers.
+    """
+    token = (creds or {}).get("access_token")
+    if not token:
+        return None
+    key = token[-12:]
+    now = time.time()
+    hit = _ELIGIBLE_CACHE.get(key)
+    if hit and now - hit[0] < _ELIGIBLE_TTL:
+        return hit[1]
+    try:
+        found = frozenset(eligible_items(creds))
+    except Exception as exc:  # noqa: BLE001 - a suggestion never breaks a page
+        log.info("eligible-items sweep unavailable for suggestions: %s", exc)
+        return None
+    if len(_ELIGIBLE_CACHE) >= _ELIGIBLE_CACHE_MAX:
+        for stale in [k for k, (at, _) in _ELIGIBLE_CACHE.items()
+                      if now - at >= _ELIGIBLE_TTL]:
+            _ELIGIBLE_CACHE.pop(stale, None)
+        while len(_ELIGIBLE_CACHE) >= _ELIGIBLE_CACHE_MAX:
+            _ELIGIBLE_CACHE.pop(min(_ELIGIBLE_CACHE,
+                                    key=lambda k: _ELIGIBLE_CACHE[k][0]), None)
+    _ELIGIBLE_CACHE[key] = (now, found)
+    return found
 
 
 def send_offer(creds: Optional[dict], listing_id: str, percent: float,

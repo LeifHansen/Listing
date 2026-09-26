@@ -63,6 +63,19 @@ const runCount = (n, total, noun) =>
 // make a group claim to be smaller than what it is showing.
 const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
 
+// "• Nike hoodie: Nobody is watching that listing yet." — one line per
+// listing a bulk run left alone, in the server's own words. "1 skipped" on its
+// own is a button that did nothing and will not say why: the seller pressed
+// "Lower all", read "1 skipped", and had no way to find out what was wrong.
+// Three at most, and the rest counted, which is what a toast has room for.
+const reasonLines = (rows) => {
+  const lines = rows.slice(0, 3).map(
+    (r) => `• ${r.title || "A listing"}: ${r.message}`);
+  const more = rows.length - lines.length;
+  if (more > 0) lines.push(`• …and ${more} more`);
+  return lines;
+};
+
 /* Finishing a listing's details is ONE group, and there is no second half.
    
    It was two, stacked, and the seller read them as one thing twice:
@@ -702,8 +715,12 @@ export function Dashboard() {
       // added back on here.
       const left = unsent + (res.deferred || 0);
       if (left) parts.push(`${left} left — run it again to finish`);
-      toast(parts.join(" · ") || "Nothing to change.", {
+      const results = res.results || {};
+      const lines = reasonLines(
+        [...(results.failed || []), ...(results.skipped || [])]);
+      toast([parts.join(" · ") || "Nothing to change.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
       });
       refreshInsights();
       loadListings({ quiet: true });
@@ -731,8 +748,12 @@ export function Dashboard() {
       if (res.failed) parts.push(`${res.failed} failed`);
       const left = unsent + (res.deferred || 0);
       if (left) parts.push(`${left} left — run it again to finish`);
-      toast(parts.join(" · ") || "No offers to send.", {
+      const results = res.results || {};
+      const lines = reasonLines(
+        [...(results.failed || []), ...(results.skipped || [])]);
+      toast([parts.join(" · ") || "No offers to send.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
       });
       refreshInsights();
       loadListings({ quiet: true });
@@ -836,11 +857,7 @@ export function Dashboard() {
       if (ours) parts.push(`${ours} couldn't be filled in`);
       if (res.failed) parts.push(`${res.failed} failed`);
       if (res.stopped) parts.push(res.stopped);
-      const undone = [...theirs, ...(results.failed || [])];
-      const lines = undone.slice(0, 3).map(
-        (r) => `• ${r.title || "A listing"}: ${r.message}`);
-      const more = undone.length - lines.length;
-      if (more > 0) lines.push(`• …and ${more} more`);
+      const lines = reasonLines([...theirs, ...(results.failed || [])]);
       toast([parts.join(" · ") || "Nothing left to do.", ...lines].join("\n"), {
         kind: res.failed ? "error" : "success",
         ttl: lines.length ? 12000 : undefined,
