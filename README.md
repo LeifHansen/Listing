@@ -890,9 +890,9 @@ one `PATCH /api/listings/{id}` per number, naming that field alone, never the
 summary the card is holding (see `main.patch_listing`). **Drafts only**, like
 the two controls above it: a live listing's price *is* revisable, but only
 through a revise, and a number changed here would leave this app and eBay
-disagreeing with nothing on either screen saying so. Repricing a live listing
-keeps its own routes — the editor's save, and the dashboard's "Lower prices"
-group — both of which push the change to eBay.
+disagreeing with nothing on either screen saying so. A live listing is repriced
+from its card's **Quick edit** instead (below), the editor's save, or the
+dashboard's "Lower prices" group — all of which push the change to eBay.
 
 **An auction is started, not priced,** and that is a different number rather
 than the same one relabelled. "Check market price" answers the Buy It Now
@@ -943,6 +943,44 @@ A lookup that failed is still not a market with nothing in it — the card runs
 the answer through the same `priceView` split the editor and Shop Mode use, so
 "we couldn't check" never arrives as "no comparable listings, try a simpler
 title".
+
+### Quick edit, on every card in Manage
+
+The grid on Manage could only *open* a live listing. Every card there now
+carries a collapsed **Quick edit** toggle — a strip along the foot of a grid
+tile, a labelled button among a list row's controls — that opens the fields a
+seller changes most right under the card, without leaving the grid: title,
+price (Buy It Now on an auction that has one), available quantity, condition
+(eBay's ladder for the listing's category, fetched when the panel opens),
+brand, shipping policy, and **You paid** — the cost basis the profit line
+reads, which never goes to any marketplace. Live listings, drafts and Shop
+Mode finds get it; a sale or an ended listing opens the editor as before,
+because eBay does not revise a finished item.
+
+It is one request, `POST /api/listings/{id}/quick-edit`, and it is what makes
+the panel safe on a live listing where the draft controls are not:
+
+- **A draft or a find is saved, and that is all.** A draft's price stays with
+  its own card control above, so a card never shows two price boxes.
+- **A live listing is saved and revised in the same request**, through the
+  same provider the editor's Update uses, on every marketplace it is live on —
+  eBay when the record carries an item id, anywhere else whose state says
+  published. It never creates a listing anywhere.
+- **Only what the seller touched is sent**, and only fields whose value
+  actually moved are marked for the revise (`dirty_fields`) — a stale card
+  re-sending eBay's own price sends nothing.
+- **A change no marketplace took is put back.** The card shows what the record
+  holds, and a refused price left there would be a card disagreeing with the
+  listing it shows. The panel stays open on eBay's reason with what was typed
+  still in the boxes. An answer that never came back is *not* undone — it may
+  well be live — and neither is a fan-out one marketplace accepted.
+- **Refused before anything is written:** an unconnected eBay account, a
+  listing with size/colour variations (eBay's revise would refuse it whole),
+  a live plain auction's price, an empty or over-80-character title.
+
+The grid is a CSS subgrid — each card owns two rows, the card and whatever
+opens under it — so a panel opening under one card pushes the next row down
+without stretching the cards beside it.
 
 ### A draft arrives finished
 
@@ -1022,6 +1060,7 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `PUT`  | `/api/listing-views` | Replace the strip. Stores the *question* and never the listings it matched, so a view called "Needs photos" empties as the photos get taken |
 | `GET`  | `/api/listings/export.csv` | The **whole store as a spreadsheet**: every listing on the account in every state, with a link to every photo. Streamed and keyset-paged, so a big store costs one page of memory rather than one store; `X-Export-Total` says how many listings there are, so a download that was cut can be told from a complete one |
 | `GET`  | `/api/listings/{id}` | Fetch one saved listing (ownership-checked) |
+| `POST` | `/api/listings/{id}/quick-edit` | A card's **Quick edit**: named fields only (title, price, quantity, condition, brand, shipping policy, what you paid). Saves a draft; saves **and revises** a live listing on every marketplace it is live on, and puts the change back if none of them took it |
 | `POST` | `/api/listings/{id}/relist` | Copy a settled listing into a **new draft** — sale-specific fields cleared, photos copied, the original left untouched |
 | `POST` | `/api/listings/merge/preview` | Duplicate drafts merged under a chosen master, worked out but not written: the fields the drafts disagree about, and the blanks a duplicate fills in |
 | `POST` | `/api/listings/merge` | Consolidate duplicate drafts into the master — photos combined, `field_choices` applied, sources deleted |
