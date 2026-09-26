@@ -579,4 +579,29 @@ describe("nothing on the list is hidden any more", () => {
     expect(calls[0]).toEqual({ path: "/api/ebay/lower-all", body: { percent: 10 } });
     await act(async () => { root.unmount(); });
   });
+
+  it("says why a price was left alone", async () => {
+    // "1 skipped" and nothing else is how "Lower all" was reported as not
+    // working: the seller could not tell what was wrong with the listing.
+    const { root, text } = await mount([], {
+      recs: PRICE_RECS,
+      // What the run's job finishes with — the press is a job now, and its
+      // result carries the same per-listing reasons the old reply did.
+      jobResult: {
+        percent: 10, changed: 1, skipped: 1, failed: 0, deferred: 0,
+        results: {
+          changed: [{ listing_id: "a", title: "Nike hoodie" }],
+          skipped: [{ listing_id: "b", title: "Canon AE-1",
+                      message: "No longer live on eBay." }],
+          failed: [],
+        },
+      },
+    });
+    await click(byText("Lower all…"));
+    await click(buttons().find(
+      (b) => (b.textContent || "").startsWith("Lower 2 prices")));
+    expect(text()).toContain("1 skipped");
+    expect(text()).toContain("Canon AE-1: No longer live on eBay.");
+    await act(async () => { root.unmount(); });
+  });
 });

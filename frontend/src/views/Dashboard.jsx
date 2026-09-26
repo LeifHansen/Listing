@@ -65,6 +65,19 @@ const runCount = (n, total, noun) =>
 // make a group claim to be smaller than what it is showing.
 const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
 
+// "• Nike hoodie: Nobody is watching that listing yet." — one line per
+// listing a bulk run left alone, in the server's own words. "1 skipped" on its
+// own is a button that did nothing and will not say why: the seller pressed
+// "Lower all", read "1 skipped", and had no way to find out what was wrong.
+// Three at most, and the rest counted, which is what a toast has room for.
+const reasonLines = (rows) => {
+  const lines = rows.slice(0, 3).map(
+    (r) => `• ${r.title || "A listing"}: ${r.message}`);
+  const more = rows.length - lines.length;
+  if (more > 0) lines.push(`• …and ${more} more`);
+  return lines;
+};
+
 /* Finishing a listing's details is ONE group, and there is no second half.
    
    It was two, stacked, and the seller read them as one thing twice:
@@ -84,7 +97,7 @@ const DETAILS = "specifics";
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
   lower_price: TrendingDown, send_offers: BadgePercent,
-  finish: PlusCircle, photos: Camera, specifics: ListChecks,
+  finish: PlusCircle, specifics: ListChecks,
 };
 const REC_TONE = {
   lower_price: "bg-yellow-soft text-warning",
@@ -94,7 +107,6 @@ const REC_TONE = {
   // engine ranks it (see recommender's send_offers rule).
   send_offers: "bg-green-soft text-success",
   finish: "bg-blue-soft text-blue",
-  photos: "bg-blue-soft text-blue",
   specifics: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
@@ -103,7 +115,6 @@ const REC_GROUP_LABEL = {
   lower_price: "Lower prices",
   send_offers: "Send offers",
   finish: "Finish & list",
-  photos: "Add more photos",
   // The noun form of "Fill in details", and the group Enrich all clears.
   [DETAILS]: "Finish details",
 };
@@ -132,8 +143,8 @@ function RecRow({ rec, openListing, onAct, ActIcon }) {
         <p className="font-semibold text-sm text-ink truncate">{rec.listing_title}</p>
         <p className="text-[13px] text-ink-secondary">{rec.reason}</p>
       </div>
-      {/* Most rows are a way IN to the listing: the work — another photo, a
-          measurement, a new price — is done in the editor, and the arrow says
+      {/* Most rows are a way IN to the listing: the work — a measurement, a
+          new price — is done in the editor, and the arrow says
           so. `onAct` is for the row whose work is not in the editor at all:
           an offer to this listing's watchers is a call to eBay and there is
           nothing in the editor to press, so that row does the thing instead
@@ -151,9 +162,8 @@ function RecRow({ rec, openListing, onAct, ActIcon }) {
 // times by hand is the whole problem. `amount` marks the ones that need a
 // number first (lower prices by HOW much); the rest fire on click.
 //
-// Photos and finish are deliberately absent: photos need a human holding the
-// item, and finishing a draft creates a listing, which is not something to hand
-// a single button.
+// Finish is deliberately absent: finishing a draft creates a listing, which is
+// not something to hand a single button.
 const BULK_ACTIONS = {
   // Finishing a listing's details used to be a prompt to go and do it: open
   // each one, wait for the AI to read its photos, save, repeat. It is the
@@ -199,8 +209,8 @@ const BULK_ACTIONS = {
     verb: "Send offers…",
     icon: BadgePercent,
     // ...and the same verb on a single row. The other groups' rows are a way
-    // into the editor, because that is where another photo or a new price
-    // gets made; there is nothing in the editor that sends an offer, so a row
+    // into the editor, because that is where a new price gets made;
+    // there is nothing in the editor that sends an offer, so a row
     // that walked the seller there would be a button that leads nowhere. This
     // one opens the same amount panel for that one listing instead.
     perRow: true,
@@ -721,8 +731,12 @@ export function Dashboard() {
       if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${cut}%`);
       if (res.skipped) parts.push(`${res.skipped} skipped`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      toast(parts.join(" · ") || "Nothing to change.", {
+      const results = res.results || {};
+      const lines = reasonLines(
+        [...(results.failed || []), ...(results.skipped || [])]);
+      toast([parts.join(" · ") || "Nothing to change.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
       });
       refreshInsights();
       loadListings({ quiet: true });
@@ -753,8 +767,12 @@ export function Dashboard() {
       if (res.failed) parts.push(`${res.failed} failed`);
       const left = unsent + (res.deferred || 0);
       if (left) parts.push(`${left} left — run it again to finish`);
-      toast(parts.join(" · ") || "No offers to send.", {
+      const results = res.results || {};
+      const lines = reasonLines(
+        [...(results.failed || []), ...(results.skipped || [])]);
+      toast([parts.join(" · ") || "No offers to send.", ...lines].join("\n"), {
         kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
       });
       refreshInsights();
       loadListings({ quiet: true });
@@ -850,11 +868,7 @@ export function Dashboard() {
       if (ours) parts.push(`${ours} couldn't be filled in`);
       if (res.failed) parts.push(`${res.failed} failed`);
       if (res.stopped) parts.push(res.stopped);
-      const undone = [...theirs, ...(results.failed || [])];
-      const lines = undone.slice(0, 3).map(
-        (r) => `• ${r.title || "A listing"}: ${r.message}`);
-      const more = undone.length - lines.length;
-      if (more > 0) lines.push(`• …and ${more} more`);
+      const lines = reasonLines([...theirs, ...(results.failed || [])]);
       toast([parts.join(" · ") || "Nothing left to do.", ...lines].join("\n"), {
         kind: res.failed ? "error" : "success",
         ttl: lines.length ? 12000 : undefined,

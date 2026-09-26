@@ -44,6 +44,9 @@ def seller(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
     monkeypatch.setattr(main, "_ebay_creds_for",
                         lambda request: {"access_token": "t"})
+    # The "Send offers" rule asks eBay who it will carry an offer for once a
+    # listing has watchers. Not what this is about, and never the network.
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached", lambda creds: None)
     main._REPRICE_JOBS.clear()
     ratelimit.reset()
     client = TestClient(main.app)

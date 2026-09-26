@@ -19,6 +19,7 @@ The rules that matter for a bulk edit, as opposed to a single one:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -57,9 +58,16 @@ def lower_price(current: float, percent: float) -> Optional[float]:
     $25.00 is $20.00, and a whole dollar is the one thing these must not be),
     floored at MIN_PRICE, and None when the listing has no usable price or the
     result wouldn't actually be lower — a "changed" count that includes no-ops
-    is a lie about what the bulk action did. Landing on the nearest .99 moves
-    the cut by up to half a dollar in either direction, so a percentage this
-    small is reported as the no-op it is rather than applied as a rounding.
+    is a lie about what the bulk action did.
+
+    Except where the .99 would undo the cut. Landing on the nearest .99 moves
+    the price by up to half a dollar in either direction, and on a cheap
+    listing that is more than the whole cut: 10% off $4.99 is $4.49, whose
+    nearest .99 is the $4.99 it started on. That used to come back as a no-op
+    and a skip, so "Lower all" skipped every listing under about $5 at its
+    default 10% — while the suggestion, which the cut never cleared, stayed on
+    screen asking for it. The seller asked for a cut, so where the charm point
+    would take it away they get the cut itself, to the cent and rounded down.
     """
     try:
         price = round(float(current or 0), 2)
@@ -67,8 +75,13 @@ def lower_price(current: float, percent: float) -> Optional[float]:
         return None
     if price <= 0:
         return None
-    new_price = charm_price(price * (1 - percent / 100.0))
-    if new_price is None or new_price < MIN_PRICE:
+    exact = price * (1 - percent / 100.0)
+    new_price = charm_price(exact)
+    if new_price is None or new_price >= price:
+        # Rounded to six places first so float noise (448.99999…) cannot
+        # floor a whole cent off the cut.
+        new_price = math.floor(round(exact * 100, 6)) / 100
+    if new_price < MIN_PRICE:
         new_price = MIN_PRICE
     return new_price if new_price < price else None
 
