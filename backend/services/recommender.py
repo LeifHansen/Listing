@@ -1,9 +1,8 @@
 """Seller action recommendations — the app's 'what should I do next' engine.
 
-Rules over the signals we already have (listing status, age, price, photos,
-missing details) turn a pile of listings into a short, ranked list of concrete
-next actions: finish a draft, drop a stale price, add photos, fill in missing
-details.
+Rules over the signals we already have (listing status, age, price, missing
+details) turn a pile of listings into a short, ranked list of concrete next
+actions: finish a draft, drop a stale price, fill in missing details.
 
 eBay traffic (views/watchers), when available, sharpens these: a listing with
 lots of views but no watchers is priced too high. Pass a per-listing metrics
@@ -16,7 +15,6 @@ from datetime import datetime, timezone
 from typing import AbstractSet, Optional
 
 STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
-FEW_PHOTOS = 3    # fewer than this → suggest adding photos
 
 # What a price drop BUYS: neither price nudge below comes back until the new
 # price has had this long to be seen.
@@ -225,7 +223,6 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     views = m.get("views")
     watchers = m.get("watchers")
     age = _age_days(item.get("created_at"))
-    images = listing.get("images") or listing.get("image_urls") or []
     # How long ago the asking price was last CUT, in days — None when it never
     # has been. Both price rules below are gated on it, because neither of the
     # signals they read moves when a seller takes the advice: see
@@ -293,10 +290,7 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     elif age is not None and age >= STALE_DAYS:
         add("lower_price", "Lower the price",
             f"Live {age} days — a price drop can restart interest.", 68)
-    if len(images) < FEW_PHOTOS:
-        n = len(images)
-        add("photos", "Add more photos",
-            f"Only {n} photo{'' if n == 1 else 's'} — more angles mean more sales.", 50)
+    # (No "Add more photos" nudge — removed on request.)
     # Two signals decide this, and they answer the same question at different
     # prices.
     #
