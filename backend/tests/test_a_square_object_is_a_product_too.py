@@ -58,7 +58,7 @@ TILE = (238, 236, 232)
 
 def _framed_print(size=SIZE, box=(280, 160, 900, 760)):
     """A print in a frame on a surface almost its own colour -- the photo
-    artwork.border() is entitled to give up on."""
+    artwork.outline() is entitled to give up on."""
     img = Image.new("RGB", size, FLOOR)
     draw = ImageDraw.Draw(img)
     draw.rectangle(box, fill=(210, 206, 200), outline=(198, 194, 188), width=3)
@@ -117,10 +117,10 @@ def local_only(monkeypatch):
 
 @pytest.fixture()
 def no_scan(monkeypatch):
-    """artwork.border() gives up. Patched rather than drawn, because what is
+    """artwork.outline() gives up. Patched rather than drawn, because what is
     under test is what happens NEXT -- test_a_painting_is_never_cut_into.py
     is where the scan itself is proved."""
-    monkeypatch.setattr(artwork, "border", lambda rgb: None)
+    monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
 
 def _model(monkeypatch, matte):
@@ -231,7 +231,8 @@ def test_a_scanned_border_is_still_the_answer_when_there_is_one(local_only,
     """Geometry first, unchanged: it cannot be wrong about what is inside the
     box it returns, so the model is only ever the fallback."""
     img, _ = _framed_print()
-    monkeypatch.setattr(artwork, "border", lambda rgb: (100, 100, 900, 700))
+    monkeypatch.setattr(artwork, "outline", lambda rgb: (
+        ((100, 100), (900, 100), (900, 700), (100, 700)),))
     asked = _model(monkeypatch, lambda rgb: _tilted(rgb.size, 6))
 
     assert images.art_cutout(img) is not None

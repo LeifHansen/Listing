@@ -1389,22 +1389,57 @@ front surface *is* an image, which is what keeps a mug with a boat printed on
 it a mug. A yes routes the photo to `services/artwork` and `images.art_cutout`
 instead, where the rule is geometric:
 
-> **Find the outer border. Keep everything inside it, whole. Never ask what is
+> **Find the outer outline. Keep everything inside it, whole. Never ask what is
 > interesting within it.**
 
-That makes the guarantee structural rather than statistical: `artwork.mask`
-returns a **filled rectangle**, so no code path on the art side can remove a
-pixel from the middle of a painting.
+That makes the guarantee structural rather than statistical:
+`artwork.outline_matte` fills the outline's four corners **solid**, so no code
+path on the art side can remove a pixel from the middle of a painting.
 
-Finding the border is two steps, both Pillow-only. A content mask (colour
-distance from the surround, ORed with local contrast) locates the picture and
-proves it is one — a picture **fills its own bounding box**, which is what
-still refuses the tree-at-one-edge-and-boat-at-the-other shape. Then each side
-is scanned **inward from the edge of the photo** to the first line that is not
-surround. Inward, because a white-mounted print leaves eighty pixels of blank
-paper between the printed area and the sheet's own edge, and a scan starting
-at the artwork has nothing in that gap to grow along; one starting at the wall
-crosses it without ever standing on it.
+**Finding the outline: flooded in from the edge of the photo.** The first
+version of this measured every pixel's distance from *one* background colour
+(the median of a band round the frame) and called anything far enough from it
+the picture. Flat-colour tests passed; photos taken in a room did not. A lamp
+lights a wall unevenly, a phone darkens its own corners, a frame throws a
+shadow, a floor has planks, and a picture propped up to be photographed has
+wall above it and floor below — each of those read as part of the picture,
+glued itself to the frame, and turned the rectangle into a shape that was not
+one. Sellers reported it as "fails nearly every time for art pieces despite the
+item being fully in frame", and on 300 generated room photos of that kind it
+produced a good cutout for 30 of them.
+
+`artwork.outline()` asks a different question: not how far a pixel is from the
+background colour, but **how strong an edge has to be crossed to reach it from
+outside the photo** (`_reach`, one pass of a bucket queue over a
+median-smoothed copy). A lit wall, a vignette, a soft shadow and a floor
+meeting a wall have no edge anywhere in them, so they are all reached for free;
+the frame's outer edge is a real step, so everything inside it costs at least
+that much. Thresholds are walked **upward** and the first one at which a clean
+four-cornered shape comes free is the answer — lowest first, so it is the
+frame that is found rather than the mount inside it. Then:
+
+- **Four corners, not a rectangle.** Hand-held shots tilt a picture and shots
+  from above or below taper it; each side is a line fitted to the region's own
+  edge, re-laid in stretches along the first real edge met coming in from
+  outside. The corners must fit the shape closely both ways, with no corner a
+  photograph of a rectangle cannot have and no side under 0.7 of the side
+  opposite it — a circle, a wreath, a figure, a lopsided kite are refused.
+- **Not a part of something larger.** As the bar rises, an object's weaker
+  edges give way first (a pale face before dark shoulders). If a solid piece
+  of what the shape belonged to has dissolved, the shape is refused.
+- **Not the mount inside a frame.** When a frame's outer edge is faint against
+  its wall the flood gets into the moulding, and the first clean shape is the
+  mount. An edge hugging that shape at a constant distance on three sides is
+  the frame, and the outline is grown out to it.
+- **Two pictures are two pictures** — both kept, and the photo refused if the
+  second large thing in it is not a picture.
+- An outline running a little past the photo's edge is clipped, which keeps
+  everything of the piece that is in the photo; only an outline that *is* the
+  photo is refused, because there is nothing to take away.
+
+On the same 300 photos: 270 good cutouts, 6 kept as shot, no piece cut into by
+more than 5%. Through the whole art path with the local model as the fallback,
+39 of 40 good against 11 before.
 
 **And when there is no clear border, nothing happens.** A picture bleeding off
 the frame, a shape that is not a rectangle, something too small to be the
@@ -1438,10 +1473,10 @@ were shot on, and the reason was "no paid API key".
 sign, a plaque, a boxed set, a record sleeve: the screen is right not to call
 these art — a tray with a map on it is a tray — so they go to the model like
 any other object, and the model drops them or keeps only the picture printed
-on their face. When nothing it returns survives the guards, `artwork.border()`
+on their face. When nothing it returns survives the guards, `artwork.outline()`
 is asked last, and the photo is cut to the rectangle if there is one
 (`bg_engine: "border"`). Only after the model has declined, so no photo that
-gets a cutout today changes, and `border()` answers None for anything that is
+gets a cutout today changes, and `outline()` answers None for anything that is
 not a rectangle, so a garment or a close-up is still kept as shot. The studio's
 **Remove background** button does the same thing, which matters most there:
 that is the button a seller presses *after* a batch left the photo as shot.
@@ -1449,7 +1484,9 @@ that is the button a seller presses *after* a batch left the photo as shot.
 One limit, stated plainly: a print with a blank white mount, on a white
 surface, under flat light with no shadow, has no detectable outer edge — there
 is nothing in the photo that distinguishes the paper from the table. The
-border then lands on the printed area and trims blank mount. The painted or
+outline then lands on the printed area and trims blank mount. The same is true
+of an unframed canvas whose painted edge is the colour of what it lies on:
+that one is kept as shot. The painted or
 printed image itself is never cut into, which is the property the tests hold.
 
 Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,

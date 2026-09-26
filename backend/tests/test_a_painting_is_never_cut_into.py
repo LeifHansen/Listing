@@ -19,23 +19,29 @@ For a painting there is no honest answer to that question.
 
 So a picture does not go to the model. It gets a geometric rule instead:
 
-    find the outer border, keep everything inside it, whole.
+    find the outer outline, keep everything inside it, whole.
 
 Two properties are what this file exists to hold down, and they are the two the
 seller asked for in those words:
 
-  * NOTHING INSIDE THE BORDER IS EVER REMOVED. Structural, not statistical:
-    artwork.mask returns a filled rectangle, so there is no code path that
-    could take a pixel out of the middle of a painting.
-  * NO CLEAR BORDER MEANS DO NOTHING. Every doubt — a picture bleeding off the
-    frame, a shape that is not a rectangle, something too small to be the
+  * NOTHING INSIDE THE OUTLINE IS EVER REMOVED. Structural, not statistical:
+    artwork.outline_matte fills the outline's corners solid, so there is no
+    code path that could take a pixel out of the middle of a painting.
+  * NO CLEAR OUTLINE MEANS DO NOTHING. Every doubt — a picture bleeding off
+    the frame, a shape that is not a rectangle, something too small to be the
     piece — returns None and the photo is kept exactly as shot. None must
     never mean "fall back to the model", because the model is the bug.
 
-Pillow only, no rembg and no download: the border is geometry, not inference.
+Most tests here ask for the BOX around the outline (_border below) and check it
+encloses the piece, because the direction that matters is the same for a box
+as for four corners: wider keeps a strip of wall, narrower cuts the artwork.
+The ones that check the matte that actually ships ask for the corners.
+
+Pillow only, no rembg and no download: the outline is geometry, not inference.
 """
 from __future__ import annotations
 
+import io
 import math
 import random
 
@@ -43,7 +49,7 @@ import pytest
 
 pytest.importorskip("PIL")
 
-from PIL import Image, ImageDraw, ImageFilter  # noqa: E402
+from PIL import Image, ImageChops, ImageDraw, ImageFilter  # noqa: E402
 
 from backend.services import artwork  # noqa: E402
 
@@ -112,6 +118,20 @@ def _bbox(corners):
             max(x for x, _ in corners), max(y for _, y in corners))
 
 
+def _border(im):
+    """The box around every outline artwork found in `im`, or None."""
+    found = artwork.outline(im)
+    if found is None:
+        return None
+    return _bbox([p for quad in found for p in quad])
+
+
+def _matte(im):
+    """The matte that actually ships for `im` — or None when nothing would."""
+    found = artwork.outline(im)
+    return None if found is None else artwork.outline_matte(im.size, found)
+
+
 def _encloses(found, truth) -> bool:
     """Whether `found` contains all of `truth`. The only direction that
     matters: a border wider than the piece keeps a strip of wall, a border
@@ -122,12 +142,13 @@ def _encloses(found, truth) -> bool:
 
 # ------------------------------------------- nothing inside is ever removed
 
-def test_the_matte_for_a_picture_is_a_solid_rectangle():
-    """The seller's requirement, held structurally. Whatever the border turns
+def test_the_matte_for_a_picture_is_a_solid_outline():
+    """The seller's requirement, held structurally. Whatever the outline turns
     out to be, everything inside it survives — there is no threshold here to
     get wrong and no shape to mis-measure."""
     box = (300, 120, 900, 800)
-    m = artwork.mask(SIZE, box)
+    m = artwork.outline_matte(SIZE, [((box[0], box[1]), (box[2], box[1]),
+                                      (box[2], box[3]), (box[0], box[3]))])
 
     for x in range(box[0], box[2], 37):
         for y in range(box[1], box[3], 37):
@@ -137,11 +158,23 @@ def test_the_matte_for_a_picture_is_a_solid_rectangle():
     assert m.getpixel((1190, 890)) == 0
 
 
+def test_an_outline_past_the_edge_of_the_photo_keeps_what_is_in_it():
+    """Corners may land a little outside the photo — a piece shot with a
+    sliver of wall is found with the rim of its own edge included. Clipped,
+    not refused: the matte keeps everything inside the outline, so it keeps
+    everything of the piece that is in the photo."""
+    m = artwork.outline_matte(SIZE, [((-8, -5), (1210, -5), (1210, 700),
+                                      (-8, 700))])
+
+    assert m.getpixel((0, 0)) == 255 and m.getpixel((1199, 0)) == 255
+    assert m.getpixel((600, 899)) == 0
+
+
 def test_the_cut_photo_keeps_every_painted_pixel():
     """End to end through the composite: the painting that comes out is the
     painting that went in, pixel for pixel, with only the wall replaced."""
     im = _framed()
-    out = artwork.mask(im.size, artwork.border(im))
+    out = _matte(im)
     inside = [(x, y) for x in range(320, 880, 40) for y in range(140, 780, 40)]
     assert all(out.getpixel(p) == 255 for p in inside)
 
@@ -157,14 +190,14 @@ def test_a_salient_subject_inside_the_picture_changes_nothing():
     d.ellipse((480, 300, 760, 640), fill=(240, 215, 195))    # the baby
     d.ellipse((560, 360, 600, 400), fill=(60, 90, 160))      # an eye
 
-    assert artwork.border(plain) == artwork.border(with_baby)
+    assert artwork.outline(plain) == artwork.outline(with_baby)
 
 
 # ----------------------------------------------------- and it finds the edge
 
 def test_a_framed_picture_on_a_wall():
     truth = (300, 120, 900, 800)
-    assert _encloses(artwork.border(_framed(truth)), truth)
+    assert _encloses(_border(_framed(truth)), truth)
 
 
 def test_a_pale_picture_on_a_dark_wall():
@@ -177,7 +210,7 @@ def test_a_pale_picture_on_a_dark_wall():
     d.rectangle(truth, fill=(245, 243, 240))
     _painted(d, (200, 260, 710, 940))
 
-    assert _encloses(artwork.border(im), truth)
+    assert _encloses(_border(im), truth)
 
 
 def test_a_picture_photographed_at_an_angle():
@@ -188,7 +221,7 @@ def test_a_picture_photographed_at_an_angle():
     d.polygon([(320, 140), (910, 180), (890, 790), (300, 750)], fill=FRAME)
     _painted(d, (360, 220, 860, 720))
 
-    assert _encloses(artwork.border(im), (300, 140, 910, 790))
+    assert _encloses(_border(im), (300, 140, 910, 790))
 
 
 # --- and it survives being hand-held -----------------------------------------
@@ -210,7 +243,7 @@ def test_a_framed_picture_shot_hand_held_is_still_a_picture(deg):
     thing in front of them stop being a picture."""
     im, corners = _hand_held(deg)
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, f"refused at {deg} degrees"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -218,14 +251,12 @@ def test_a_framed_picture_shot_hand_held_is_still_a_picture(deg):
 @pytest.mark.parametrize("deg", [5, 10, 20])
 def test_nothing_is_cut_off_the_corners_of_a_tilted_picture(deg):
     """The direction that matters, checked on the matte that actually ships.
-    The box around a tilted picture keeps a wedge of background at each
-    corner — on a white sweep it is white on white, and on any other surface
-    it is a slightly worse cutout of an INTACT item. What it must never do is
-    clip a corner of the frame, which is the one error here that destroys the
-    thing being sold."""
+    The outline follows the tilt, so there is no wedge of background left at
+    each corner — and it must never clip a corner of the frame either, which
+    is the one error here that destroys the thing being sold."""
     im, corners = _hand_held(deg)
 
-    m = artwork.mask(im.size, artwork.border(im))
+    m = _matte(im)
     for x, y in corners:
         assert m.getpixel((round(x), round(y))) == 255, (deg, x, y)
 
@@ -257,7 +288,7 @@ def test_a_picture_shot_from_slightly_off_to_one_side(deg, taper):
     d.polygon(_shape((glazed[0] + 50, glazed[1] + 50,
                       glazed[2] - 50, glazed[3] - 50)), fill=(90, 200, 190))
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, f"refused at {deg} degrees, taper {taper}"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -280,7 +311,7 @@ def test_a_white_mounted_print_on_a_white_table():
     d.rectangle(paper, fill=(252, 251, 249))
     _painted(d, (330, 240, 870, 690))
 
-    assert _encloses(artwork.border(im), paper)
+    assert _encloses(_border(im), paper)
 
 
 # --- ...and survives being cropped square ------------------------------------
@@ -314,7 +345,7 @@ def test_a_matted_picture_cropped_square_is_still_a_picture(deg):
     photo; it is not a fact about the item in it."""
     im, corners = _hand_held(deg, box=(230, 230, 770, 770), size=(1000, 1000))
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, f"refused a square photo at {deg} degrees"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -327,7 +358,7 @@ def test_the_shape_of_the_photo_does_not_decide_whether_it_is_art(size, box):
     Whether a border is found has to be a question about the picture."""
     im, corners = _hand_held(4, box=box, size=size)
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, f"refused a {size[0]}x{size[1]} photo"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -363,7 +394,7 @@ def test_a_wreath_is_not_a_picture_just_because_its_middle_was_filled_in():
     d.ellipse((250, 100, 950, 800), fill=(40, 110, 50))
     d.ellipse((390, 240, 810, 660), fill=WALL)
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 # ------------------------------------------- ...and refuses when it cannot
@@ -376,7 +407,7 @@ def test_a_picture_that_bleeds_off_the_frame_is_left_alone():
     im = Image.new("RGB", SIZE, (90, 200, 190))
     _painted(ImageDraw.Draw(im), (0, 0, SIZE[0], SIZE[1]))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def test_two_objects_spanning_a_rectangle_are_not_a_picture():
@@ -388,7 +419,7 @@ def test_two_objects_spanning_a_rectangle_are_not_a_picture():
     d.ellipse((120, 200, 340, 700), fill=(40, 110, 50))
     d.rectangle((880, 520, 1080, 660), fill=(120, 70, 40))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 @pytest.mark.parametrize("deg", [0, 7, 15])
@@ -404,7 +435,7 @@ def test_two_objects_are_not_a_picture_at_any_angle_either(deg):
     d.rectangle((880, 520, 1080, 660), fill=(120, 70, 40))
     im = im.rotate(deg, resample=Image.BICUBIC, fillcolor=WALL, center=centre)
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def test_a_round_object_is_not_a_picture_at_any_angle():
@@ -414,7 +445,7 @@ def test_a_round_object_is_not_a_picture_at_any_angle():
     im = Image.new("RGB", SIZE, WALL)
     ImageDraw.Draw(im).ellipse((250, 150, 950, 780), fill=(40, 110, 50))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def test_a_figure_lifted_out_of_a_painting_is_not_a_picture():
@@ -428,18 +459,18 @@ def test_a_figure_lifted_out_of_a_painting_is_not_a_picture():
     d.polygon([(400, 620), (810, 620), (880, 830), (330, 830)],
               fill=(70, 90, 150))                                # and shoulders
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def test_something_too_small_to_be_the_piece_is_refused():
     im = Image.new("RGB", SIZE, WALL)
     _painted(ImageDraw.Draw(im), (560, 420, 660, 500))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def test_an_empty_wall_is_refused():
-    assert artwork.border(Image.new("RGB", SIZE, WALL)) is None
+    assert _border(Image.new("RGB", SIZE, WALL)) is None
 
 
 # --- ...and survives being photographed on something other than a flat wall --
@@ -463,9 +494,11 @@ def test_an_empty_wall_is_refused():
 # all. One backdrop, one lamp, one afternoon -- and the seller's whole set
 # comes back exactly as they shot it.
 #
-# So the bars are floors now, and the bar is whatever the background in THIS
-# photo does across the band around the edge of the frame. On a flat sweep its
-# spread is a level or two, the floor wins, and nothing that worked changes.
+# The scan that stood here then learned to raise its bars to what the band did,
+# which fixed these photos and not the next ones — see the section after them.
+# Today neither a fold nor a lamp is measured against a colour at all: neither
+# has an EDGE in it, so a flood from the edge of the photo crosses both for
+# free and stops at the frame.
 
 CLOTH = (198, 188, 166)
 
@@ -536,7 +569,7 @@ def test_a_framed_picture_on_a_lit_sweep_is_still_a_picture():
     over the bar and take the box out to all four edges."""
     im, corners = _on(_sweep())
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, "refused a framed picture on a plain lit sweep"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -550,7 +583,7 @@ def test_a_framed_picture_on_a_cloth_backdrop_is_still_a_picture(size, box, deg)
     backdrop is made of is not a fact about the item lying on it."""
     im, corners = _on(_sheet(size), deg=deg, box=box)
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None, f"refused a {size[0]}x{size[1]} photo at {deg}°"
     assert _encloses(found, _bbox(corners)), (found, _bbox(corners))
 
@@ -566,7 +599,7 @@ def test_the_border_is_snug_around_the_piece_not_the_whole_photo(bg):
     im, corners = _on({"sheet": _sheet(), "sweep": _sweep(),
                        "wall": Image.new("RGB", SIZE, WALL)}[bg])
 
-    found = artwork.border(im)
+    found = _border(im)
     assert found is not None
     piece = _covers(_bbox(corners), SIZE)
     assert _covers(found, SIZE) <= piece * 1.5, (
@@ -574,45 +607,14 @@ def test_the_border_is_snug_around_the_piece_not_the_whole_photo(bg):
         f"that is {piece:.2f} of it")
 
 
-def test_the_edge_scan_will_not_stop_inside_the_band_it_called_background():
-    """The structural half, held on its own. The band around the edge of the
-    frame is where the surround colour is sampled and where the scan's own bar
-    is measured; a side that answers "the thing starts here" about those very
-    lines has contradicted its premise and crossed no background at all. It
-    has nothing to say, so the content box stands — and the box can no longer
-    be walked out to the edge of the photo, whatever the backdrop does."""
-    small = _on(_sheet((240, 240)), box=(60, 60, 180, 180))[0]
-    content = (50, 50, 190, 190)
-
-    grown = artwork._scan_inward(small, content)
-
-    band = artwork._band(small.size)[1]
-    assert grown[0] >= band or grown[0] == content[0]
-    assert grown[1] >= band or grown[1] == content[1]
-    assert grown[2] <= 240 - band or grown[2] == content[2]
-    assert grown[3] <= 240 - band or grown[3] == content[3]
-
-
-def test_a_flat_background_is_answered_on_the_first_pass():
-    """The promise that makes the second look safe to have at all: it is only
-    ever reached by a photo that was already going to be kept as shot. A wall
-    does not wander, so its bars are the ones this module was fitted with and
-    there is nothing to look at again."""
-    small = _on(Image.new("RGB", (240, 180), WALL), box=(60, 40, 180, 140))[0]
-
-    assert artwork._second_look(small) is None
-
-
 def test_a_picture_that_bleeds_off_a_textured_backdrop_is_still_left_alone():
-    """The guard on the second look. Raising the bar until the background
-    holds still is only honest while there IS a background: a mask that still
-    reads content all the way round the rim afterwards is the picture itself,
-    running off the edge of the photo, and the seller's rule for that has not
-    changed."""
+    """A backdrop with folds in it gives the ladder of bars plenty to climb,
+    and at every rung the thing left standing is the picture itself, running
+    off the edge of the photo. The seller's rule for that has not changed."""
     im = _sheet()
     _painted(ImageDraw.Draw(im), (0, 0, SIZE[0], SIZE[1]))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
 def _draw_ellipse(d):
@@ -641,43 +643,282 @@ def _draw_small(d):
 
 @pytest.mark.parametrize("draw", [_draw_ellipse, _draw_figure, _draw_two_objects,
                                   _draw_wreath, _draw_small])
-def test_the_refusals_hold_on_the_backdrop_that_needs_a_second_look(draw):
-    """The other half of the repair, and the one worth watching. Every shape
-    this module exists to refuse is refused on a flat wall — but a flat wall
-    is answered on the first pass, so those tests never exercise the second
-    one. Moved onto the sheet, they go round again with the bar raised, and
-    they have to come back refused there too. Raising a threshold until the
-    background holds still must not be a way of buying a border for something
-    that is not a picture."""
+def test_the_refusals_hold_on_a_cloth_backdrop(draw):
+    """The half worth watching. Every shape this module exists to refuse is
+    refused on a flat wall, where the first rung of the ladder already has the
+    background flooded. On the sheet the ladder has to climb past the folds
+    first, and the higher the bar, the more of an object's weaker edges give
+    way — a pale face before dark shoulders. Climbing until the background
+    holds still must not be a way of buying an outline for something that is
+    not a picture."""
     im = _sheet()
     draw(ImageDraw.Draw(im))
 
-    assert artwork.border(im) is None
+    assert _border(im) is None
 
 
-def test_the_scan_stops_on_the_edge_it_found_not_two_lines_past_it():
-    """Which line a run of non-background lines STARTED on depends on which
-    way the scan was walking. The right and the bottom walk backwards, and
-    subtracting the run as though they counted upward put their answer two
-    cells inside the edge they had just found — a shave off two sides of every
-    piece this scan located, invisible only because the margin grew it back.
+def test_the_outline_sits_on_the_edge_and_shaves_no_side():
+    """Where each side lands is settled from outside in, at twice the working
+    size, so the outline is snug on every side rather than on the ones a scan
+    happened to walk towards. A square frame centred in a square photo, so the
+    answer is symmetry: what is left at the left is left at the right, and no
+    side is inside the frame."""
+    im = Image.new("RGB", (1200, 1200), (252, 251, 249))
+    ImageDraw.Draw(im).rectangle((200, 200, 999, 999), fill=FRAME)
 
-    A square frame centred in a square photo, so the answer is symmetry: what
-    the scan leaves at the left it has to leave at the right."""
-    small = Image.new("RGB", (240, 240), (252, 251, 249))
-    ImageDraw.Draw(small).rectangle((40, 40, 199, 199), fill=FRAME)
+    left, top, right, bottom = _border(im)
 
-    left, top, right, bottom = artwork._scan_inward(small, (60, 60, 180, 180))
-
-    assert (left, top) == (39, 39)
-    assert (240 - right, 240 - bottom) == (39, 39), "the far edges were shaved"
+    assert 180 <= left <= 200 and 180 <= top <= 200, (left, top)
+    assert 1000 <= right <= 1020 and 1000 <= bottom <= 1020, (right, bottom)
+    assert abs((200 - left) - (right - 1000)) <= 6
+    assert abs((200 - top) - (bottom - 1000)) <= 6
 
 
 @pytest.mark.parametrize("size", [(1, 1), (4, 4), (7, 200)])
 def test_a_photo_too_small_to_reason_about_is_refused(size):
     """Never raises on a degenerate input — a photo must not fail to be listed
     because the border finder was handed something odd."""
-    assert artwork.border(Image.new("RGB", size, WALL)) is None
+    assert _border(Image.new("RGB", size, WALL)) is None
+
+
+# --- ...and finds it in a room, not only on a sweep --------------------------
+#
+# The report: "the image remover still fails nearly every time for art pieces
+# despite the item being fully in frame". Every fixture above is drawn in flat
+# colour, and the scan that stood here passed them all; photos taken in a room
+# it found about one time in forty. A room is lit by a lamp, so a wall is
+# brighter at one end than the other; a phone darkens its own corners; a frame
+# throws a shadow; a floor has planks; and a picture propped up to be
+# photographed stands on the floor with the wall behind it. The scan measured
+# every pixel against ONE background colour, so every one of those read as
+# part of the picture, joined it to the frame, and the rectangle it was looking
+# for stopped being one.
+#
+# These are drawn to have all of that at once — lamp, lens, shadow, sensor
+# grain and a JPEG round trip — because it was never one of them that did it.
+
+
+def _lamp(size, at=(0.15, 0.1), fall=0.35, vignette=0.25):
+    """How a room lights a wall: brightest near a lamp at `at` (fractions of
+    the frame), `fall` darker across the room, and a lens darkening its own
+    corners. 0-255, smooth — drawn small and scaled up."""
+    w, h = 64, 48
+    lx, ly = at[0] * w, at[1] * h
+    diag = math.hypot(w, h)
+    light = Image.new("L", (w, h))
+    light.putdata([round(255 * (1 - fall * math.hypot(x - lx, y - ly) / diag)
+                         * (1 - vignette * (((x - w / 2) / (w / 2)) ** 2
+                                            + ((y - h / 2) / (h / 2)) ** 2) / 2))
+                   for y in range(h) for x in range(w)])
+    return light.resize(size, Image.BICUBIC)
+
+
+def _in_a_room(im, **lamp):
+    """`im` lit by _lamp, with sensor grain, through a phone's JPEG."""
+    im = ImageChops.multiply(im, Image.merge("RGB", [_lamp(im.size, **lamp)] * 3))
+    grain = Image.effect_noise(im.size, 4)
+    im = ImageChops.add(im, Image.merge("RGB", [grain] * 3), 1.0, -128)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=85)
+    return Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+
+
+def _planks(size=SIZE, seed=5):
+    """A wood floor: boards of slightly different tones, dark seams, grain."""
+    rnd = random.Random(seed)
+    im = Image.new("RGB", size)
+    d = ImageDraw.Draw(im)
+    x = 0
+    while x < size[0]:
+        wide = rnd.randrange(120, 190)
+        tone = rnd.uniform(0.85, 1.15)
+        board = tuple(round(c * tone) for c in (150, 105, 70))
+        d.rectangle((x, 0, x + wide, size[1]), fill=board)
+        for _ in range(6):
+            gx = x + rnd.randrange(8, wide - 8)
+            d.line([(gx, 0), (gx + rnd.randrange(-20, 20), size[1])],
+                   fill=tuple(round(c * 0.9) for c in board), width=2)
+        d.line([(x, 0), (x, size[1])], fill=(80, 55, 38), width=3)
+        x += wide
+    return im
+
+
+def _outer(box, deg=0.0, taper=0.0):
+    """A frame's outer corners: `box`, its top edge `taper` narrower (a phone
+    held a little low), turned `deg` (held by hand)."""
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    inset = (box[2] - box[0]) * taper / 2
+    return [_turn(p, centre, deg) for p in
+            ((box[0] + inset, box[1]), (box[2] - inset, box[1]),
+             (box[2], box[3]), (box[0], box[3]))]
+
+
+def _hung(bg, corners, frame=FRAME, mount=None, shadow=(14, 18)):
+    """A framed picture with these outer corners over `bg`, throwing a soft
+    shadow down and to the right."""
+    im = bg.copy()
+    if shadow:
+        cast = Image.new("L", im.size, 0)
+        ImageDraw.Draw(cast).polygon(
+            [(x + shadow[0], y + shadow[1]) for x, y in corners], fill=120)
+        im.paste(Image.new("RGB", im.size, (40, 40, 40)), (0, 0),
+                 cast.filter(ImageFilter.GaussianBlur(12)))
+    d = ImageDraw.Draw(im)
+    d.polygon(corners, fill=frame)
+    cx = sum(x for x, _ in corners) / 4
+    cy = sum(y for _, y in corners) / 4
+
+    def _in(k):
+        return [(cx + (x - cx) * k, cy + (y - cy) * k) for x, y in corners]
+
+    if mount:
+        d.polygon(_in(0.93), fill=mount)
+    art = _in(0.78 if mount else 0.92)
+    d.polygon(art, fill=(90, 200, 190))
+    for k in range(12):
+        f = k / 11
+        d.line([(art[0][0] + (art[1][0] - art[0][0]) * f,
+                 art[0][1] + (art[1][1] - art[0][1]) * f),
+                (art[3][0] + (art[2][0] - art[3][0]) * f,
+                 art[3][1] + (art[2][1] - art[3][1]) * f)],
+               fill=(150, 120, 200), width=4)
+    return im
+
+
+def _kept(im, *pieces):
+    """(share of the pieces the matte keeps, matte area against theirs)."""
+    matte = _matte(im)
+    assert matte is not None, "no outline found — the photo was kept as shot"
+    truth = Image.new("L", im.size, 0)
+    for corners in pieces:
+        ImageDraw.Draw(truth).polygon(corners, fill=255)
+    both = ImageChops.multiply(truth, matte).histogram()[255]
+    area = truth.histogram()[255]
+    return both / area, matte.histogram()[255] / area
+
+
+PAINTED_WALL = (214, 208, 196)
+MOUNT = (245, 243, 236)
+
+
+@pytest.mark.parametrize("frame,mount", [(FRAME, None),
+                                         ((176, 140, 70), MOUNT),
+                                         ((236, 234, 230), MOUNT)],
+                         ids=["black", "gold-mounted", "white-mounted"])
+@pytest.mark.parametrize("deg,taper", [(0, 0), (4, 0.06), (-6, 0.1)])
+def test_a_framed_picture_on_a_lamp_lit_wall(frame, mount, deg, taper):
+    """The report itself. A painted wall a lamp lights unevenly, a phone
+    that darkens its own corners, a frame's shadow — and the piece squarely
+    in the middle of the photo. All of it kept, and the wall gone: an outline
+    that took a quarter of the wall with it would be the old failure again,
+    wearing a different face."""
+    corners = _outer((320, 140, 880, 760), deg, taper)
+    im = _in_a_room(_hung(Image.new("RGB", SIZE, PAINTED_WALL), corners,
+                          frame, mount))
+
+    kept, spread = _kept(im, corners)
+
+    assert kept >= 0.99, f"the outline cut {1 - kept:.1%} of the piece off"
+    assert spread <= 1.25, f"the outline kept {spread - 1:.0%} more than it"
+
+
+def test_a_picture_leaning_on_the_skirting_board():
+    """How a picture is usually photographed to be sold: propped on the floor
+    against the wall. Two backgrounds, a skirting board running across the
+    photo under the frame, and the frame's shadow falling across all three.
+    The old scan took one of the two as "the background" and the other as
+    part of the picture."""
+    room = Image.new("RGB", SIZE, PAINTED_WALL)
+    room.paste(_planks().crop((0, 0, SIZE[0], 170)), (0, 730))
+    ImageDraw.Draw(room).rectangle((0, 715, SIZE[0], 730), fill=(240, 238, 234))
+    corners = _outer((380, 170, 820, 720), 1.5, 0.04)
+    im = _in_a_room(_hung(room, corners, (120, 80, 45), MOUNT), at=(0.8, 0.0))
+
+    kept, spread = _kept(im, corners)
+
+    assert kept >= 0.99
+    assert spread <= 1.25
+
+
+def test_a_canvas_lying_on_a_plank_floor():
+    """No frame at all, and a floor that is nothing BUT edges: seams, grain,
+    boards of different tones. None of them reaches all the way round the
+    canvas, so none of them can pass for its outline."""
+    corners = _outer((300, 160, 900, 740), -3, 0.12)
+    im = _in_a_room(_hung(_planks(), corners, (90, 200, 190), shadow=(8, 10)),
+                    at=(0.5, -0.3), fall=0.3)
+
+    kept, spread = _kept(im, corners)
+
+    assert kept >= 0.99
+    assert spread <= 1.25
+
+
+def test_two_pictures_side_by_side_are_both_kept():
+    """A pair photographed together is a pair for sale. The scan took the
+    larger of the two and cut the other one away with the wall."""
+    left = _outer((120, 220, 540, 700), 2)
+    right = _outer((660, 260, 1060, 660), -2)
+    wall = Image.new("RGB", SIZE, PAINTED_WALL)
+    im = _in_a_room(_hung(_hung(wall, left, FRAME, MOUNT), right,
+                          (120, 80, 45)))
+
+    kept, _ = _kept(im, left, right)
+
+    assert len(artwork.outline(im)) == 2
+    assert kept >= 0.99
+
+
+def test_a_frame_that_melts_into_the_wall_keeps_its_frame():
+    """A frame within a few levels of the wall it hangs on. The flood gets
+    into the moulding through the stretch where the two meet, and the first
+    clean shape it finds is the white mount inside — a perfect rectangle, and
+    the frame cut off round it. The frame's outer edge still runs parallel
+    to that rectangle, a moulding's width outside it on every side, and that
+    is what the outline grows back out to."""
+    corners = _outer((320, 140, 880, 760), 3)
+    im = _in_a_room(_hung(Image.new("RGB", SIZE, PAINTED_WALL), corners,
+                          (205, 199, 188), (250, 249, 246)), at=(0.5, -0.2))
+
+    kept, _ = _kept(im, corners)
+
+    # The mount alone is 0.86 of the frame.
+    assert kept >= 0.97, "the frame was cut off to the mount inside it"
+
+
+def test_a_four_cornered_shape_no_photo_of_a_rectangle_makes_is_refused():
+    """Four corners are not enough. A subject lifted out of a painting can
+    have four corners — a figure with a diagonal back, a sail — and it is
+    still not a picture, because no photograph of a rectangle, however it was
+    held, shows one side at half the length of the side opposite it."""
+    im = Image.new("RGB", SIZE, WALL)
+    ImageDraw.Draw(im).polygon([(300, 380), (900, 150), (900, 760), (300, 760)],
+                               fill=(90, 60, 40))
+
+    assert artwork.outline(im) is None
+
+
+@pytest.mark.parametrize("side", ["top", "left", "corner"])
+def test_a_frame_running_off_the_photo_is_never_cut_to_what_is_inside_it(side):
+    """The case every guard here exists for, on a lit wall: the frame runs
+    off one edge (or two) of the photo. The flood reaches its moulding from
+    that edge and stops at the mount, which is a clean rectangle. Cutting to
+    it would crop the frame. Either nothing happens, or what is kept is
+    everything of the piece that is in the photo."""
+    box = {"top": (300, -120, 900, 700), "left": (-150, 150, 700, 760),
+           "corner": (-150, -120, 700, 700)}[side]
+    corners = _outer(box)
+    im = _in_a_room(_hung(Image.new("RGB", SIZE, PAINTED_WALL), corners,
+                          (120, 80, 45), MOUNT))
+
+    found = artwork.outline(im)
+    if found is not None:
+        visible = Image.new("L", SIZE, 0)
+        ImageDraw.Draw(visible).polygon(corners, fill=255)
+        matte = artwork.outline_matte(SIZE, found)
+        both = ImageChops.multiply(visible, matte).histogram()[255]
+        assert both >= 0.99 * visible.histogram()[255], \
+            "the frame was cropped to the mount inside it"
 
 
 # --------------------------------------------- and the model is never asked
@@ -744,6 +985,32 @@ def test_a_picture_with_no_findable_border_is_kept_as_shot(tmp_path,
     # ...and the photo on disk is the photo that was taken.
     with Image.open(tmp_path / "img_000.jpg") as saved:
         assert saved.getpixel((10, 10)) != (255, 255, 255)
+
+
+def test_the_reported_photo_comes_back_cut_out(tmp_path, monkeypatch):
+    """End to end, the photo the report was about: a framed piece, whole in
+    the frame, on a lamp-lit wall, through the pass the uploads take. It used
+    to come back exactly as shot, with a sentence saying the picture's edge
+    was not in the frame."""
+    from backend.services import images
+
+    model = _Recorder()
+    monkeypatch.setattr(images, "cutout", model)
+    monkeypatch.setattr(images, "_mask", model)
+    corners = _outer((320, 140, 880, 760), 4, 0.06)
+    im = _in_a_room(_hung(Image.new("RGB", SIZE, PAINTED_WALL), corners,
+                          (176, 140, 70), MOUNT))
+    src = _photo(tmp_path, "src_000.jpg", im)
+
+    out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True,
+                          art=True)
+
+    assert out["background_removed"] is True
+    assert not out.get("bg_error")
+    assert model.asked == [], "neither model was needed to find the frame"
+    with Image.open(tmp_path / "img_000.jpg") as saved:
+        assert saved.getpixel((5, 5)) == images.WHITE, "the wall is gone"
+        assert saved.getpixel((600, 450)) != images.WHITE, "the picture is not"
 
 
 def test_everything_that_is_not_a_picture_still_goes_to_the_model(tmp_path,
