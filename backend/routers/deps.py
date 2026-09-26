@@ -1,9 +1,10 @@
-"""Request helpers shared by main.py and the route modules beside this one.
+"""Handler helpers shared by main.py and the route modules beside this one.
 
-What a handler needs from the request that belongs to no one area: who and
-where the caller is, whether they own the listing they name, their eBay
-credentials, the sign-in rate limit, the opaque page cursor, and the
-superadmin gate with its audit trail. They live here, not in main.py,
+What a handler needs that belongs to no one area: who and where the caller
+is, whether they own the listing they name, their eBay credentials, the
+sign-in rate limit, the opaque page cursor, the superadmin gate with its
+audit trail, the reference a failure quotes to the seller, and the runner
+for work the response should not wait on. They live here, not in main.py,
 because a route module cannot import main.py — main includes the routers,
 so the reverse is an import cycle.
 
@@ -22,7 +23,7 @@ from fastapi import HTTPException, Request
 from .. import auth, db, ratelimit
 from ..config import log
 from ..marketplaces import ebay_provider
-from ..services import errorlog
+from ..services import background, errorlog
 
 
 def uid(request: Request) -> Optional[str]:
@@ -159,3 +160,29 @@ def audit_admin(admin: dict, request: Request, action: str,
     return db.admin_audit(admin, action, target_type=target_type,
                           target_id=target_id, ip=client_ip(request),
                           data=data)
+
+
+def support_reference() -> str:
+    """A short id tying what the seller was told to what the logs recorded.
+
+    Short because someone has to read it out or paste it into an email. It is
+    not a secret and identifies nothing on its own — it exists so mapping a
+    failure to a product state does not throw the evidence away.
+
+    It returns the CURRENT REQUEST's id rather than minting a fresh one per
+    failure, as it once did. Same alphabet, same width — but the reference a
+    seller quotes identifies the whole request, so it joins to every line
+    that request logged and to its row in error_events, instead of to the
+    single line at one failure site.
+
+    Falls back to a fresh value off-request (a background sweep, a startup
+    task), where there is no context to belong to.
+    """
+    return errorlog.current_reference() or errorlog.new_reference()
+
+
+# Work the response should not wait on: an R2 push, a purge, an eBay upload.
+# The runner lives in services/background.py so the marketplace providers
+# share it; handlers call it by this name, which is the one a test patches
+# to keep that work from starting.
+in_background = background.run_in_background

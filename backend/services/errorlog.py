@@ -59,7 +59,7 @@ from ..redact import scrub
 # rather than a thread local because FastAPI runs async handlers on a shared
 # loop: a thread local would hand one request's id to another's error.
 #
-# `reference` is the 8 hex characters main._support_reference() shows the
+# `reference` is the 8 hex characters deps.support_reference() shows the
 # seller and writes into the log line. Reusing it as the request id is what
 # ties "the app told me a1b2c3d4" to a row in this table — the only join
 # between a complaint and a cause the app has ever had.

@@ -126,7 +126,7 @@ def test_a_merge_reports_only_the_sources_it_actually_removed(api, monkeypatch):
     monkeypatch.setattr(main.deps, "db", fake)
     monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     monkeypatch.setattr(main, "_purge_session_images", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_in_background", lambda fn, *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda fn, *a, **k: None)
     monkeypatch.setattr(main.storage, "save_listing", lambda *a, **k: None)
 
     res = client.post("/api/listings/merge",

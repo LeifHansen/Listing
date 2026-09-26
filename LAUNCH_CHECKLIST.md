@@ -300,19 +300,20 @@ Ordered by what it costs a seller.
 
 ## After launch (known, not on the critical path)
 
-- Finish splitting `backend/main.py` (12.6k lines; the same owner check,
+- Finish splitting `backend/main.py` (12.5k lines; the same owner check,
   path-traversal guard and truthy parse are re-typed 6–10× each). Started:
   `backend/routers/` holds the operator console, sign-in and the inbox, and
-  `routers/deps.py` holds the caller's id, the ownership check and the eBay
-  credentials. 59 more routes can move as they are. The other 64 read
-  something tests patch on `main`: helpers shared across areas
-  (`_support_reference` pins 23 of them, `_in_background` 16, the token
-  charge 12) and each area's own helpers and limits (`LIST_CAP` pins 9,
-  then `_purge_session_images`, `_easypost_key`, `_finish_connect`). Move a
-  shared helper into `routers/deps.py`, and an area's own into its router,
-  repointing the patches in the same change, the way `_uid` moved
-  (`test_a_patch_on_main_never_silently_misses.py` explains why a patch left
-  on `main` would stop reaching the moved code without failing). Then
+  `routers/deps.py` holds the caller's id, the ownership check, the eBay
+  credentials, the support reference and the background runner. 72 more
+  routes can move as they are. The other 51 read something tests patch on
+  `main`: the token charge pins 12 of them, the drafting chain's helpers 10,
+  `LIST_CAP` 9, `_purge_session_images` and `_bulk_set` 7 each, then
+  `_easypost_key`, `_finish_connect` and the expert-knowledge routes' direct
+  `run_in_background` call. Move a shared helper into `routers/deps.py`, and
+  an area's own into its router, repointing the patches in the same change,
+  the way `_uid` moved (`test_a_patch_on_main_never_silently_misses.py`
+  explains why a patch left on `main` would stop reaching the moved code
+  without failing). Then
   `cards.jsx` / `BulkMode.jsx` / `useListingForm.js` (1–2k lines each), with
   characterisation tests first. URL routing (deep links, back/forward).
 - Normalised tables for external listings, marketplace operations and

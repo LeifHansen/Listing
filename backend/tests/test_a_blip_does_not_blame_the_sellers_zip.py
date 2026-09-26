@@ -83,7 +83,7 @@ def test_the_message_never_carries_ebays_url(client, monkeypatch):
     # landing badly. Pinned to a reference with no hex run that could collide,
     # so the assertion below tests the one thing it is about -- that eBay's
     # status line stayed out of the sentence -- and tests it every time.
-    monkeypatch.setattr(main, "_support_reference", lambda: "deadbeef")
+    monkeypatch.setattr(main.deps, "support_reference", lambda: "deadbeef")
     _location_raises(main, monkeypatch,
                      httpx.HTTPStatusError(URL_LEAK, request=None, response=None))
 

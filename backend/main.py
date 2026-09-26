@@ -100,11 +100,11 @@ async def _lifespan(_app: FastAPI):
     # must not hold up serving. It is a thread rather than a durable worker
     # (that is still open), but the OBLIGATION is durable now, so a process
     # that dies mid-pass leaves the remaining rows for the next one.
-    _in_background(_finish_pending_deletions, what="deletion backlog")
+    deps.in_background(_finish_pending_deletions, what="deletion backlog")
     # Money a seller is owed for AI that did not work. Same shape as the
     # deletion backlog above: the obligation outlived the process, so the next
     # one settles it.
-    _in_background(_settle_owed_refunds, what="owed refunds")
+    deps.in_background(_settle_owed_refunds, what="owed refunds")
     yield
     # The error writer is a daemon thread, so the failures still queued when
     # the process stops -- the last seconds before a deploy or a restart, often
@@ -516,7 +516,7 @@ async def _request_context(request: Request, call_next):
     the whole point, since a line logged before the context exists carries no
     reference and joins to nothing.
 
-    The id is the same 8 hex characters _support_reference() has always
+    The id is the same 8 hex characters deps.support_reference() has always
     minted, and it is now the SAME VALUE the seller is shown. Before this,
     each failure site minted its own, so the reference in a toast joined to
     exactly one log line; it now joins to every line that request emitted,
@@ -1963,11 +1963,6 @@ def _charge_ai(request: Request, feature: str, units: int = 1):
     return _charge_uid(uid, feature, units)
 
 
-# Moved to services/background.py so marketplace providers share it; the
-# local name keeps every existing call site unchanged.
-_in_background = run_in_background
-
-
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
     """Make sure the optimized photo exists on the volume, pulling it back from
     R2 if the reclaim pass already freed the local copy.
@@ -2062,8 +2057,8 @@ def _photos_for_fill(session_id: str, listing: Listing,
         return paths
     # Straight back to the bucket, or the next offload pass frees a local copy
     # it never uploaded and the download repeats on every fill.
-    _in_background(objstore.upload_optimized, session_id, opt_dir, redone,
-                   what="re-imported photo R2 push")
+    deps.in_background(objstore.upload_optimized, session_id, opt_dir, redone,
+                       what="re-imported photo R2 push")
     # Onto the listing being filled, for the same reason adoption writes them:
     # the save at the end of the fill would otherwise put the stale names back.
     listing.images = redone
@@ -2191,7 +2186,7 @@ def tokens_checkout(request: Request, payload: dict) -> dict:
         # "Invalid API Key provided: sk_live_51H4x***". The last of those puts
         # a fragment of a live secret in a toast, on the screen where someone
         # is trying to give us money.
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("tokens: checkout failed for %s [%s]: %s",
                     uid, reference, exc)
         # The reference goes IN the sentence rather than beside it: the
@@ -2220,7 +2215,7 @@ def tokens_confirm(request: Request, session_id: str = "") -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("tokens: confirm failed for %s [%s]: %s",
                     uid, reference, exc)
         # The opposite reassurance from checkout above: here the money may
@@ -2350,7 +2345,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     # behind costs nothing here. If this thread dies part-way, the rows it did
     # not reach are still owed and the next pass finds them — which is the
     # whole difference from what this used to be.
-    _in_background(_finish_pending_deletions, what="account-delete cleanup")
+    deps.in_background(_finish_pending_deletions, what="account-delete cleanup")
 
     auth.clear_session_cookie(response)
     log.info("account deleted: user=%s listings=%d", uid, len(listing_ids))
@@ -3963,7 +3958,7 @@ ART_LOOKUP = os.getenv("ART_LOOKUP", "auto").strip().lower() or "auto"
 # Thin wrappers rather than call-site edits: `_artwork_category` and
 # `_is_artwork` are what four call sites below and two test files name, and
 # keeping the local name is this file's established idiom for a body that has
-# moved (see the note above _in_background).
+# moved (see the note above _auto_promote_enabled).
 def _artwork_category(listing: Listing) -> bool:
     return art_match.category_is_art(listing)
 
@@ -4940,25 +4935,6 @@ def ebay_disconnect(request: Request) -> dict:
     return {"ok": True}
 
 
-def _support_reference() -> str:
-    """A short id tying what the seller was told to what the logs recorded.
-
-    Short because someone has to read it out or paste it into an email. It is
-    not a secret and identifies nothing on its own — it exists so mapping a
-    failure to a product state does not throw the evidence away.
-
-    It now returns the CURRENT REQUEST's id rather than minting a fresh one
-    per failure. Same alphabet, same width, and every existing call site is
-    unchanged — but the reference a seller quotes now identifies the whole
-    request, so it joins to every line that request logged and to its row in
-    error_events, instead of to the single line at one failure site.
-
-    Falls back to a fresh value off-request (a background sweep, a startup
-    task), where there is no context to belong to.
-    """
-    return errorlog.current_reference() or errorlog.new_reference()
-
-
 def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPException:
     """A marketplace lookup that failed, said in a sentence a seller can use.
 
@@ -4985,7 +4961,7 @@ def _lookup_failed(doing: str, exc: Exception, status: int = 502) -> HTTPExcepti
     talks to eBay, and knowing whose side the problem is on is most of what
     they wanted. What goes is the URL, the status line and the MDN link.
     """
-    reference = _support_reference()
+    reference = deps.support_reference()
     log.warning("lookup failed (%s) [%s]: %s", doing, reference, exc)
     return HTTPException(status, _try_again(doing, reference))
 
@@ -5081,7 +5057,7 @@ def _payments_failure_state(exc: Exception) -> dict:
     are different buttons, and sending a seller to the wrong one costs them a
     support round trip.
     """
-    reference = _support_reference()
+    reference = deps.support_reference()
     resp = getattr(exc, "response", None)
     status = getattr(resp, "status_code", 0) or 0
     log.warning("payments check failed [%s]: status=%s detail=%s",
@@ -5224,7 +5200,7 @@ async def ebay_account_deletion_notice(request: Request) -> Response:
         log.info("ebay deletion %s: state=%s users=%d listings=%d",
                  notif_id, result["state"], result["users"], result["listings"])
 
-    _in_background(_erase, what="eBay account-deletion purge")
+    deps.in_background(_erase, what="eBay account-deletion purge")
     return Response(status_code=200)
 
 
@@ -5382,9 +5358,9 @@ async def upload(
     # yet. Anything this misses (a restart mid-push) gets picked up by the
     # reclaim pass, which uploads what the bucket is missing before it frees
     # anything.
-    _in_background(objstore.upload_optimized, session_id,
-                   storage.optimized_dir(session_id), optimized,
-                   what="R2 push (upload)")
+    deps.in_background(objstore.upload_optimized, session_id,
+                       storage.optimized_dir(session_id), optimized,
+                       what="R2 push (upload)")
     return {
         "session_id": session_id,
         "optimized": optimized,
@@ -5512,7 +5488,7 @@ def _run_upload_more_job(job_id: str, session_id: str,
         return
     except Exception as exc:  # noqa: BLE001 - the job must always answer
         tokens.refund(spent)
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("upload-more %s: optimize failed [%s]: %s",
                     job_id, reference, exc)
         _bulk_set(job_id, done=True, phase="failed",
@@ -5538,8 +5514,8 @@ def _run_upload_more_job(job_id: str, session_id: str,
         return
     if spent and bg_failed:
         tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
-    _in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
-                   what="R2 push (upload-more)")
+    deps.in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
+                       what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
     # optimize_results carries each photo's bg_error, exactly as /api/upload
     # returns it: a photo that kept its background has to be SAID, or the
@@ -5601,7 +5577,7 @@ async def edit_image(
     try:
         await run_in_threadpool(_save)
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("edit-image: could not process (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -5701,7 +5677,7 @@ async def image_restore_original(
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("restore-original failed (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -5817,7 +5793,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     try:
         await run_in_threadpool(_rotate)
     except Exception as exc:  # noqa: BLE001
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("rotate failed (session=%s name=%s) [%s]: %s",
                     session_id, name, reference, exc)
         raise HTTPException(
@@ -5843,7 +5819,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
             raise HTTPException(
                 502, "The photo was rotated here but the copy we publish from "
                      "didn't update. Try the rotation again in a moment.")
-    _in_background(db.touch_listing, session_id, what="rotate touch")
+    deps.in_background(db.touch_listing, session_id, what="rotate touch")
     # The rotated file's own timestamp, for the client's cache-buster. Its
     # per-open counter restarted at 0 on every open of the editor, and a
     # browser reuses an image it has already loaded in the same page for an
@@ -6605,7 +6581,7 @@ def _drop_optimized_image(session_id: str, name: str,
         try:
             path.unlink()
         except OSError as exc:
-            reference = _support_reference()
+            reference = deps.support_reference()
             log.warning("delete-image failed (session=%s name=%s) [%s]: %s",
                         session_id, name, reference, exc)
             raise HTTPException(
@@ -6613,8 +6589,8 @@ def _drop_optimized_image(session_id: str, name: str,
     # R2 mirror delete is a network round-trip the user shouldn't wait on —
     # the local file (which /media serves first) is already gone.
     if objstore.enabled():
-        _in_background(objstore.delete, objstore.key_for(session_id, name),
-                       what="delete-image R2")
+        deps.in_background(objstore.delete, objstore.key_for(session_id, name),
+                           what="delete-image R2")
     log.info("delete-image: session=%s name=%s", session_id, name)
     return images
 
@@ -6908,8 +6884,8 @@ async def add_listing_video(session_id: str, request: Request,
         # listing first, then off the disk").
         await run_in_threadpool(dest.unlink, True)
         raise
-    _in_background(_run_video_upload, session_id, name, uid,
-                   what="video upload (R2 + eBay)")
+    deps.in_background(_run_video_upload, session_id, name, uid,
+                       what="video upload (R2 + eBay)")
     log.info("video: session=%s added %s (%.1f MB)", session_id, name, written / 1e6)
     return {"ok": True, "videos": _video_payload(session_id, videos)}
 
@@ -6974,8 +6950,8 @@ def delete_listing_video(session_id: str, name: str, request: Request) -> dict:
             log.warning("video: couldn't unlink %s for %s: %s",
                         safe, session_id, exc)
     if objstore.enabled():
-        _in_background(objstore.delete, objstore.video_key_for(session_id, safe),
-                       what="delete-video R2")
+        deps.in_background(objstore.delete, objstore.video_key_for(session_id, safe),
+                           what="delete-video R2")
     log.info("video: session=%s removed %s", session_id, safe)
     return {"ok": True, "videos": _video_payload(session_id, remaining)}
 
@@ -7996,12 +7972,12 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 "The server ran out of photo storage mid-batch. Space has been "
                 "reclaimed automatically — please run this batch again."))
         else:
-            reference = _support_reference()
+            reference = deps.support_reference()
             log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
             _bulk_set(job_id, done=True,
                       error=_try_again("process this batch", reference))
     except Exception as exc:  # noqa: BLE001 - job-level failure
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("bulk %s failed [%s]: %s", job_id, reference, exc)
         _bulk_set(job_id, done=True,
                   error=_try_again("process this batch", reference))
@@ -8732,8 +8708,8 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
         # results for the rotation/bg toasts, the photo list) rides on the job.
         _bulk_set(job_id, upload={"optimized": optimized,
                                   "optimize_results": opt_results})
-        _in_background(objstore.upload_optimized, session_id, opt_dir,
-                       optimized, what="R2 push (pipeline)")
+        deps.in_background(objstore.upload_optimized, session_id, opt_dir,
+                           optimized, what="R2 push (pipeline)")
     except OSError as exc:
         tokens.refund(bg_spent)
         tokens.refund(identify_spent)
@@ -8748,7 +8724,7 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
     except Exception as exc:  # noqa: BLE001 - job-level failure must surface
         tokens.refund(bg_spent)
         tokens.refund(identify_spent)
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("pipeline %s: optimize failed [%s]: %s",
                     job_id, reference, exc)
         _bulk_set(job_id, done=True,
@@ -9886,7 +9862,7 @@ def _run_enrich_job(job_id: str, records: list[dict], uid: str,
                         result={"deferred": deferred, "filled": filled,
                                 "stopped": stopped, **result.as_dict()})
     except Exception as exc:  # noqa: BLE001 - the job must always answer
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("enrich job %s failed for user=%s [%s]: %s",
                     job_id, uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
@@ -10110,7 +10086,7 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
                                 "accepted": accepted, "stopped": stopped,
                                 **result.as_dict()})
     except Exception as exc:  # noqa: BLE001 - the job must always answer
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("finish-all job %s failed for user=%s [%s]: %s",
                     job_id, uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
@@ -10342,9 +10318,9 @@ def _adopt_imported_images(listing_id: str, rec: dict) -> list[str]:
         return []
     # Mirror to R2 like uploads do — otherwise imported listings are the one
     # kind of session the offload sweep can never free from the volume.
-    _in_background(objstore.upload_optimized, listing_id,
-                   storage.optimized_dir(listing_id), names,
-                   what="adopted-import R2 push")
+    deps.in_background(objstore.upload_optimized, listing_id,
+                       storage.optimized_dir(listing_id), names,
+                       what="adopted-import R2 push")
     listing["images"] = names
     rec["listing"] = listing
     try:
@@ -10463,7 +10439,7 @@ def delete_listing(listing_id: str, request: Request) -> dict:
     the button doesn't hang on a cold database + file I/O."""
     if not db.delete_listing(listing_id, deps.uid(request)):
         raise HTTPException(404, "Listing not found")
-    _in_background(_purge_session_images_best_effort, listing_id,
+    deps.in_background(_purge_session_images_best_effort, listing_id,
                        what="delete cleanup")
     log.info("listing deleted: id=%s user=%s", listing_id, deps.uid(request))
     return {"ok": True}
@@ -10495,7 +10471,7 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
             log.warning("bulk delete: couldn't remove %s: %s", lid, exc)
             refused.append(lid)
     for lid in deleted:
-        _in_background(_purge_session_images_best_effort, lid,
+        deps.in_background(_purge_session_images_best_effort, lid,
                            what="bulk-delete cleanup")
     log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
     return {"ok": True, "deleted": deleted,
@@ -11241,7 +11217,7 @@ def _run_import_job(job_id: str, token: str, uid: str,
         # The TradingError arm above carries eBay's own mapped sentence. This
         # one is whatever was thrown, and for an httpx failure that is the API
         # base, the path and a status line — rendered in the import panel.
-        reference = _support_reference()
+        reference = deps.support_reference()
         log.warning("import-listings failed for user=%s [%s]: %s",
                     uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(

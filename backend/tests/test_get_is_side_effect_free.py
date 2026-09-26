@@ -62,7 +62,7 @@ def client(monkeypatch):
                             "writes", effects["writes"] + 1))
     monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.deps, "assert_session_owner", lambda *_a, **_k: None)
-    monkeypatch.setattr(main, "_in_background",
+    monkeypatch.setattr(main.deps, "in_background",
                         lambda fn, *a, what="", **k: fn(*a, **k))
 
     return TestClient(main.app), effects

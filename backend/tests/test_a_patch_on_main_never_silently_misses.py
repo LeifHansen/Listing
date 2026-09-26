@@ -1,10 +1,9 @@
 """A test that patches `main` has to still be patching something.
 
-Seventy-odd test files steer the app by replacing a name on backend.main,
-as in `monkeypatch.setattr(main, "_in_background", lambda fn, *a: None)`,
-and about fifty names are patched that way. It works because the handlers
-live in main.py and look those names up in main's globals each time they
-run.
+About seventy test files steer the app by replacing a name on
+backend.main, as in `monkeypatch.setattr(main, "LIST_CAP", 3)`, and nearly
+fifty names are patched that way. It works because the handlers live in
+main.py and look those names up in main's globals each time they run.
 
 Moving a handler out of main.py breaks that without breaking anything loud.
 The moved code reads its OWN module's binding — the function it imported, or
@@ -38,6 +37,10 @@ source alone (no app is booted, so this runs in the light CI job too):
    against a scratch database.)
 4. Nothing under backend/routers imports backend.main. main includes the
    routers, so the reverse is an import cycle — and a way around rule 2.
+5. A helper the tests patch on deps (`main.deps.uid`) is looked up on deps
+   by everything else, when it runs. A copy taken at import — the function
+   imported by name, or read off deps into an alias, a default argument or
+   a table — is the real one, and every patch passes it by.
 
 Moving code whose tests patch main therefore starts with the tests: patch
 the module that now holds the name, and this passes again.
@@ -107,19 +110,19 @@ def _origin(package: Path, node: ast.ImportFrom, name: str) -> tuple[str, str]:
     return (str(_resolve(package, node.level, node.module).resolve()), name)
 
 
-def _main_modules() -> set[str]:
-    """Names main.py binds to a module (`db`, `auth`, `httpx`, ...)."""
+def _modules(path: Path) -> set[str]:
+    """Names a file binds to a module (`db`, `auth`, `httpx`, ...)."""
     out = set()
-    for node in _tree(MAIN).body:
+    for node in _tree(path).body:
         if isinstance(node, ast.Import):
             out |= {(a.asname or a.name).split(".")[0] for a in node.names}
         elif isinstance(node, ast.ImportFrom):
             out |= {a.asname or a.name for a in node.names
-                    if _is_module(MAIN.parent, node, a.name)}
+                    if _is_module(path.parent, node, a.name)}
     return out
 
 
-MAIN_MODULES = _main_modules()
+MAIN_MODULES = _modules(MAIN)
 
 
 def _read_when_called(tree: ast.Module) -> set[str]:
@@ -377,3 +380,67 @@ def test_no_router_imports_main():
             if any(n in ("main", "backend.main") for n in names):
                 problems.append(f"{path.relative_to(BACKEND)}:{node.lineno}")
     assert not problems, f"a router imports backend.main: {problems}"
+
+
+DEPS = BACKEND / "routers" / "deps.py"
+
+DEPS_PATCHED: dict[str, set[str]] = {}
+for _path in TESTS:
+    for _name, _value in _setattrs(_tree(_path), {"main.deps", "deps"}):
+        DEPS_PATCHED.setdefault(_name, set()).add(_path.name)
+
+
+def _read_at_import(tree: ast.Module):
+    """Every node evaluated when the module loads, not when one of its
+    functions runs: module-level code, decorators, default arguments."""
+    in_bodies = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = fn.body
+        elif isinstance(fn, ast.Lambda):
+            body = [fn.body]
+        else:
+            continue
+        for stmt in body:
+            in_bodies |= {id(n) for n in ast.walk(stmt)}
+    return (n for n in ast.walk(tree) if id(n) not in in_bodies)
+
+
+def test_a_name_patched_on_deps_is_read_through_deps():
+    """Rule 5. A patch on `main.deps.in_background` replaces the attribute of
+    the one deps module, so it reaches every caller that looks the name up
+    there when it runs, and none that took a copy before the test began."""
+    sample = ast.parse("run = deps.uid\n"
+                       "def f(get=deps.uid):\n"
+                       "    return deps.uid(request)\n")
+    assert [n.lineno for n in _read_at_import(sample)
+            if isinstance(n, ast.Attribute)] == [1, 2]
+    patched = set(DEPS_PATCHED) - _modules(DEPS)
+    assert patched, "no test patches a helper on deps, or the scan broke"
+    problems = []
+    for path in [MAIN, *ROUTERS]:
+        if path == DEPS:
+            continue
+        tree = _tree(path)
+        where = path.relative_to(BACKEND)
+        holders = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level):
+                continue
+            base = _resolve(path.parent, node.level, node.module)
+            for a in node.names:
+                if base / f"{a.name}.py" == DEPS:
+                    holders.add(a.asname or a.name)
+                elif base.with_suffix(".py") == DEPS and a.name in patched:
+                    problems.append(f"{where}:{node.lineno} imports {a.name}")
+        if path == MAIN:
+            assert holders, "main.py no longer imports deps as a module"
+        problems += [f"{where}:{n.lineno} copies deps.{n.attr}"
+                     for n in _read_at_import(tree)
+                     if isinstance(n, ast.Attribute)
+                     and isinstance(n.value, ast.Name)
+                     and n.value.id in holders and n.attr in patched]
+    assert not problems, (
+        "the tests patch these on deps, and a copy taken before the test "
+        f"runs is one no patch reaches; call deps.<name> where it is used: "
+        f"{problems}")

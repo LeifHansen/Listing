@@ -22,7 +22,7 @@ from backend import main  # noqa: E402
 def quiet_boot(monkeypatch):
     for name in ("_warm_models", "_adopt_job_mirrors"):
         monkeypatch.setattr(main, name, lambda: None)
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
 
 
 def test_the_queue_is_flushed_on_shutdown(monkeypatch, quiet_boot):

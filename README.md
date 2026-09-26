@@ -1279,7 +1279,7 @@ backend/
                      yet split out
   routers/           route modules split out of main.py, one area each
                      (the rules for moving one are in its __init__.py)
-    deps.py          request helpers main.py and the routers share
+    deps.py          handler helpers main.py and the routers share
     admin.py         the operator console (/api/admin) and /api/ops
     auth.py          signing up, in and out (/api/auth)
     inbox.py         the notifications bell and the buyer-message inbox

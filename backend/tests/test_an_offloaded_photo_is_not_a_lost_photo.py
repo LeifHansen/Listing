@@ -333,7 +333,7 @@ def test_adoption_does_not_call_a_listing_ready_on_names_alone(monkeypatch,
         _photo(rid, "img_000.jpg")
         return ["img_000.jpg"]
     monkeypatch.setattr(main.image_import, "import_listing_images", _reimport)
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
 
     rec = {"listing": _record("offload-gone", source="ebay",
                               image_urls=["https://i.ebayimg.com/x.jpg"]),

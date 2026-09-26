@@ -39,7 +39,7 @@ def photos(monkeypatch, tmp_path):
     monkeypatch.setattr(main.storage, "original_dir", lambda sid: tmp_path / "original")
     monkeypatch.setattr(main.storage, "snapshot_image", lambda *a, **k: None)
     monkeypatch.setattr(main.objstore, "enabled", lambda: False)
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
     return TestClient(main.app)
 
 

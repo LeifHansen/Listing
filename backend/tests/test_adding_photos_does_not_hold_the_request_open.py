@@ -48,7 +48,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(main.storage, "optimized_dir", lambda sid: opt)
     monkeypatch.setattr(main.storage, "list_optimized",
                         lambda sid: sorted(p.name for p in opt.iterdir()))
-    monkeypatch.setattr(main, "_in_background", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "in_background", lambda *a, **k: None)
     seen: dict = {}
 
     def optimize_batch(jobs, remove_bg=False, progress=None, **kw):
