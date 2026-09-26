@@ -53,13 +53,31 @@ function json(body) {
   });
 }
 
-function server(calls, { recs, bulkCaps, groupTotals, result } = {}) {
+// `result` answers a single row's offer (the route that names its listing);
+// `jobResult` is what the group's job finishes with, and `statuses` are polls
+// to serve before it, for the live progress line.
+function server(calls, { recs, bulkCaps, groupTotals, result, jobResult,
+                         statuses } = {}) {
+  let polls = 0;
   return (url, opts = {}) => {
     const path = String(url);
     if (path === "/api/ebay/send-offers") {
       calls.push({ path, body: JSON.parse(opts.body || "{}") });
       return json(result
-        || { changed: 2, skipped: 0, failed: 0, deferred: 0, percent: 10 });
+        || { changed: 1, skipped: 0, failed: 0, deferred: 0, percent: 10 });
+    }
+    if (path === "/api/ebay/send-offers-all") {
+      calls.push({ path, body: JSON.parse(opts.body || "{}") });
+      return json({ job_id: "job-1", running: true,
+                    total: (groupTotals || {}).send_offers || 0, deferred: 0 });
+    }
+    if (path.startsWith("/api/bulk/status/")) {
+      const pending = statuses && polls < statuses.length ? statuses[polls] : null;
+      polls += 1;
+      if (pending) return json(pending);
+      return json({ id: "job-1", done: true, phase: "done",
+                    result: jobResult || { changed: 2, skipped: 0, failed: 0,
+                                           deferred: 0, percent: 10 } });
     }
     if (path.startsWith("/api/insights")) {
       return json({ recommendations: recs || OFFER_RECS,
@@ -122,8 +140,9 @@ describe("send offers", () => {
     await click(byText("Send offers…"));
     await click(buttons().find((b) =>
       (b.textContent || "").startsWith("Offer 2 listings at")));
-    expect(calls).toEqual([{ path: "/api/ebay/send-offers",
-                             body: { percent: 10, listing_ids: ["a", "b"] } }]);
+    // No ids: the server works the group out itself, all of it.
+    expect(calls).toEqual([{ path: "/api/ebay/send-offers-all",
+                             body: { percent: 10 } }]);
     expect(text()).toContain("Sent 2 offers at 10% off");
     await act(async () => { root.unmount(); });
   });
@@ -170,7 +189,7 @@ describe("send offers", () => {
        decides per listing whether anyone is interested right now. */
     const { root, text } = await mount([], {
       groupTotals: { send_offers: 2 },
-      result: { changed: 1, skipped: 1, failed: 0, deferred: 0, percent: 10 },
+      jobResult: { changed: 1, skipped: 1, failed: 0, deferred: 0, percent: 10 },
     });
     await click(byText("Send offers…"));
     await click(buttons().find((b) =>
@@ -186,7 +205,7 @@ describe("send offers", () => {
        listing; the toast carries it. */
     const { root, text } = await mount([], {
       groupTotals: { send_offers: 2 },
-      result: {
+      jobResult: {
         changed: 1, skipped: 1, failed: 0, deferred: 0, percent: 10,
         results: {
           changed: [{ listing_id: "a", title: "Nike hoodie" }],
@@ -204,28 +223,45 @@ describe("send offers", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("names the part of the group one pass reaches", async () => {
-    /* Each offer is its own eBay call, so a run is capped and the remainder
-       comes back for a second press — said before the seller agrees to it. */
-    const { root, text } = await mount([], {
-      groupTotals: { send_offers: 3 }, bulkCaps: { send_offers: 2 },
-    });
+  /* "Send offers…" means all of them — the same fix "Lower all…" got. The
+     group button used to send the rows this screen held to a route that
+     offers BULK_OFFER_CAP per press, so a group of 41 reached a slice and
+     left the rest for more presses. It names no ids now and runs as a job. */
+  it("offers the number on the badge, not one pass's slice of it", async () => {
+    const { root, text } = await mount([], { groupTotals: { send_offers: 41 } });
     await click(byText("Send offers…"));
-    expect(text()).toContain("One run covers 2 of them");
+    expect(byText("Offer 41 listings at 10% off")).toBeTruthy();
+    expect(text()).not.toContain("second run");
     await act(async () => { root.unmount(); });
   });
 
-  it("adds the rows that did not fit to what is left", async () => {
-    /* The group holds a capped slice of itself, and the server can only
-       defer what it was sent. "2 left" has to count both. */
-    const { root, text } = await mount([], {
-      groupTotals: { send_offers: 4 },
-      result: { changed: 1, skipped: 0, failed: 0, deferred: 1, percent: 10 },
+  it("reaches past the rows it was sent, with nothing left over", async () => {
+    // Two rows arrived; the store holds 41. The press is for the 41.
+    const calls = [];
+    const { root, text } = await mount(calls, {
+      groupTotals: { send_offers: 41 },
+      jobResult: { changed: 41, skipped: 0, failed: 0, deferred: 0, percent: 10 },
     });
     await click(byText("Send offers…"));
-    await click(buttons().find((b) =>
-      (b.textContent || "").startsWith("Offer 4 listings at")));
-    expect(text()).toContain("3 left — run it again to finish");
+    await click(byText("Offer 41 listings at 10% off"));
+    expect(calls).toEqual([{ path: "/api/ebay/send-offers-all",
+                             body: { percent: 10 } }]);
+    expect(text()).toContain("Sent 41 offers at 10% off");
+    expect(text()).not.toContain("run it again");
+    await act(async () => { root.unmount(); });
+  });
+
+  it("shows which listing it is on, under the group it belongs to", async () => {
+    const { root, text } = await mount([], {
+      groupTotals: { send_offers: 41 },
+      statuses: [{ id: "job-1", done: false, phase: "offering", current: 3,
+                   total_items: 41, current_title: "Canon AE-1" }],
+    });
+    await click(byText("Send offers…"));
+    await click(byText("Offer 41 listings at 10% off"));
+    expect(text()).toContain("“Canon AE-1”");
+    expect(text()).toContain("4 of 41");
+    await act(async () => { await new Promise((r) => setTimeout(r, 1600)); });
     await act(async () => { root.unmount(); });
   });
 

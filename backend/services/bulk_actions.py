@@ -101,7 +101,8 @@ def validate_percent(percent) -> float:
     return value
 
 
-def run(records: list[dict], apply_one: Callable[[dict], dict]) -> BulkResult:
+def run(records: list[dict], apply_one: Callable[[dict], dict],
+        on_each: Optional[Callable[[int, str], None]] = None) -> BulkResult:
     """`apply_one` over each record, collecting outcomes.
 
     `apply_one` returns {"ok": True, ...} to count as changed, {"skip":
@@ -113,12 +114,18 @@ def run(records: list[dict], apply_one: Callable[[dict], dict]) -> BulkResult:
     it under "still need you" asks them for work that does not exist. The
     default is True, so a reason that has not thought about it is still put in
     front of them; the lie worth avoiding is the other one.
+
+    `on_each(index, title)` (optional) is told which listing is next, before
+    it is started — for a run polled as a background job, which has to say
+    where it is while it is there.
     """
     result = BulkResult()
-    for rec in records:
+    for i, rec in enumerate(records):
         rid = rec.get("id") or ""
         title = ((rec.get("listing") or {}).get("title")
                  or rec.get("title") or "this listing")
+        if on_each:
+            on_each(i, title)
         try:
             outcome = apply_one(rec) or {}
         except Exception as exc:  # noqa: BLE001 - one listing must not sink the run

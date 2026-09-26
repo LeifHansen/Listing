@@ -45,10 +45,12 @@ const NO_TOTALS = Object.freeze({});
 // The "Finish everything" plan before /api/insights has answered. Zero total
 // hides the button rather than offering one that cannot say what it will do.
 const NO_PLAN = Object.freeze({ total: 0, enrich: 0, accept: 0 });
-// How many of a group ONE tap actually reaches. Both bulk actions fill a
-// capped number of listings per run and defer the rest, so the group must not
-// promise the whole badge: it asked to confirm 46, quoted the AI cost of 46,
-// then ran 25 and reported "1 of 25".
+// How many of a group ONE tap actually reaches. A group whose type has a cap
+// in bulk_caps runs that many and defers the rest; one with none runs all of
+// it — which is every group button here now (Enrich all, Lower all, Send
+// offers). Kept for a cap the server may send again, because a capped group
+// must not promise the whole badge: it asked to confirm 46, quoted the AI
+// cost of 46, then ran 25 and reported "1 of 25".
 const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
 // The count a seller is actually agreeing to, with its noun: "46 listings"
 // when the run covers the group, "25 of 46 listings" when it doesn't. The
@@ -265,7 +267,7 @@ function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
           </span>
         </label>
         <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
-        {/* The server reprices a capped number per run and defers the rest.
+        {/* A capped run covers part of the group and defers the rest.
             Said here, next to the button that spends it, rather than only in
             the toast that arrives once it is already too late to plan. */}
         {count < total && (
@@ -395,8 +397,8 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
             {Math.min(progress.done + 1, progress.total)} of {progress.total}
             {/* A capped run has to account for its remainder right here, or
                 "2 of 25" under a badge reading 46 reads as a contradiction.
-                The fill no longer has one — it takes the whole list — and
-                the price drop still does. */}
+                None of the jobs that draw this line has one any more — the
+                fill, the price drop and the offers all take the whole group. */}
             {progress.deferred > 0
               ? ` · ${progress.deferred} more after this run` : ""}
           </span>
@@ -409,12 +411,14 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
             busy={busy}
             onCancel={() => setAmountFor(null)}
             onSubmit={(value) => {
-              // One listing's run is the same run over a group of one, so
-              // there is one code path to the server and one way the result
-              // is reported — rather than a second, nearly-identical handler
-              // that would be the one to drift.
+              // One listing's run goes through the same handler as the
+              // group's, so the result is reported one way — rather than a
+              // second, nearly-identical handler that would be the one to
+              // drift. `only` is how the handler tells them apart: the group
+              // is worked out by the server, one row names its listing.
               const target = one
-                ? { type: group.type, recs: [amountFor], total: 1 }
+                ? { type: group.type, recs: [amountFor], total: 1,
+                    only: amountFor.listing_id }
                 : group;
               setAmountFor(null);
               action.run({ group: target, cap, lowerAll, sendOffers,
@@ -689,29 +693,46 @@ export function Dashboard() {
     () => items.map((i) => `${i.id}:${i.status}`).join("|"), [items]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, storeShape]);
 
-  // Bulk price drop across one suggestion group. Reports per-listing outcomes
-  // rather than a bare success: over a dozen listings some will have sold or
-  // ended since the suggestion was computed, and "lowered 11, skipped 1" is
-  // the honest answer.
+  // Bulk price drop across the whole "Lower prices" group. Reports
+  // per-listing outcomes rather than a bare success: over a dozen listings
+  // some will have sold or ended since the suggestion was computed, and
+  // "lowered 11, skipped 1" is the honest answer.
+  //
+  // ALL of them, the same way "Enrich all" came to mean all of them. This
+  // used to hand the server the rows this screen was holding, and the server
+  // repriced a capped BULK_PRICE_CAP of those per press — so in an
+  // environment where that cap was 1, "Lower all…" on a group of 41 said
+  // "Lower 1 price by 20%" and lowered one. The run sends no ids and has no
+  // cap now: the server works the group out from the same ranking this
+  // screen renders, and runs it as a job this polls.
   const [bulkBusy, setBulkBusy] = useState(null); // group type, or null
+  // What a long run is doing right now, or null. The fill, the price drop and
+  // the offers are background JOBS the client polls — minutes of vision passes
+  // and eBay calls, far longer than any browser holds a request open — and a
+  // spinner with no end in sight is the shape of a hang. `type` says which
+  // group the line belongs under.
+  const [bulkProgress, setBulkProgress] = useState(null);
   const lowerAll = async (group, percent) => {
-    const ids = group.recs.map((r) => r.listing_id);
-    // The rows the group holds are a capped slice of it (see groupSize), and
-    // the ones that did not fit are still prices this button has to get to.
-    const unsent = Math.max(groupSize(group) - ids.length, 0);
     setBulkBusy(group.type);
+    setBulkProgress({ type: group.type, done: 0, total: groupSize(group),
+                      deferred: 0, title: "" });
     try {
-      const res = await postJson("/api/ebay/lower-prices",
-        { percent, listing_ids: ids });
+      const start = await postJson("/api/ebay/lower-all", { percent });
+      const total = start.total || groupSize(group);
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setBulkProgress({
+          type: group.type, done: j.current || 0,
+          total: j.total_items || total, deferred: 0,
+          title: j.current_title || "",
+        }),
+      });
+      // The run's own percentage: a press that found one already going is
+      // handed that run, which may have been started at a different number.
+      const cut = res.percent ?? percent;
       const parts = [];
-      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${percent}%`);
+      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${cut}%`);
       if (res.skipped) parts.push(`${res.skipped} skipped`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      // The server caps one run so the request can't outlive the gateway —
-      // and it can only defer what it was sent, so the rest of the group is
-      // added back on here.
-      const left = unsent + (res.deferred || 0);
-      if (left) parts.push(`${left} left — run it again to finish`);
       const results = res.results || {};
       const lines = reasonLines(
         [...(results.failed || []), ...(results.skipped || [])]);
@@ -723,7 +744,10 @@ export function Dashboard() {
       loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
-    } finally { setBulkBusy(null); }
+    } finally {
+      setBulkBusy(null);
+      setBulkProgress(null);
+    }
   };
 
   // The same shape for "Send offers", and it reports the same way, because
@@ -732,19 +756,39 @@ export function Dashboard() {
   // offers · 3 skipped" is the honest answer, and the skips are ordinary —
   // a listing whose watchers have already been offered this week, or one
   // eBay no longer counts as having interested buyers.
+  //
+  // And ALL of them, for the reason "Lower all…" is: the group button used
+  // to send the rows this screen held to a route that offers a capped
+  // BULK_OFFER_CAP per press. It sends no ids now and runs as a job over the
+  // whole group. A single row (`group.only`) still names its one listing —
+  // one eBay call fits in any request, and there is no group to work out.
   const sendOffers = async (group, percent) => {
-    const ids = group.recs.map((r) => r.listing_id);
-    const unsent = Math.max(groupSize(group) - ids.length, 0);
     setBulkBusy(group.type);
     try {
-      const res = await postJson("/api/ebay/send-offers",
-        { percent, listing_ids: ids });
+      let res;
+      if (group.only) {
+        res = await postJson("/api/ebay/send-offers",
+          { percent, listing_ids: [group.only] });
+      } else {
+        setBulkProgress({ type: group.type, done: 0, total: groupSize(group),
+                          deferred: 0, title: "" });
+        const start = await postJson("/api/ebay/send-offers-all", { percent });
+        const total = start.total || groupSize(group);
+        res = await pollJob(start.job_id, {
+          onUpdate: (j) => setBulkProgress({
+            type: group.type, done: j.current || 0,
+            total: j.total_items || total, deferred: 0,
+            title: j.current_title || "",
+          }),
+        });
+      }
+      // The run's own discount: a press that found one already going is
+      // handed that run, which may have been started at a different number.
+      const off = res.percent ?? percent;
       const parts = [];
-      if (res.changed) parts.push(`Sent ${res.changed} offer${res.changed === 1 ? "" : "s"} at ${percent}% off`);
+      if (res.changed) parts.push(`Sent ${res.changed} offer${res.changed === 1 ? "" : "s"} at ${off}% off`);
       if (res.skipped) parts.push(`${res.skipped} skipped`);
       if (res.failed) parts.push(`${res.failed} failed`);
-      const left = unsent + (res.deferred || 0);
-      if (left) parts.push(`${left} left — run it again to finish`);
       const results = res.results || {};
       const lines = reasonLines(
         [...(results.failed || []), ...(results.skipped || [])]);
@@ -756,16 +800,11 @@ export function Dashboard() {
       loadListings({ quiet: true });
     } catch (e) {
       toast(`Couldn't send offers: ${e.message}`, { kind: "error" });
-    } finally { setBulkBusy(null); }
+    } finally {
+      setBulkBusy(null);
+      setBulkProgress(null);
+    }
   };
-
-  // What a long run is doing right now, or null. Both the fill and the
-  // whole-list press are background JOBS the client polls — minutes of vision
-  // passes and eBay revises, far longer than any browser holds a request open
-  // — and a spinner with no end in sight is the shape of a hang. `type` says
-  // which control the line belongs under: a group's own rec type, or
-  // FINISH_ALL for the press that spans them.
-  const [bulkProgress, setBulkProgress] = useState(null);
 
   // "Enrich all" — the whole suggestions list, in one press.
   //
@@ -778,13 +817,13 @@ export function Dashboard() {
   // rest, so 131 was six presses. "Check details" is now gone entirely and
   // its half runs inside this press (see services/recommender).
   //
-  // So this one sends NO ids. Every other bulk action here hands the server
-  // the group's membership, which is right when the client is naming a
-  // selection and wrong here: the recommendations payload is a capped slice
-  // per type, so a client-named set could only reach the rows it happens to
-  // have been sent. The server works the set out from the same ranking this
-  // screen is rendered from, which is what makes "it clears the list" true
-  // rather than approximately true.
+  // So this one sends NO ids — and neither, now, do Lower all and Send
+  // offers. Handing the server the group's membership is right when the
+  // client is naming a selection and wrong here: the recommendations payload
+  // is a capped slice per type, so a client-named set could only reach the
+  // rows it happens to have been sent. The server works the set out from the
+  // same ranking this screen is rendered from, which is what makes "it clears
+  // the list" true rather than approximately true.
   const finishEverything = async () => {
     const plan = finishPlan;
     if (!plan.total) return;
