@@ -57,8 +57,8 @@ def api(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "enabled", lambda: True)
     monkeypatch.setattr(db, "upsert_listing",
                         lambda lid, data, **k: saved.update(data) or True)
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     return TestClient(main.app), saved
 
 
@@ -117,7 +117,7 @@ def test_a_stranger_cannot_patch_someone_elses_listing(api, monkeypatch):
     from backend import main
 
     client, saved = api
-    monkeypatch.setattr(main, "_uid", lambda _r: "someone-else")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "someone-else")
 
     resp = client.patch("/api/listings/lst1",
                         json={"category_id": "222"})

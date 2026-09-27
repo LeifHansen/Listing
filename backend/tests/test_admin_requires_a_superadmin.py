@@ -1,6 +1,6 @@
 """Every console route answers 404 to everyone but a superadmin.
 
-The gate is _require_superadmin, and three of its properties matter enough
+The gate is deps.require_superadmin, and three of its properties matter enough
 to pin. It answers 404, not 401 — lib/api.js treats any 401 as "session
 expired" and signs the caller out client-side, so a curious logged-in
 seller probing /api/admin must not lose their session over it; and a 404

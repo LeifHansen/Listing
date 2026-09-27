@@ -554,6 +554,18 @@ export function useListingForm() {
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
   const [addingPhotos, setAddingPhotos] = useState(false);
+  // The editor as it is NOW, for an add to finish against. An add runs for
+  // minutes -- an upload, then a polled job -- and the seller keeps working
+  // while it does: deleting a photo, reordering, retitling, even opening
+  // another listing. Finishing against the values captured when it STARTED
+  // saved that whole snapshot back over everything done since: a deleted
+  // photo came back (its file already gone), a new title reverted, and a
+  // listing opened meanwhile had the first listing's photos written into its
+  // editor. Written in an effect, never during render (React's refs rule).
+  const editorNow = useRef(null);
+  useEffect(() => {
+    editorNow.current = { sessionId, collect, images: form.images || [] };
+  });
   // What the add is doing right now, for the tile: "Uploading…", "Photo 2 of
   // 4…". Minutes of cutouts behind a plain "Adding…" is the shape of a hang.
   const [addingStatus, setAddingStatus] = useState("");
@@ -604,14 +616,31 @@ export function useListingForm() {
         : start;
       const added = res.added || [];
       if (added.length) {
-        const next = [...(form.images || []), ...added];
-        setForm((f) => ({ ...f, images: next }));
-        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
+        const append = (images) => [
+          ...images, ...added.filter((n) => !images.includes(n))];
+        const now = editorNow.current;
+        let payload;
+        if (now && now.sessionId === sessionId) {
+          // Still on this listing: onto its photos and fields as they are
+          // now, which is also what the editor goes on showing.
+          const next = append(now.images);
+          setForm((f) => ({ ...f, images: next }));
+          setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
+          payload = { ...now.collect(), images: next };
+        } else {
+          // The seller has moved on to another listing, whose editor this
+          // must not touch. The photos still belong on THIS one, so they go
+          // onto the copy the server holds rather than onto a snapshot from
+          // before the add.
+          const rec = await api(`/api/listings/${sessionId}`);
+          const saved = rec.listing || {};
+          payload = { ...saved, images: append(saved.images || []) };
+        }
         // Awaited, inside the try: a rejected save left the new photos on
         // screen and saved nowhere, so a reload lost them with no error ever
         // shown -- the same trap reorderImages above documents having fixed.
         // The outer catch turns it into "Couldn't add photos: ...".
-        await postJson(`/api/save/${sessionId}`, { ...collect(), images: next });
+        await postJson(`/api/save/${sessionId}`, payload);
         // ...and which of them the pass turned upright, so a wrong turn is
         // found now rather than on the live listing.
         const turned = turnedUprightMessage(res.optimize_results);
@@ -627,8 +656,7 @@ export function useListingForm() {
       setAddingPhotos(false);
       setAddingStatus("");
     }
-  }, [sessionId, form.images, collect, setForm, setSession,
-      invalidateListings, toast]);
+  }, [sessionId, setForm, setSession, invalidateListings, toast]);
 
   // ---------- the listing's video ----------
   // eBay takes ONE video per listing, MP4, and this is the whole of the

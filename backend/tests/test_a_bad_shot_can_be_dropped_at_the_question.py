@@ -63,7 +63,7 @@ def _no_bucket(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _im_the_owner(monkeypatch):
-    monkeypatch.setattr(main, "_uid", lambda request: "owner")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "owner")
 
 
 @pytest.fixture
@@ -262,7 +262,7 @@ def test_a_delete_for_a_job_that_has_moved_on_is_refused(monkeypatch):
 def test_a_delete_on_someone_elses_job_is_a_404(monkeypatch):
     """Same answer as an id that never existed, so this cannot be used to ask
     whether somebody else's batch is real."""
-    monkeypatch.setattr(main, "_uid", lambda request: "someone-else")
+    monkeypatch.setattr(main.deps, "uid", lambda request: "someone-else")
     jobstore.register("job-3", {"id": "job-3", "phase": "awaiting_notes",
                                 "done": False, "_staging_id": "s",
                                 "_names": ["img_000.jpg", "img_001.jpg"],

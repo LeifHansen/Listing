@@ -60,9 +60,9 @@ def client(monkeypatch):
     monkeypatch.setattr(db, "upsert_listing",
                         lambda *_a, **_k: effects.__setitem__(
                             "writes", effects["writes"] + 1))
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *_a, **_k: None)
-    monkeypatch.setattr(main, "_in_background",
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *_a, **_k: None)
+    monkeypatch.setattr(main.deps, "in_background",
                         lambda fn, *a, what="", **k: fn(*a, **k))
 
     return TestClient(main.app), effects
@@ -138,7 +138,7 @@ def test_preparing_someone_elses_listing_is_refused(client, monkeypatch):
     from backend import main
 
     api, effects = client
-    monkeypatch.setattr(main, "_uid", lambda _r: "somebody-else")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "somebody-else")
 
     resp = api.post(f"/api/listings/{LISTING_ID}/prepare-for-editing")
 

@@ -52,8 +52,10 @@ class FakeDb:
 @pytest.fixture
 def client(monkeypatch):
     from backend import main
-    monkeypatch.setattr(main, "db", FakeDb())
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    fake = FakeDb()
+    monkeypatch.setattr(main, "db", fake)
+    monkeypatch.setattr(main.deps, "db", fake)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     return main, TestClient(main.app, raise_server_exceptions=False)
 
 

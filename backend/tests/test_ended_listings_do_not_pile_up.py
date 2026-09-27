@@ -106,11 +106,12 @@ def ending(monkeypatch):
         purged: list[str] = []
         monkeypatch.setattr(main.auth, "current_user",
                             lambda request: {"id": "u1"})
-        monkeypatch.setattr(main, "_uid", lambda request: "u1")
-        monkeypatch.setattr(main, "_ebay_creds_for",
+        monkeypatch.setattr(main.deps, "uid", lambda request: "u1")
+        monkeypatch.setattr(main.deps, "ebay_creds_for",
                             lambda request: {"access_token": "tok",
                                              "ebay_username": "seller"})
         monkeypatch.setattr(main, "db", store)
+        monkeypatch.setattr(main.deps, "db", store)
         monkeypatch.setattr(listing_sync, "db", store)
         monkeypatch.setattr(listing_sync, "_purge_photos", purged.append)
         monkeypatch.setattr(
@@ -237,10 +238,11 @@ def test_the_sync_sweeps_what_has_run_out_of_road(monkeypatch):
     ])
     purged: list[str] = []
     monkeypatch.setattr(main.auth, "current_user", lambda request: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "tok",
                                          "ebay_username": "seller"})
     monkeypatch.setattr(main, "db", store)
+    monkeypatch.setattr(main.deps, "db", store)
     monkeypatch.setattr(listing_sync, "db", store)
     monkeypatch.setattr(listing_sync, "_purge_photos", purged.append)
     monkeypatch.setattr(main.listing_sync, "reconcile_recent",

@@ -182,7 +182,7 @@ def test_only_a_superadmin_can_create_a_global_reference():
     assert 'scope = "global" if (wants_global and is_admin) else "account"' in body
     # ...and a global one is written to the admin audit trail like every other
     # superadmin action.
-    assert "_audit_admin" in body
+    assert "deps.audit_admin(" in body
 
 
 def test_a_seller_cannot_edit_or_delete_a_reference_that_is_not_theirs():

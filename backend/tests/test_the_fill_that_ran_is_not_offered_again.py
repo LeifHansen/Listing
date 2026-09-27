@@ -53,9 +53,9 @@ def api(monkeypatch, tmp_path):
     route's own bookkeeping, which is what these tests are about."""
     monkeypatch.setattr(main.config, "anthropic_ready", lambda: True)
     monkeypatch.setattr(main.config, "taxonomy_ready", lambda: True)
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
-    monkeypatch.setattr(main, "_uid", lambda *a, **k: "u1")
-    monkeypatch.setattr(main, "_charge_ai", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
+    monkeypatch.setattr(main.deps, "charge_ai", lambda *a, **k: None)
     monkeypatch.setattr(main.taxonomy, "item_aspects",
                         lambda *a, **k: {"aspects": ASPECTS})
     # The second look is its own feature with its own tests and its own kill

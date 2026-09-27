@@ -4,13 +4,14 @@ import {
   Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
   RefreshCw, ExternalLink, Ban, Trash2,
 } from "lucide-react";
-import { api, postJson } from "@/lib/api";
+import { postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { WorkflowCard } from "./WorkflowCard";
 import { blockerHeadline, marketNames } from "./blockers";
 import { MarketTargetChips, usePublishTargets } from "./publishShared";
+import { loadPolicies } from "./ShippingPolicySelect";
 import { Button } from "@/components/ui/Button";
 import { endedGraceDays, keptWhenEnded } from "@/lib/listingsView";
 
@@ -194,7 +195,7 @@ export function PublishCard({ w }) {
   // Show which shipping/payment/return policies will apply.
   useEffect(() => {
     if (!ebay.connected || policiesData) return;
-    api("/api/ebay/policies").then(setPoliciesData).catch(() => {});
+    loadPolicies().then(setPoliciesData).catch(() => {});
   }, [ebay.connected, policiesData, setPoliciesData]);
 
   const onFix = (target) => {

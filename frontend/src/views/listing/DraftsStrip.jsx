@@ -18,7 +18,7 @@ import { DraftPriceEdit } from "./PriceQuickEdit";
 import { ShippingPolicySelect } from "./ShippingPolicySelect";
 import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
-  UNCONFIRMED_PUBLISH,
+  UNCONFIRMED_PUBLISH, blocksEveryListing,
 } from "./publishShared";
 import { blockerLabels, blockersFor, marketNames } from "./blockers";
 import {
@@ -334,10 +334,22 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
       confirmLabel: "Publish live",
     }))) return;
     let ok = 0, failed = 0, unconfirmed = 0;
+    // Set when eBay refuses one draft for a reason that is about the ACCOUNT
+    // (blocksEveryListing): every draft after it would be refused the same
+    // way, each one spending a real publish call, the server's whole 240
+    // diagnosis again, and a refusal card of its own to say the same
+    // sentence. Production's error feed carried 18 such refusals in a day
+    // from runs like this. The rest stay drafts, untouched, and say so.
+    let accountHold = null;
+    let notTried = 0;
     const reasons = [];
     setBulkProgress({ done: 0, total: ready.length });
     try {
-      for (const item of ready) {
+      for (const [n, item] of ready.entries()) {
+        if (accountHold) {
+          notTried = ready.length - n;
+          break;
+        }
         const out = await publishItem(item);
         if (out.published) ok++;
         // A publish nobody got an answer to is its own outcome. Counting it
@@ -353,6 +365,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
           // fix" and sent the seller to inspect five listings that were never
           // the problem. That is the shape of the failures in production.
           reasons.push(out.error || out.reason);
+          if (blocksEveryListing(out.res)) accountHold = out.reason;
         }
         setBulkProgress((p) => ({ ...p, done: ok + failed + unconfirmed }));
       }
@@ -363,6 +376,14 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
     clearSelection();
     const shared = reasons.length && reasons.every((r) => r === reasons[0])
       ? reasons[0] : null;
+    if (notTried) {
+      toast(`Published ${ok} listing${ok === 1 ? "" : "s"}. Stopped there — `
+        + `${accountHold} ${notTried} more ${notTried === 1 ? "draft was" : "drafts were"} `
+        + "not sent, since eBay would refuse them the same way; they're still "
+        + "drafts, ready once the account is sorted.",
+        { kind: "warning" });
+      return;
+    }
     toast(`Published ${ok} listing${ok === 1 ? "" : "s"}.`
       + (failed
           ? (shared ? ` All ${failed} were refused: ${shared}`

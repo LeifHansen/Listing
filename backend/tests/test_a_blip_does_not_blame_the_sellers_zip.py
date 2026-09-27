@@ -39,8 +39,8 @@ URL_LEAK = ("Client error '401 Unauthorized' for url "
 @pytest.fixture
 def client(monkeypatch):
     from backend import main
-    monkeypatch.setattr(main, "_uid", lambda *a, **k: "u1")
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "uid", lambda *a, **k: "u1")
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda *a, **k: {"access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main.db, "save_ebay_account", lambda *a, **k: True)
     return main, TestClient(main.app, raise_server_exceptions=False)
@@ -83,7 +83,7 @@ def test_the_message_never_carries_ebays_url(client, monkeypatch):
     # landing badly. Pinned to a reference with no hex run that could collide,
     # so the assertion below tests the one thing it is about -- that eBay's
     # status line stayed out of the sentence -- and tests it every time.
-    monkeypatch.setattr(main, "_support_reference", lambda: "deadbeef")
+    monkeypatch.setattr(main.deps, "support_reference", lambda: "deadbeef")
     _location_raises(main, monkeypatch,
                      httpx.HTTPStatusError(URL_LEAK, request=None, response=None))
 

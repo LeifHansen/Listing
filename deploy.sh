@@ -39,10 +39,13 @@ current=$(git rev-parse --abbrev-ref HEAD)
   || die "you are on '$current', not $BRANCH. git checkout $BRANCH"
 
 # 2. Nothing uncommitted. Whatever is in the working tree is what gets shipped,
-#    so an experiment you forgot about goes live with it.
-git diff --quiet && git diff --cached --quiet \
-  || die "you have uncommitted changes. Commit or stash them first
-         (they WOULD be deployed -- fly ships your files, not your commits)."
+#    so an experiment you forgot about goes live with it. `git status` rather
+#    than `git diff`: diff ignores UNTRACKED files, and fly uploads those too
+#    -- a scratch file under backend/ rides `COPY backend` into the image.
+[ -z "$(git status --porcelain)" ] \
+  || die "you have uncommitted or untracked changes. Commit, stash or remove
+         them first (they WOULD be deployed -- fly ships your files, not your
+         commits)."
 
 # 3. Up to date with the remote. This is the one that actually bit us: being
 #    behind main is invisible locally and silently reverts everyone else's work.
@@ -67,7 +70,12 @@ FLY=$(command -v fly 2>/dev/null || command -v flyctl)
 #    no commit, and both the deploy gate and the health watch's drift check have
 #    nothing to compare -- which is how a hand deploy became invisible.
 echo "Deploying $sha to $APP..."
-"$FLY" deploy --remote-only -a "$APP" --build-arg "GIT_SHA=$sha"
+# The same flags as deploy.yml, for its reason: on 2026-08-26 six deploys in a
+# row built the right code and reported success while production went on
+# serving an image from days earlier. --no-cache and an immediate replace are
+# what that pipeline settled on; a hand deploy is no more immune to it.
+"$FLY" deploy --remote-only --no-cache --strategy immediate -a "$APP" \
+  --build-arg "GIT_SHA=$sha"
 
 # 5. Same verification the CI deploy does. "fly deploy said OK" is not evidence
 #    that production is serving it.

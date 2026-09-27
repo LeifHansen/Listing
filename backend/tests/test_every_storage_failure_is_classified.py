@@ -149,9 +149,6 @@ WHY_A_BLANK_IS_SAFE = {
         "the tolerant twin, for panels that hide themselves rather than claim",
     "get_marketplace_account_best_effort":
         "the tolerant twin, same reasoning as the eBay one",
-    "labels_for_order_best_effort":
-        "the tolerant twin: decorates an order with what was bought; the "
-        "purchase route reads the strict labels_for_order, which raises",
     "labels_for_orders":
         "decorates a page of orders with their labels in one query; a blank "
         "costs a badge, and the purchase route never reads it",

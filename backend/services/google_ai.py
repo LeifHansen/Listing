@@ -100,10 +100,6 @@ class GoogleAIRefused(GoogleAIError):
     """
 
 
-def ready() -> bool:
-    return config.google_ai_ready()
-
-
 def error_message(exc: Exception) -> Optional[tuple[int, str]]:
     """(http_status, user-facing sentence) for a Gemini failure, or None.
 

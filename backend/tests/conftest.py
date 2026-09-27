@@ -213,7 +213,8 @@ def _drain_error_queue():
 # and never reaches this one, so in-process API tests are unaffected.
 #
 # Imported here rather than at the top of the file because the `cutout` CI job
-# installs Pillow/NumPy/SciPy and nothing else: a hard import would break the
+# installs pytest, Pillow, python-dotenv and pydantic and nothing else (see
+# gates.yml): a hard import would break the
 # image suite at COLLECTION, which is a worse failure than the one this
 # prevents. Without httpx there is nothing that could make a request anyway.
 try:

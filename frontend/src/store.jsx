@@ -1032,7 +1032,11 @@ export function AppProvider({ children }) {
       try {
         job = await api(`/api/ebay/import-status/${jobId}`);
       } catch (e) {
-        const gone = (e.message || "").includes("(404)");
+        // `e.status`, never the message: api() words the message from the
+        // server's own `detail`, which never carries the number, so a check
+        // for "(404)" in it could not match and a forgotten job read as a
+        // run of blips until the forty-minute deadline.
+        const gone = e.status === 404;
         // A 404 twice over means the server really has no such job (a restart
         // that predates the mirror, say). Anything else is a blip worth
         // retrying — the import itself is still running server-side.
@@ -1179,6 +1183,15 @@ export function AppProvider({ children }) {
   // session: { sessionId, listing, confidence } — null until AI identify runs
   // or a saved listing is opened.
   const [session, setSession] = useState(null);
+  // What is open in the editor NOW, for async work that finishes after its
+  // own screen has gone. A single-item draft polls its job from the uploader,
+  // and a seller who switches to Manage and opens another listing unmounts
+  // that uploader while the job runs on -- so nothing it held could say what
+  // was open when the draft landed. The store stays mounted; this is kept in
+  // step in an effect (React's refs rule) and read through a stable getter.
+  const sessionNow = useRef(null);
+  useEffect(() => { sessionNow.current = session; }, [session]);
+  const currentSession = useCallback(() => sessionNow.current, []);
 
   // Drafts the user has set aside. A skipped draft still lives in Drafts (and
   // can be un-skipped from its card), but the post-publish queue never offers
@@ -1267,14 +1280,25 @@ export function AppProvider({ children }) {
   // for a caller to ask for. Call sites that still pass something — including
   // the `onClick={startNew}` ones that hand it a MouseEvent — are ignored, as
   // they always were.
+  // Only the NEWEST open may land, the same guard loadListings and
+  // loadMetrics carry. Opening is a read and, for an imported listing, a
+  // photo copy of up to 24 files, so tapping one listing and then another
+  // could land the FIRST one second: it replaced the listing the seller was
+  // already editing, and the edits made in between went with it. Starting a
+  // new listing retires an open still in flight for the same reason.
+  const openRequest = useRef(0);
+
   const startNew = useCallback(() => {
+    openRequest.current += 1;
     setSession(null);
     setView("new");
   }, []);
 
   const openListing = useCallback(async (id) => {
+    const seq = ++openRequest.current;
     try {
       let rec = await api(`/api/listings/${id}`);
+      if (seq !== openRequest.current) return;
       // An imported listing's photos live on eBay, and the editor only works
       // on images the app owns. Copying them used to happen invisibly inside
       // the GET above, which made a plain read download up to 24 files and
@@ -1292,6 +1316,7 @@ export function AppProvider({ children }) {
         } catch {
           // Non-fatal: the editor falls back to the read-only eBay photos.
         }
+        if (seq !== openRequest.current) return;
       }
       // status rides along so the workflow knows a live listing is being
       // REVISED (Update Live Listing / End listing) rather than published.
@@ -1310,7 +1335,9 @@ export function AppProvider({ children }) {
       // like it did nothing at all.
       setView((v) => (EDITOR_VIEWS.includes(v) ? v : "new"));
     } catch (e) {
-      toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
+      if (seq === openRequest.current) {
+        toast(`Couldn't open listing: ${e.message}`, { kind: "error" });
+      }
     }
   }, [toast]);
 
@@ -1481,7 +1508,11 @@ export function AppProvider({ children }) {
         // must not declare a running batch finished. Everything else is worth
         // retrying — the batch is still running, and this heartbeat is the only
         // thing that will notice it finish while the queue screen is closed.
-        if ((e.message || "").includes("(404)")) misses += 1;
+        // `e.status`, not the message, which carries the server's sentence
+        // and never the number: read off the message, a forgotten job never
+        // settled, and the banner said "processing" for as long as the tab
+        // stayed open.
+        if (e.status === 404) misses += 1;
         fails += 1;
         if (misses >= 2) {
           if (!stopped) bulkSettled();
@@ -1840,7 +1871,7 @@ export function AppProvider({ children }) {
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
-    session, setSession, startNew, openListing, deleteListing, bulkDeleteListings,
+    session, setSession, currentSession, startNew, openListing, deleteListing, bulkDeleteListings,
     rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
@@ -1868,7 +1899,7 @@ export function AppProvider({ children }) {
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
-    session, startNew, openListing,
+    session, currentSession, startNew, openListing,
     deleteListing, bulkDeleteListings, rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,

@@ -54,7 +54,7 @@ def api(monkeypatch, every_marketplace):
     from backend import main
 
     sent: list[str] = []
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda key: _Etsy() if key == "etsy" else None)
     monkeypatch.setattr(main.db, "get_listings",

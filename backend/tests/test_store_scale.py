@@ -114,7 +114,7 @@ def sync_client(monkeypatch):
     handled = {r["id"] for r in store}
 
     monkeypatch.setattr(main.auth, "current_user", lambda request: {"id": "u1"})
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "tok",
                                          "ebay_username": "seller"})
     # Honours `statuses` because the real read does: the sweep asks for live

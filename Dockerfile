@@ -50,6 +50,12 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 # Nothing on the boot path reads these; see alembic/env.py.
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
+# The operator scripts, for the same reason. grant_superadmin.py is the only
+# way a superadmin is made and says to run it under `fly ssh console`, and
+# migrate_session_ids.py works on the /data volume -- neither can be run from
+# anywhere else, and neither was in the image. Small, and never on a request
+# path.
+COPY scripts ./scripts
 
 EXPOSE 8080
 

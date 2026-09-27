@@ -49,12 +49,6 @@ MEDIUMS = (
     "watercolour", "gouache", "pastel", "charcoal", "photograph", "poster",
 )
 
-# The words that separate a $1,500 sheet from a $15 one. They ride the middle
-# rung: specific enough to find the right half of an artist's market, general
-# enough to still match.
-_EDITION_WORDS = ("hand signed", "signed", "numbered", "artist proof",
-                  "artist's proof", "limited edition")
-
 _ASPECT_MEDIUM = ("print type", "production technique", "medium", "material",
                   "type")
 

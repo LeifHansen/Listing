@@ -92,7 +92,7 @@ def client(monkeypatch):
     monkeypatch.setattr(db, "delete_user", lambda uid: ["listing-a", "listing-b"])
     monkeypatch.setattr(main, "_purge_session_images", purged.append)
     # Run the background erase inline so the test can assert on it.
-    monkeypatch.setattr(main, "_in_background",
+    monkeypatch.setattr(main.deps, "in_background",
                         lambda fn, *a, what="", **k: fn(*a, **k))
 
     return TestClient(main.app), recorded, finished, purged

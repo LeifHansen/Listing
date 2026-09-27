@@ -48,7 +48,7 @@ def _cursor(row):
     A record carries `updated_at` as an ISO STRING (_record_to_dict) and
     `list_listings` compares it against a timestamp column, so handing the
     string straight back does not move the page edge — the same page answers
-    forever. main._cursor_from is what does this in the app, including
+    forever. deps.cursor_from is what does this in the app, including
     reading a naive stamp as UTC rather than local.
     """
     when = _dt.datetime.fromisoformat(row["updated_at"])

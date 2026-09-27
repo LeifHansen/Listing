@@ -42,7 +42,7 @@ LOOKERS = {"views": 40, "watchers": 0}
 @pytest.fixture()
 def seller(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t"})
     # The "Send offers" rule asks eBay who it will carry an offer for once a
     # listing has watchers. Not what this is about, and never the network.
@@ -258,7 +258,7 @@ def test_a_percentage_it_would_refuse_one_at_a_time_is_refused(seller, percent):
 
 def test_it_needs_ebay(seller, monkeypatch):
     client, _dbmod, _uid = seller
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: None)
     assert client.post("/api/ebay/lower-all",
                        json={"percent": 10}).status_code == 400
 

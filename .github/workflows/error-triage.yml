@@ -37,8 +37,8 @@ on:
     - cron: '41 9 * * *'
   workflow_dispatch:
 
-# Nothing by default; each job opens only what it needs. Only prune-branches.yml
-# does this today, and it is the right default for a job that runs unattended.
+# Nothing by default; each job opens only what it needs. art-roster.yml does
+# the same, and it is the right default for a job that runs unattended.
 permissions: {}
 
 env:
@@ -51,11 +51,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Shells to flyctl, so it takes the same lock fly-logs.yml does. The
-    # `fix` job below deliberately stays out of it: a multi-minute agent
-    # session must never hold up a deploy.
+    # Shells to flyctl, so it takes the same lock fly-logs.yml does -- and,
+    # like that one, NOT the deploy's. GitHub cancels a group's pending run
+    # when another queues, so this 09:41 run landing while one deploy waited
+    # behind another silently cancelled the waiting deploy. A read-only log
+    # pull has no reason to wait for a deploy, nor a deploy for it. The `fix`
+    # job below stays out of every group: a multi-minute agent session must
+    # never hold anything up.
     concurrency:
-      group: fly-deploy
+      group: fly-logs
       cancel-in-progress: false
     outputs:
       count: ${{ steps.triage.outputs.count }}
@@ -93,13 +97,24 @@ jobs:
       # filter is lifted verbatim from fly-logs.yml, where it was tuned against
       # the real stream — eBay's account-deletion pings alone are 1-2 a MINUTE.
       # Never fatal: the feed is the record, this is the margin note.
+      #
+      # flyctl is not on the runner image. Until this setup step existed the
+      # step below ran `flyctl logs` against a command that was not there, with
+      # stderr thrown away, and wrote "0 /tmp/context.log" every morning — which
+      # reads exactly like a quiet log. Same pin as fly-logs.yml.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        if: steps.triage.outputs.count != '0'
+        continue-on-error: true
+
       - name: Keep the surrounding log lines
         if: steps.triage.outputs.count != '0'
         continue-on-error: true
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl logs -a "$FLY_APP" --no-tail 2>/dev/null \
+          # stderr stays in the step log: a flyctl that cannot run, or a token
+          # Fly refused, must say so rather than pass for an empty window.
+          flyctl logs -a "$FLY_APP" --no-tail \
             | grep -viE 'account-deletion|GET (/|/api/health|/assets|/media|/favicon)|\.php|New SSH session' \
             | grep -iE 'error|warn|exception|traceback|critical|" 5[0-9][0-9] |ENOSPC|No space' \
             | tail -150 > /tmp/context.log || true

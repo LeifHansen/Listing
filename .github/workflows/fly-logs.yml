@@ -14,8 +14,13 @@ name: Fetch Fly logs
 # failure. So it stays, as the margin note rather than the record, and the
 # "Errors and warnings only" step below is the pass that makes it readable.
 #
-# Manual-dispatch only. It shares the deploy concurrency group so a log run
-# can never interleave with a deploy of the same app.
+# Manual-dispatch only. It has a concurrency group of its OWN, not the
+# deploy's: GitHub keeps at most one pending run per group and cancels it when
+# another queues, so a log dump queued while a deploy waited behind another one
+# cancelled that deploy -- the commit it carried then shipped only with the next
+# push. Everything here reads; a log run overlapping a deploy costs at most an
+# ssh step that finds the machine mid-replacement, and every such step is
+# already `|| true`.
 on:
   workflow_dispatch:
 
@@ -26,7 +31,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: fly-deploy
+  group: fly-logs
   cancel-in-progress: false
 
 env:

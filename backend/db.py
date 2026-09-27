@@ -11,6 +11,7 @@ whether the DB is actually reachable.
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import threading
 import time as _time
@@ -667,15 +668,16 @@ def _get_engine():
             url = _normalize_url(config.DATABASE_URL)
             # pool_timeout bounds the wait for a pool SLOT, not the TCP
             # connect. Without a connect timeout a new connection inherits the
-            # OS default and can hang for minutes on an unreachable host - and
-            # /api/health round-trips the DB inside Fly's 5s liveness timeout.
-            # A Neon stall therefore became a failed health check, and on a
-            # single-machine app Fly answers that by replacing the machine,
-            # killing whatever batch was running. Bound it well under 5s.
+            # OS default and can hang for minutes on an unreachable host. The
+            # health check used to round-trip the DB inside Fly's 5s liveness
+            # timeout, so a Neon stall became a failed check and Fly replaced
+            # the machine, killing whatever batch was running; /api/health
+            # reads no database now, but /api/ready and every request still
+            # connect through here. Bound it well under 5s.
             #
             # This bounds the CONNECT only; a server that accepts and then
-            # stalls is handled on the other side, by keeping /api/health on
-            # the warm cache (see db_status and main._db_status_loop).
+            # stalls is handled on the other side, by keeping the readiness
+            # read on the warm cache (see db_status and main._db_status_loop).
             #
             # libpq-only: SQLite's connect() rejects the keyword outright, and
             # the test suite runs the billing invariants on SQLite.
@@ -823,7 +825,19 @@ def mutate_listing_data(
             rec = s.get(ListingRecord, listing_id, with_for_update=True)
             if rec is None:
                 return None
-            data = mutate(dict(rec.data or {}))
+            # A DEEP copy, and the depth is the whole point. SQLAlchemy decides
+            # whether a JSON column changed by comparing the new value to the
+            # loaded one with ==. A shallow dict() shared every nested object
+            # with the loaded value, so a mutate that edited in place below
+            # the top level -- merge_state's data["marketplaces"][key], the
+            # inventory mirror's "ended" mark -- changed BOTH sides, compared
+            # equal, and the column was never written: the status column moved
+            # and the Etsy listing id, its url and its error were silently
+            # dropped. The next crosspost then minted a second live Etsy
+            # listing, and an eBay sale never took the Etsy copy down. Only a
+            # write that also touched a top-level key (eBay's mirrored
+            # ebay_listing_id) happened to carry its nested state with it.
+            data = mutate(copy.deepcopy(rec.data or {}))
             if data is None:
                 return None
             rec.data = data
@@ -2236,7 +2250,7 @@ def get_listing(listing_id: str) -> Optional[dict]:
 
     It used to collapse the two, and ten route handlers turned the result
     into `404 "Listing not found"` -- a claim about the seller's account made
-    on the strength of not being able to ask. `_assert_session_owner` had
+    on the strength of not being able to ask. `deps.assert_session_owner` had
     already reasoned this through for the ownership guard and refuses with a
     503; this is the same reasoning, in the one place all of them read.
 
@@ -2937,15 +2951,6 @@ def labels_for_orders(user_id: str, order_ids: list[str]) -> dict[str, list[dict
         return out
 
 
-def labels_for_order_best_effort(user_id: str, order_id: str) -> list[dict]:
-    """labels_for_order for callers that only DECORATE an order with what
-    was bought -- an unreadable row costs a badge, not a decision."""
-    try:
-        return labels_for_order(user_id, order_id)
-    except StorageUnavailable:
-        return []
-
-
 def labels_for_listing(user_id: str, listing_record_id: str) -> list[dict]:
     """Labels bought for orders that matched one of our listing records,
     newest first -- how "Ship it" on a sold notification finds the label
@@ -3030,7 +3035,7 @@ def db_status(refresh: bool = False) -> dict:
 #
 # Cross-user reads, prefixed admin_ so they are greppable: everything above
 # this line is scoped to one user_id, and only the /api/admin routes (gated
-# by main._require_superadmin) may call what is below it. All of them follow
+# by deps.require_superadmin) may call what is below it. All of them follow
 # the module's read policy for reads that feed a REPORT: a failure RAISES
 # rather than answering zeros — the console renders "couldn't check", never
 # an invented 0 (the same dash-not-zero contract the dashboard has).

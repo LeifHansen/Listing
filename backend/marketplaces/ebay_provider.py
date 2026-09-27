@@ -99,8 +99,16 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
     the repair happens once rather than on every publish. A failed lookup still
     changes nothing, for the same reason as before.
     """
-    if not ebay_account.verify_due(uid):
+    if not ebay_account.claim_verify(uid):
         return acct
+    try:
+        return _verify_policies(uid, acct, access_token)
+    finally:
+        ebay_account.release_verify(uid)
+
+
+def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
+    """The check itself, run by the one caller that claimed it."""
     try:
         discovered = ebay_auth.fetch_policies_and_location(access_token)
         # Sync from whatever the connected eBay account actually has -- an id

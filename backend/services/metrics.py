@@ -24,6 +24,7 @@ explain the blank numbers instead of showing every listing 0 views.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -32,6 +33,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from . import ebay_trading
 
 log = logging.getLogger("thryft.metrics")
@@ -49,12 +51,29 @@ _TTL = 120  # seconds — enough to dedupe the insights + grid fetches
 # a day; watchers, bids and pending offers keep the short cache above, because
 # a buyer can act on a listing in the next minute.
 #
-# Keyed like _CACHE (token + the id set): {key: (fetched_at, report, asked)}.
+# Keyed by the SELLER'S EBAY ACCOUNT, not like _CACHE by token + id set:
+# {account: (fetched_at, report, asked)}. Both parts of that key moved on
+# their own while the report did not. The access token is re-minted every two
+# hours, and the id set changes with every listing that goes live, sells or
+# ends -- a bulk publish of twenty drafts changed it twenty times -- so each
+# of those re-read the whole store's report, every page of it, against the
+# app-wide daily allowance that production kept finding spent. Now a listing
+# the held report was never asked about is read on its own and joins it (see
+# _traffic_report), and a token that changed is still the same seller.
 _TRAFFIC_CACHE: dict[str, tuple[float, dict, set]] = {}
 _TRAFFIC_TTL = 60 * 60
 
 # How many sellers either cache holds before it evicts.
 _CACHE_MAX = 200
+
+# One computation per cache key at a time. The dashboard's insights and the
+# store's metrics load fire in the same render, and both used to MISS the short
+# cache together -- each then walked the account's active listings, asked about
+# up to 25 pending offers, and read the traffic report, the whole set twice,
+# which is exactly what the cache exists to prevent. The second caller now
+# waits for the first and is answered from what it cached.
+_INFLIGHT: dict[str, threading.Lock] = {}
+_INFLIGHT_GUARD = threading.Lock()
 
 
 def _make_room(cache: dict, ttl: float, cap: int = _CACHE_MAX) -> None:
@@ -155,14 +174,6 @@ def _quota_reset_time(now: Optional[datetime] = None) -> float:
     return reset.timestamp()
 
 
-def _is_scope_error(resp: httpx.Response) -> bool:
-    """A refusal the seller can fix by reconnecting, vs. a transient API blip."""
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return ("insufficient" in body and "scope" in body) or "access_denied" in body
-
-
 def _metric_keys(data: dict) -> list[str]:
     """The metric name of each metricValues column, in order.
 
@@ -212,7 +223,7 @@ def _traffic_page(token: str, listing_ids: list[str], start, end) -> dict[str, d
     )
     if r.status_code != 200:
         raise TrafficUnavailable(f"traffic_report {r.status_code}: {r.text[:160]}",
-                                 needs_reconnect=_is_scope_error(r),
+                                 needs_reconnect=is_scope_error(r),
                                  quota=r.status_code == 429)
     data = r.json()
     keys = _metric_keys(data)
@@ -301,42 +312,65 @@ def _traffic(token: str, listing_ids: list[str],
     return out
 
 
-def _traffic_report(token: str, ids: list[str], covered: set) -> dict[str, dict]:
+def _held(entry: tuple[float, dict, set], ids: list[str],
+          covered: set) -> dict[str, dict]:
+    """The part of a held report that answers for `ids`, and which of them
+    it was actually asked about. One seller's report holds every listing it
+    has been asked about this hour, including ones that have since ended; an
+    answer is only ever about the listings in this request."""
+    _at, report, asked = entry
+    wanted = set(ids)
+    covered.update(asked & wanted)
+    return {lid: m for lid, m in report.items() if lid in wanted}
+
+
+def _traffic_report(token: str, ids: list[str], covered: set,
+                    account: str = "") -> dict[str, dict]:
     """`_traffic`, behind the hour-long cache and the spent-allowance latch.
 
-    Served in this order: a report younger than _TRAFFIC_TTL; while the
-    allowance is spent, whatever report is held however old (and, holding
-    none, a `skipped` TrafficUnavailable rather than a request eBay will
-    refuse); otherwise a live read, whose answer — and which ids it actually
-    covered — is kept for the next hour."""
-    key = f"{token[-12:]}:{','.join(ids)}"
+    `account` names whose report this is (see _TRAFFIC_CACHE); without one
+    the token stands in, as it always used to.
+
+    Served in this order: a report younger than _TRAFFIC_TTL that has already
+    been asked about every listing here; while the allowance is spent,
+    whatever report is held however old (and, holding none, a `skipped`
+    TrafficUnavailable rather than a request eBay will refuse); otherwise a
+    live read — of only the listings a current report has never been asked
+    about, or of all of them when there is no current report — whose answer,
+    and which ids it actually covered, is kept for the rest of the hour."""
+    key = account or f"token:{token[-12:]}"
     now = time.time()
     hit = _TRAFFIC_CACHE.get(key)
-    if hit and now - hit[0] < _TRAFFIC_TTL:
-        covered.update(hit[2])
-        return hit[1]
+    current = hit is not None and now - hit[0] < _TRAFFIC_TTL
+    missing = [i for i in ids if i not in hit[2]] if current else list(ids)
+    if not missing:
+        return _held(hit, ids, covered)
     if now < _traffic_quota_spent_until:
         if hit:
-            covered.update(hit[2])
-            return hit[1]
+            return _held(hit, ids, covered)
         raise TrafficUnavailable(
             "traffic report not asked for: eBay's daily allowance is spent "
             "until midnight Pacific", quota=True, skipped=True)
     asked: set[str] = set()
     try:
-        report = _traffic(token, ids, asked)
+        report = _traffic(token, missing, asked)
     except TrafficUnavailable as exc:
         if exc.quota and hit:
             # The allowance ran out on this very read. Yesterday's figures
-            # are still yesterday's figures, so the stale report stands in.
-            covered.update(hit[2])
-            return hit[1]
+            # are still yesterday's figures, so the held report stands in.
+            return _held(hit, ids, covered)
         raise
-    if len(_TRAFFIC_CACHE) >= _CACHE_MAX:
+    if current:
+        # Only the newcomers were read. They join the held report without
+        # moving its clock, so the whole of it is still re-read an hour after
+        # its oldest figures were — never later than that.
+        entry = (hit[0], {**hit[1], **report}, hit[2] | asked)
+    else:
+        entry = (now, report, set(asked))
+    if key not in _TRAFFIC_CACHE and len(_TRAFFIC_CACHE) >= _CACHE_MAX:
         _make_room(_TRAFFIC_CACHE, _TRAFFIC_TTL)
-    _TRAFFIC_CACHE[key] = (now, report, set(asked))
-    covered.update(asked)
-    return report
+    _TRAFFIC_CACHE[key] = entry
+    return _held(entry, ids, covered)
 
 
 def _active_counts(token: str, status: Optional[dict] = None) -> dict[str, dict]:
@@ -471,15 +505,41 @@ def listing_metrics(creds: Optional[dict], listing_ids: list[str],
         if status is not None:
             status.update(hit[2])
         return hit[1]
+    with _INFLIGHT_GUARD:
+        lock = _INFLIGHT.setdefault(cache_key, threading.Lock())
+    try:
+        with lock:
+            # Whoever held the lock may have just answered this very question.
+            # A `fresh` read (the seller pressing Sync) still asks eBay itself.
+            hit = _CACHE.get(cache_key)
+            if hit and not fresh and time.time() - hit[0] < _TTL:
+                if status is not None:
+                    status.update(hit[2])
+                return hit[1]
+            return _compute(creds, token, ids, cache_key, status)
+    finally:
+        with _INFLIGHT_GUARD:
+            if _INFLIGHT.get(cache_key) is lock and not lock.locked():
+                _INFLIGHT.pop(cache_key, None)
 
+
+def _compute(creds: dict, token: str, ids: list[str], cache_key: str,
+             status: Optional[dict]) -> dict[str, dict]:
+    """listing_metrics' eBay reads, run by the one caller holding its key."""
     out: dict[str, dict] = {}
     st = {"traffic_ok": True, "needs_reconnect": False}
     # The ids eBay actually answered a report for. Not `ids`: a store bigger
     # than one request is asked in several passes, and a pass that failed
     # leaves its listings unknown rather than idle.
     covered: set[str] = set()
+    # Whose traffic this is. The immutable eBay user id rather than the
+    # username, for the reason creds_for gives; the app user as well, so two
+    # of this app's accounts can never share a report.
+    uid = (creds or {}).get("_uid") or ""
+    account = (f"{uid}:{creds.get('ebay_user_id') or creds.get('ebay_username') or ''}"
+               if uid else "")
     try:
-        for lid, m in _traffic_report(token, ids, covered).items():
+        for lid, m in _traffic_report(token, ids, covered, account).items():
             out.setdefault(lid, {}).update(m)
     except Exception as exc:  # noqa: BLE001 - missing scope / API blip
         st = {"traffic_ok": False,

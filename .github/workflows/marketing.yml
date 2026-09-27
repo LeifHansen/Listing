@@ -161,6 +161,10 @@ jobs:
       # the app builds, tests, and ships — backend/, frontend/, the Dockerfile,
       # fly.toml, gates.yml, deploy.yml — stays blocked.
       - name: App is untouched
+        # A pull request's question: there is no base to diff against on a
+        # manual dispatch, where `github.base_ref` is empty and the diff
+        # below fails the run every time.
+        if: github.event_name == 'pull_request'
         shell: bash
         run: |
           base="origin/${{ github.base_ref }}"

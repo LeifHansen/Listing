@@ -74,7 +74,6 @@ MAX_VIDEO_SECONDS = 62.0
 # The only container eBay takes: MP4 (MPEG-4 Part 10 / AVC). A .mov renamed
 # to .mp4 is the common way to fail this, which is why `probe` reads the
 # file's own brand rather than its extension.
-ACCEPTED_CONTENT_TYPES = ("video/mp4",)
 ACCEPTED_EXTENSIONS = (".mp4",)
 
 

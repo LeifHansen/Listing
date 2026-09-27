@@ -125,15 +125,6 @@ class Expert(Protocol):
         there. Pure: the same stage returns the same string every time."""
 
 
-def has_lookup(expert) -> bool:
-    """Whether `expert` carries its own enrichment pass.
-
-    Looked up by attribute rather than declared, because the lookup lives in a
-    module that imports the Anthropic SDK and this file may not import it.
-    """
-    return callable(getattr(expert, "lookup", None))
-
-
 def rules_of(expert, stage: Stage) -> str:
     """`expert`'s text for `stage`, tolerantly.
 

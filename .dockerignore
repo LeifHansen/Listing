@@ -3,8 +3,13 @@
 .venv
 venv
 env
-__pycache__
-*.pyc
+# Anywhere in the tree, not just the root: a bare pattern matches only the
+# top level, so a hand deploy uploaded (and COPY backend shipped) every
+# backend/**/__pycache__ the developer's runs had left behind.
+**/__pycache__
+**/*.pyc
+.ruff_cache
+**/.pytest_cache
 data
 .env
 *.local

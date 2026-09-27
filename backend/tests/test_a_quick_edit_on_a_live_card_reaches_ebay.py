@@ -79,8 +79,8 @@ def api(monkeypatch, tmp_path):
         return data
 
     monkeypatch.setattr(db, "mutate_listing_data", mutate)
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
-    monkeypatch.setattr(main, "_assert_session_owner", lambda *a, **k: None)
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
 
     ebay = marketplaces.get("ebay")
 
@@ -334,7 +334,7 @@ def test_a_stranger_cannot_quick_edit_someone_elses_listing(api, monkeypatch):
     from backend import main
 
     client, state = api
-    monkeypatch.setattr(main, "_uid", lambda _r: "someone-else")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "someone-else")
 
     resp = _edit(client, {"price": 1})
 

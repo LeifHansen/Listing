@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle, CheckCircle2, ExternalLink, Link2, Loader2, MapPin, Package,
   Printer, RefreshCw, Truck,
@@ -183,6 +183,15 @@ export function ShippingDialog() {
   const [checking, setChecking] = useState(false); // settling a lost purchase
   const [marking, setMarking] = useState(false);
   const [voiding, setVoiding] = useState(false);
+  // Which order is on screen, for answers that land after the seller moved
+  // on, and which rates request may still land at all. A quote is EasyPost's
+  // shipment for one order's buyer; one that arrives after the seller went
+  // back and picked another order would otherwise be drawn under THAT order,
+  // and "Buy label" would send the second order's id with the first order's
+  // shipment -- a label to one buyer's address, recorded as the other's.
+  const orderRef = useRef(null);
+  const quoteSeq = useRef(0);
+  useEffect(() => { orderRef.current = order?.order_id ?? null; }, [order]);
 
   const reset = useCallback(() => {
     setOrders([]); setOrder(null); setPastLabel(null); setPkg(emptyPkg);
@@ -209,6 +218,8 @@ export function ShippingDialog() {
   }, [toast]);
 
   const pickOrder = useCallback((o) => {
+    quoteSeq.current += 1;  // a rates answer still in flight is for another order
+    setQuoting(false);
     setOrder(o);
     setPkg(pkgFrom(o));
     setQuote(null); setRateId("");
@@ -296,34 +307,46 @@ export function ShippingDialog() {
   }, [open, listingId, easypost.connected, pickOrder]);
 
   const getRates = async () => {
+    const seq = ++quoteSeq.current;
+    const asked = order.order_id;
     setQuoting(true);
     setQuote(null); setRateId("");
     try {
       const res = await postJson("/api/easypost/rates", {
-        order_id: order.order_id,
+        order_id: asked,
         package: pkg,
         ship_from: shipFrom,
       });
-      setQuote(res);
+      // Only the newest request's answer, and only while its order is still
+      // the one on screen. The quote carries which order it was for, so
+      // buyLabel can refuse one that is not this order's.
+      if (seq !== quoteSeq.current || orderRef.current !== asked) return;
+      setQuote({ ...res, forOrder: asked });
       if (res.rates?.length) setRateId(res.rates[0].rate_id);
       else if (!res.messages?.length) toast("EasyPost returned no rates for that package.", { kind: "warning" });
     } catch (e) {
-      toast(e.message, { kind: "error" });
+      if (seq === quoteSeq.current) toast(e.message, { kind: "error" });
     } finally {
-      setQuoting(false);
+      if (seq === quoteSeq.current) setQuoting(false);
     }
   };
 
   const buyLabel = async () => {
+    // Never a shipment quoted for another order: that is a label to the
+    // wrong buyer, paid for.
+    if (!quote || quote.forOrder !== order?.order_id) return;
+    const asked = order.order_id;
     setBuying(true);
     try {
       const res = await postJson("/api/easypost/label", {
-        order_id: order.order_id,
+        order_id: asked,
         shipment_id: quote.shipment_id,
         rate_id: rateId,
         listing_record_id: order.listing_record_id || "",
       });
-      setLabel(res);
+      // The purchase happened whatever is on screen now, so the toast below
+      // always says so; the label is only drawn under the order it is for.
+      if (orderRef.current === asked) setLabel(res);
       loadNotifications();
       if (res.ebay_marked) {
         toast("Label purchased — tracking was added to the eBay order.", { kind: "success" });
@@ -606,8 +629,15 @@ export function ShippingDialog() {
           {orders.length > 1 && (
             <button
               type="button"
-              onClick={() => { setOrder(null); setLabel(null); }}
-              className="self-start text-[13px] font-semibold text-blue cursor-pointer hover:underline"
+              // Not while a label is being bought or a lost purchase settled:
+              // leaving mid-purchase is how its answer lands on another order.
+              disabled={buying || checking}
+              onClick={() => {
+                quoteSeq.current += 1;
+                setQuoting(false);
+                setOrder(null); setLabel(null); setQuote(null); setRateId("");
+              }}
+              className="self-start text-[13px] font-semibold text-blue cursor-pointer hover:underline disabled:opacity-50 disabled:cursor-not-allowed disabled:no-underline"
             >
               ← All orders awaiting shipment
             </button>

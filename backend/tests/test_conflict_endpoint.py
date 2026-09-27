@@ -36,7 +36,7 @@ def api(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "enabled", lambda: True)
     monkeypatch.setattr(db, "upsert_listing",
                         lambda lid, data, **k: saved.update(data) or True)
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     return TestClient(main.app), saved
 
 
@@ -67,7 +67,7 @@ def test_a_stranger_cannot_answer_for_someone_else(api, monkeypatch):
     from backend import main
 
     client, saved = api
-    monkeypatch.setattr(main, "_uid", lambda _r: "someone-else")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "someone-else")
 
     resp = client.post("/api/listings/lst1/resolve-conflict",
                        json={"field": "title", "choice": "ebay"})

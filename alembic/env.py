@@ -9,7 +9,7 @@ Postgres error on somebody's deploy.
 
 The URL comes from `backend.config`, not from alembic.ini. The app already
 knows how to normalize it (Neon hands out `postgres://`, SQLAlchemy 2 wants
-`postgresql+psycopg2://`), and a URL written into a tracked ini file is both a
+`postgresql+psycopg://`, the psycopg 3 driver requirements.txt ships), and a URL written into a tracked ini file is both a
 second source of truth and a credential in the repository.
 """
 from __future__ import annotations

@@ -42,7 +42,7 @@ LEAKY = f"Stripe error: Invalid API Key provided: {_FAKE_KEY}"
 def api(monkeypatch):
     from backend import main
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.tokens, "enabled", lambda: True)
 
     def _fail(where, exc):

@@ -40,7 +40,7 @@ WATCHED = {"watchers": 3, "views": 40}
 @pytest.fixture()
 def seller(dbmod, monkeypatch):
     monkeypatch.setattr(main, "db", dbmod)
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "tok"})
     main._OFFER_JOBS.clear()
     ratelimit.reset()
@@ -304,7 +304,7 @@ def test_a_discount_it_would_refuse_one_at_a_time_is_refused(seller, percent):
 
 def test_it_needs_ebay(seller, monkeypatch):
     client, _dbmod, _uid = seller
-    monkeypatch.setattr(main, "_ebay_creds_for", lambda request: None)
+    monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: None)
     assert client.post("/api/ebay/send-offers-all",
                        json={"percent": 10}).status_code == 400
 

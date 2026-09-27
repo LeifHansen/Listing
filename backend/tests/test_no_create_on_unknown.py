@@ -153,7 +153,7 @@ def test_the_route_answers_retry_not_a_server_error(monkeypatch):
 
     from backend import main
 
-    monkeypatch.setattr(main, "_ebay_creds_for",
+    monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda _r: {"access_token": "tok", "_uid": "u1"})
     monkeypatch.setattr(main.ebay_auth, "service_by_code",
                         lambda _c: {"code": "USPSGroundAdvantage",

@@ -59,7 +59,7 @@ def sweep(monkeypatch):
             return rows[:limit]
 
         monkeypatch.setattr(db, "list_listings", _list)
-        monkeypatch.setattr(main, "_ebay_creds_for",
+        monkeypatch.setattr(main.deps, "ebay_creds_for",
                             lambda _r: {"access_token": "tok", "_uid": "u1",
                                         "ebay_username": ""})
         monkeypatch.setattr(sync_guard, "sweep_due", lambda *_a, **_k: True)

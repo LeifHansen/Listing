@@ -21,6 +21,7 @@ from typing import Optional
 import httpx
 
 from .. import config
+from .ebay import is_scope_error
 from ..config import log
 
 _TIMEOUT = 30
@@ -96,13 +97,6 @@ def _headers(token: str) -> dict:
             "Content-Type": "application/json"}
 
 
-def _scope_missing(resp: httpx.Response) -> bool:
-    if resp.status_code in (401, 403):
-        return True
-    body = resp.text.lower()
-    return "insufficient" in body and "scope" in body
-
-
 def _get(token: str, path: str, params: Optional[dict] = None) -> dict:
     try:
         resp = httpx.get(f"{config.EBAY_API_BASE}{path}", headers=_headers(token),
@@ -110,7 +104,7 @@ def _get(token: str, path: str, params: Optional[dict] = None) -> dict:
     except Exception as exc:  # noqa: BLE001 - network/timeout
         raise OrdersError(f"Couldn't reach eBay: {exc}") from exc
     if resp.status_code != 200:
-        if _scope_missing(resp):
+        if is_scope_error(resp):
             raise OrdersError(
                 "eBay didn't allow reading your orders — reconnect eBay in "
                 "Settings to grant the new permission, then try again.")
@@ -268,7 +262,7 @@ def mark_shipped(token: str, order_id: str, tracking_number: str,
         # it. Not a refusal.
         raise UnknownOutcome(_FULFILLMENT_UNKNOWN)
     if resp.status_code not in (200, 201):
-        if _scope_missing(resp):
+        if is_scope_error(resp):
             raise OrdersError(
                 "eBay didn't allow updating the order — reconnect eBay in "
                 "Settings to grant the new permission, then try again.")

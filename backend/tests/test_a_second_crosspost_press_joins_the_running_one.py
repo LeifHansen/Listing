@@ -51,7 +51,7 @@ def api(monkeypatch, every_marketplace):
     gate = {"provider": _Etsy()}
     held = {"go": False}
 
-    monkeypatch.setattr(main, "_uid", lambda _r: "u1")
+    monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda key: gate["provider"] if key == "etsy" else None)
     monkeypatch.setattr(main.db, "get_listings",
