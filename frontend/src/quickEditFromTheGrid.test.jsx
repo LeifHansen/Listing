@@ -149,8 +149,11 @@ describe("quick edit on the Manage grid", () => {
       expect(toggle(title).getAttribute("aria-expanded")).toBe("false");
       expect(panel(title)).toBeNull();
     }
-    // Collapsed means collapsed: no form fields on the grid at all.
-    expect(host.querySelectorAll("form, input, textarea, select").length).toBe(0);
+    // Collapsed means collapsed: no form fields on the grid at all. The one
+    // input a live card always carries is its tick box, for the bulk actions
+    // on the bar (End & relist, the crosspost) -- not a field.
+    expect(host.querySelectorAll(
+      "form, input:not([type=checkbox]), textarea, select").length).toBe(0);
   });
 
   it("opens the fields under the card, with the listing's own values", async () => {
