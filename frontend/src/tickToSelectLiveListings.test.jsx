@@ -1,10 +1,10 @@
 /* A seller on two marketplaces reads the listings pipeline a second way.
  *
  * Once Etsy is connected the manager grows a second cut — where a listing
- * lives — with "eBay only, not on Etsy" as the crosspost's shopping list; a
- * tick box stands on every live card; and the first tick brings a bar with
- * "Crosspost to Etsy". An eBay-only seller sees none of this: no pills, no
- * ticks, the pipeline exactly as it was.
+ * lives — with "eBay only, not on Etsy" as the crosspost's shopping list, and
+ * the first tick on a live card brings "Crosspost to Etsy" onto the bulk bar.
+ * An eBay-only seller sees none of that: no pills and no crosspost — the tick
+ * boxes themselves are theirs too, for End & relist.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -93,11 +93,19 @@ describe("the listings manager on two marketplaces", () => {
     document.body.innerHTML = "";
   });
 
-  it("stays exactly as it was for an eBay-only seller", async () => {
+  it("keeps the second cut, and the crosspost, off an eBay-only seller's screen", async () => {
+    // The ticks themselves are for everyone now: End & relist works on any
+    // live eBay listing (see endAndRelistFromTheManageTab.test.jsx). What
+    // still waits for a second marketplace is everything ABOUT one — the
+    // where-it-lives pills and the crosspost button.
     await mount([live("a", { ebay: { status: "published" } })], [EBAY]);
     expect(pills()).toBeNull();
     expect(text()).not.toContain("Crosspost to Etsy");
-    expect(host.querySelectorAll("input[type=checkbox]").length).toBe(0);
+    const [first] = ticks();
+    expect(first).toBeTruthy();
+    await act(async () => { first.click(); });
+    expect(text()).toContain("End & relist (1)");
+    expect(text()).not.toContain("Crosspost to Etsy");
   });
 
   it("grows the where-it-lives pills, and 'eBay only' narrows the grid", async () => {

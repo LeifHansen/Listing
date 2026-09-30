@@ -11001,7 +11001,24 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     uid = deps.uid(request)
     if rec.get("user_id") and rec["user_id"] != uid:
         raise HTTPException(404, "Listing not found")
+    new_id, listing, copied = _clone_listing(listing_id, rec, uid)
+    log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
+             listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
+    return {"ok": True, "id": new_id, "from": listing_id,
+            "photos": len(copied) + len(listing.image_urls or []),
+            "listing": listing.model_dump()}
 
+
+def _clone_listing(listing_id: str, rec: dict,
+                   uid: Optional[str]) -> tuple[str, Listing, list[str]]:
+    """Copy one record into a BRAND-NEW draft; the ownership check is the
+    caller's. Returns (new id, the draft, the photo names copied).
+
+    The body of the relist route, shared with End and Relist, which makes the
+    same copy of a listing that is still live: every field belonging to the
+    old listing's life on eBay is cleared, the photos are copied, and the
+    original is left exactly as it was.
+    """
     data = dict(rec.get("listing") or {})
     data.update(_SALE_ONLY_FIELDS)
     data["marketplaces"] = marketplace_state.carry_live_others(
@@ -11042,11 +11059,7 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     if db.enabled() and not landed:      # see the note in merge_listings
         raise errors.StorageUnavailable(
             "Couldn't create the new draft just now. Try again in a moment.")
-    log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
-             listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
-    return {"ok": True, "id": new_id, "from": listing_id,
-            "photos": len(copied) + len(listing.image_urls or []),
-            "listing": listing.model_dump()}
+    return new_id, listing, copied
 
 
 @app.delete("/api/listings/{listing_id}")
@@ -11546,6 +11559,15 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     # gone there is nothing they could end that this app created.
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
+    return _settle_ending(req.session_id, rec, creds, deps.uid(request))
+
+
+def _settle_ending(session_id: str, rec: dict, creds: dict,
+                   uid: Optional[str]) -> dict:
+    """End one listing on eBay and settle its record; the ownership check and
+    the connection are the caller's. The body of the End route, shared with
+    End and Relist so an ending is one thing however it was asked for.
+    Raises HTTPException with the seller-facing reason when it cannot."""
     listing = Listing(**(rec.get("listing") or {}))
     # Never end another eBay account's listing: the item id on this record was
     # minted by a store that isn't connected any more, and EndItem would either
@@ -11597,24 +11619,24 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # the merge: nothing is destroyed for a status change that did not
         # happen, or the record goes on saying the listing is live with
         # nothing left to edit or relist it from.
-        landed = db.upsert_listing(req.session_id, data,
-                                   status="sold", user_id=deps.uid(request))
+        landed = db.upsert_listing(session_id, data,
+                                   status="sold", user_id=uid)
         if db.enabled() and not landed:
             log.error("end-listing: eBay ended %s but the status write failed "
-                      "— photos kept", req.session_id)
+                      "— photos kept", session_id)
             raise errors.StorageUnavailable(
                 "It came off eBay, but we couldn't update your copy here. "
                 "Refresh in a moment — don't end it again.")
         if rec.get("status") != "sold":
             notifications.notify_sold(
-                deps.uid(request) or rec.get("user_id"), req.session_id, data,
+                uid or rec.get("user_id"), session_id, data,
                 sold_quantity=data.get("sold_quantity") or 0)
             # Same item, same box: a copy still live on Etsy is taking
             # orders for stock this seller no longer has.
             inventory_mirror.on_ebay_finished(
-                deps.uid(request) or rec.get("user_id"), req.session_id, data,
+                uid or rec.get("user_id"), session_id, data,
                 "sold on eBay")
-            _purge_session_images_best_effort(req.session_id)
+            _purge_session_images_best_effort(session_id)
         res = {**res, "status": "sold"}
     elif ended:
         # eBay took it down (or had already), so the ending is definitive.
@@ -11625,15 +11647,15 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # Ended on eBay by the seller: the Etsy copy was listed as one of a
         # pair and is now the only one for sale. Down it comes too.
         inventory_mirror.on_ebay_finished(
-            deps.uid(request) or rec.get("user_id"), req.session_id,
+            uid or rec.get("user_id"), session_id,
             rec.get("listing") or {}, "ended on eBay")
         try:
             removed = listing_sync.settle_ended(
-                req.session_id, rec.get("listing") or {}, rec,
-                deps.uid(request), why="ended by the seller")
+                session_id, rec.get("listing") or {}, rec,
+                uid, why="ended by the seller")
         except errors.StorageUnavailable as exc:
             log.error("end-listing: eBay ended %s but the record didn't "
-                      "settle: %s", req.session_id, exc)
+                      "settle: %s", session_id, exc)
             raise errors.StorageUnavailable(
                 "It came off eBay, but we couldn't update your copy here. "
                 "Refresh in a moment — don't end it again.") from exc
@@ -11644,13 +11666,304 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
         # keeps their photos and their work, and the trash button is right
         # there if they want it gone.
         data = rec.get("listing") or {}
-        landed = db.upsert_listing(req.session_id, data, status="draft",
-                                   user_id=deps.uid(request))
+        landed = db.upsert_listing(session_id, data, status="draft",
+                                   user_id=uid)
         if db.enabled() and not landed:
             raise errors.StorageUnavailable(
                 "We couldn't update your copy here — refresh in a moment.")
         res = {**res, "status": "draft"}
     return res
+
+
+# ---- End and Relist ------------------------------------------------------
+# The Manage tab's bulk verb for a stale listing: end it on eBay, and put the
+# same item straight back up as a NEW listing with fresh copy. A relist mints
+# a new item id and a new "listed" date, which is the search placement a
+# listing that has sat for months has lost; the new title and description
+# are what make it read as new to the buyers eBay already showed the old one.
+#
+# The order per listing is chosen so that nothing irreversible happens until
+# everything it needs is in hand:
+#
+#   1. copy the listing into a new draft (the photos are copied, never moved);
+#   2. write the new title and description onto the copy — the AI call that
+#      can fail, and it fails here, before anything has come off eBay;
+#   3. end the original on eBay, and settle its record exactly as the End
+#      button does (kept under Inactive, or removed if it was a mirror);
+#   4. publish the copy live.
+#
+# A failure at 1 or 2 leaves the original live and the draft removed, so the
+# seller has exactly what they had. A failure at 4 is reported as what it
+# is: the old listing is ended and the new one is saved as a draft with its
+# fresh copy, one Publish away — never silently, and never by re-listing the
+# old one, which would put the seller's own item up twice.
+
+# The runs going right now: user id -> job id. One per account: a second
+# press while the first is still going would end the listings the first is
+# already ending, and the copy it has already made.
+_END_RELIST_JOBS: dict[str, str] = {}
+_END_RELIST_LOCK = threading.Lock()
+
+
+def _remove_draft_quietly(draft_id: str, uid: Optional[str], why: str) -> None:
+    """Take back a draft End and Relist made and then could not use. Best
+    effort: a draft left behind is a card the seller can delete, which is a
+    smaller wrong than failing the listing over the cleanup."""
+    try:
+        db.delete_listing(draft_id, uid)
+    except Exception as exc:  # noqa: BLE001 - the cleanup, not the action
+        log.warning("end-and-relist: couldn't remove draft %s (%s): %s",
+                    draft_id, why, exc)
+        return
+    _purge_session_images_best_effort(draft_id)
+
+
+def _end_and_relist_one(rec: dict, uid: str, creds: dict, base_url: str,
+                        provider) -> dict:
+    """End ONE live listing and relist it as a new one with fresh copy.
+
+    Returns a bulk_actions outcome: {"ok": True, "new_id", "new_title",
+    "url"} when the new listing is live, {"skip": reason} when this listing
+    cannot take the action, or {"message": why} when it failed part-way —
+    with the message saying exactly where, because "failed" on a listing
+    that has already come off eBay is a different situation from one that
+    is still up.
+    """
+    listing_id = rec["id"]
+    if rec.get("status") not in ("published", "live"):
+        return {"skip": "No longer live on eBay.", "needs_you": False}
+    data = rec.get("listing") or {}
+    if not data.get("ebay_listing_id"):
+        return {"skip": "This listing isn't on eBay — nothing to end.",
+                "needs_you": False}
+    # The same two refusals the End button makes, before anything is copied.
+    owner = listing_sync.named_account_of(data)
+    connected = (creds or {}).get("ebay_username", "")
+    if owner and connected and owner != connected:
+        return {"skip": f"This listing is on your other eBay account "
+                        f"(@{owner}) — you're connected as @{connected}."}
+
+    # The new listing needs photos it can send to eBay, and a fresh publish
+    # sends only the app's own copies (services/ebay.image_urls_for), never
+    # the eBay-hosted URLs an imported listing carries. Adopt those first —
+    # the same call the editor and the crosspost make — and pull back any
+    # copy the reclaim pass moved to R2, so the clone below finds files.
+    try:
+        _adopt_imported_images(listing_id, rec)
+        rec = db.get_listing(listing_id) or rec
+        data = rec.get("listing") or {}
+    except Exception as exc:  # noqa: BLE001 - reported below as "no photos"
+        log.warning("end-and-relist: photo adoption failed for %s: %s",
+                    listing_id, exc)
+    src_dir = storage.optimized_dir(listing_id)
+    for name in (data.get("images") or []):
+        _ensure_local(listing_id, name, src_dir / name)
+    if not any((src_dir / n).is_file() for n in (data.get("images") or [])):
+        return {"message": "This listing has no photos we can relist with — "
+                           "open it and add one, then try again."}
+
+    # 1. The copy, as a draft. Nothing on eBay has changed yet.
+    new_id, listing, copied = _clone_listing(listing_id, rec, uid)
+
+    # 2. Fresh copy, charged like a refine and refunded when the AI fails.
+    # A failure here costs the seller nothing: the draft goes, the listing
+    # is still live, and the message says what happened.
+    try:
+        spent = deps.charge_uid(uid, "refine")
+    except HTTPException as exc:
+        _remove_draft_quietly(new_id, uid, "not enough tokens")
+        return {"message": str(exc.detail)}
+    try:
+        fresh = claude_ai.fresh_copy(listing)
+    except Exception as exc:  # noqa: BLE001 - the AI's reason, in the seller's words
+        tokens.refund(spent)
+        _remove_draft_quietly(new_id, uid, "AI copy failed")
+        _code, message = claude_ai.ai_error_message(exc)
+        log.warning("end-and-relist: fresh copy failed for %s: %s", listing_id, exc)
+        return {"message": f"Couldn't write the new copy: {message}"}
+    listing.title = fresh["title"]
+    listing.description = fresh["description"]
+    listing.mark_dirty("title", "description")
+    storage.save_listing(new_id, listing)
+    landed = db.upsert_listing(new_id, listing.model_dump(), status="draft",
+                               user_id=uid)
+    if db.enabled() and not landed:
+        _remove_draft_quietly(new_id, uid, "copy did not save")
+        return {"message": "Couldn't save the new copy just now — nothing "
+                           "was ended. Try again in a moment."}
+
+    # 3. End the original. From here on the old listing is (or may be) off
+    # eBay, so every answer below has to say so.
+    try:
+        ended = _settle_ending(listing_id, rec, creds, uid)
+    except HTTPException as exc:
+        _remove_draft_quietly(new_id, uid, "ending refused")
+        return {"message": f"Couldn't end it on eBay: {exc.detail}"}
+    except Exception as exc:  # noqa: BLE001 - one listing must not sink the run
+        _remove_draft_quietly(new_id, uid, "ending failed")
+        return {"message": f"Couldn't end it on eBay: {str(exc)[:160]}"}
+    if ended.get("status") == "sold":
+        # Ending discovered a sale: the item is somebody's now, and the copy
+        # would list stock the seller no longer has. The sale is archived
+        # exactly as the End button archives it.
+        _remove_draft_quietly(new_id, uid, "it sold")
+        return {"skip": "Turns out this one sold on eBay — it's archived "
+                        "under Inactive, so there's nothing to relist.",
+                "needs_you": False}
+    if ended.get("status") == "draft":
+        # Nothing was on eBay to end after all (the record had an item id
+        # that eBay does not know). The seller is left with what they had,
+        # and the draft with the new copy would only be a duplicate of it.
+        _remove_draft_quietly(new_id, uid, "not on eBay")
+        return {"skip": ended.get("message")
+                or "This listing isn't on eBay — nothing to end."}
+
+    # 4. The new listing, live. The provider re-reads the draft under its
+    # own lock, so the create-vs-revise decision is made from the record
+    # that was just written — a draft with no item id, which is a create.
+    new_rec = db.get_listing(new_id) or {"id": new_id, "status": "draft",
+                                          "listing": listing.model_dump(),
+                                          "user_id": uid}
+    outcome = provider.publish(
+        PublishContext(session_id=new_id, listing=listing, mode="live",
+                       base_url=base_url, uid=uid, prev_record=new_rec),
+        creds)
+    _record_publish_verdict(new_id, uid, [outcome], "live")
+    if outcome.ok and outcome.status == "published":
+        return {"ok": True, "new_id": new_id, "new_title": listing.title,
+                "url": outcome.url or "", "photos": len(copied),
+                "removed": bool(ended.get("removed"))}
+    if outcome.outcome_unknown:
+        return {"message": "Ended on eBay, and the new listing was sent — "
+                           "but eBay's answer never came back. Check your "
+                           "eBay listings before publishing the draft "
+                           "again, so it doesn't go up twice."}
+    why = outcome.message or "eBay refused the new listing."
+    if outcome.issues:
+        why = "; ".join(dict.fromkeys(
+            str(i.get("title") or i.get("fix") or "") for i in outcome.issues
+            if i.get("title") or i.get("fix"))) or why
+    return {"message": f"Ended on eBay, but the new listing was refused: "
+                       f"{why[:200]} It's saved as a draft with the new copy "
+                       "— fix that and publish it."}
+
+
+def _run_end_and_relist_job(job_id: str, records: list[dict], uid: str,
+                            creds: dict, base_url: str) -> None:
+    """Background worker: each ticked listing ended and relisted in turn,
+    the job saying which one it is on. Serial on purpose — every listing is
+    an AI call, an EndItem and an AddItem, and a seller watching the bar is
+    better served by a run that finishes than by one eBay starts refusing
+    half way through."""
+    provider = marketplaces.get("ebay")
+
+    def _apply(rec: dict) -> dict:
+        if jobstore.cancel_requested(job_id):
+            return {"skip": "Stopped before this one was started."}
+        # Re-read: the set was worked out when the button was pressed, and
+        # each listing takes a while. One that sold or was ended in another
+        # tab since is judged on what it is now.
+        # And owned: the route reports an id that is not this seller's by
+        # queuing it as missing, and this re-read is not scoped, so the
+        # check the by-id lookup made has to be made again here.
+        fresh = db.get_listing(rec["id"])
+        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+            return {"skip": "This listing is gone.", "needs_you": False}
+        return _end_and_relist_one(fresh, uid, creds, base_url, provider)
+
+    try:
+        result = bulk_actions.run(
+            records, _apply,
+            on_each=lambda i, title: jobstore.update(
+                job_id, phase="relisting", current=i, current_title=title[:80]))
+        log.info("end-and-relist %s: user=%s listings=%d relisted=%d skipped=%d "
+                 "failed=%d", job_id, uid, len(records), len(result.changed),
+                 len(result.skipped), len(result.failed))
+        jobstore.update(job_id, done=True, phase="done", current=len(records),
+                        result=result.as_dict())
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = deps.support_reference()
+        log.warning("end-and-relist job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish relisting these. Check the Active and "
+            "Inactive tabs for where each one got to — if it keeps "
+            f"happening, quote {reference} to support."))
+    finally:
+        with _END_RELIST_LOCK:
+            if _END_RELIST_JOBS.get(uid) == job_id:
+                _END_RELIST_JOBS.pop(uid, None)
+
+
+@app.post("/api/ebay/end-and-relist")
+def end_and_relist(payload: dict, request: Request) -> dict:
+    """End the ticked live listings on eBay and relist each as a NEW listing
+    with a fresh AI-written title and description.
+
+    The caller names the listings (the ticks on the Manage tab), so this can
+    never widen to the seller's whole store, and the read is by id with the
+    ownership enforced inside it. Runs as a job — each listing is an AI call
+    and two eBay calls — and returns {"job_id"} at once; poll
+    /api/bulk/status/{job_id} for progress and the per-listing report.
+    """
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    creds = deps.ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    if not config.anthropic_ready():
+        raise HTTPException(
+            400, "The fresh copy is written by the AI, which isn't set up on "
+                 "this server (ANTHROPIC_API_KEY).")
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or [])
+           if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to end and relist.")
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    uid = user["id"]
+    # Check AND reserve in one critical section: a double tap that passed the
+    # check twice would end, and copy, the same listings twice.
+    job_id = storage.new_session_id()
+    with _END_RELIST_LOCK:
+        running = _END_RELIST_JOBS.get(uid)
+        if running:
+            snap = jobstore.snapshot(running, uid)
+            if snap and not snap.get("done"):
+                return {"job_id": running, "running": True, "joined": True,
+                        "total": snap.get("total_items") or 0}
+        _END_RELIST_JOBS[uid] = job_id
+    try:
+        wanted = set(ids)
+        mine = db.get_listings(ids, uid)
+        # Listings the client asked for that aren't the seller's (or are
+        # gone) are reported rather than silently dropped from the totals.
+        missing = [{"id": rid, "status": "missing", "listing": {}}
+                   for rid in sorted(wanted - {r["id"] for r in mine})]
+        records = mine + missing
+        base_url = _base_url(request)
+    except BaseException:
+        # The reservation stands for a job that will never start; without
+        # this the next press is told "already running".
+        with _END_RELIST_LOCK:
+            if _END_RELIST_JOBS.get(uid) == job_id:
+                _END_RELIST_JOBS.pop(uid, None)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "end-and-relist", "phase": "relisting",
+        "done": False, "error": None, "current": 0,
+        "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_end_and_relist_job,
+                     args=(job_id, records, uid, creds, base_url),
+                     daemon=True).start()
+    log.info("end-and-relist %s: started for user=%s listings=%d",
+             job_id, uid, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records)}
 
 
 # How many still-live listings one status sweep re-checks. Each is its own
