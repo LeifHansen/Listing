@@ -165,6 +165,9 @@ const EBAY_CONNECT_ERRORS = {
   expired: "That eBay connection link expired or was already used. Start it again from Settings.",
   config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
   network: "Couldn't reach eBay just now. Try again in a moment.",
+  // The server could not store the connection it had just made (main.py
+  // sends why=storage). Nothing is linked, and retrying is the right move.
+  storage: "We couldn’t save the eBay connection just now — nothing was linked. Try again in a moment.",
   unknown: "eBay connection failed. Please try again.",
 };
 
@@ -208,6 +211,16 @@ export function AppProvider({ children }) {
 
   // ---------- navigation ----------
   const [view, setView] = useState("dashboard");
+  // A deep link into Settings: which section to land on. Set by
+  // openSettings("shipping") from wherever a screen says "fix this in
+  // Settings", read once by the Settings screen (which scrolls there and
+  // clears it), so a plain tap on the nav still lands at the top.
+  const [settingsSection, setSettingsSection] = useState(null);
+  const openSettings = useCallback((section) => {
+    setSettingsSection(section || null);
+    setView("settings");
+  }, []);
+  const clearSettingsSection = useCallback(() => setSettingsSection(null), []);
   // Which tab of the listings manager is showing. Deep links (a dashboard
   // tile, a task row) set it and jump: openListings("active"). Opening the
   // manager clears any open editor session, the same way the nav's own
@@ -1846,6 +1859,7 @@ export function AppProvider({ children }) {
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
+    settingsSection, openSettings, clearSettingsSection,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     listingFilters, setListingFilters, clearListingFilters,
@@ -1879,6 +1893,7 @@ export function AppProvider({ children }) {
     bulkRetry, clearBulkRetry,
   }), [
     dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
+    settingsSection, openSettings, clearSettingsSection,
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,

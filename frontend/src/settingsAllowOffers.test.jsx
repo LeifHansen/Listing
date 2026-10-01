@@ -50,7 +50,7 @@ function server(prefs, posts) {
   return (url, init) => {
     const path = String(url);
     if (path.startsWith("/api/prefs")) {
-      if ((init?.method || "GET") === "POST") {
+      if (["POST", "PATCH"].includes(init?.method || "GET")) {
         const body = JSON.parse(init.body);
         posts.push(body);
         return json({ ok: true, prefs: body });
@@ -84,8 +84,6 @@ async function mount() {
     text: () => host.textContent || "",
     offers: () => find("Allow offers on new listings")
       ?.querySelector("input[type=checkbox]"),
-    save: () => [...host.querySelectorAll("button")]
-      .find((b) => (b.textContent || "").includes("Save defaults")),
     tips: () => [...host.querySelectorAll("[aria-label]")]
       .map((el) => el.getAttribute("aria-label")).join(" | "),
   };
@@ -104,10 +102,10 @@ describe("the Allow offers switch", () => {
     expect(s.offers()).toBeTruthy();
     expect(s.offers().checked).toBe(true);
     // The terms are stated where the seller decides, not left for the first
-    // $5 offer on a $200 item to explain. Section explainers on this screen
-    // live behind the hover ⓘ, so that is where this is asserted.
-    expect(s.tips()).toContain("no minimum");
-    expect(s.tips()).toContain("auctions don’t take offers");
+    // $5 offer on a $200 item to explain — visibly, because the app ships in
+    // a phone shell where a hover ⓘ is never seen.
+    expect(s.text() + " " + s.tips()).toContain("no minimum");
+    expect(s.text()).toMatch(/auctions/i);
     await act(async () => { s.root.unmount(); });
   });
 
@@ -126,7 +124,6 @@ describe("the Allow offers switch", () => {
     const s = await mount();
 
     await act(async () => { s.offers().click(); });
-    await act(async () => { s.save().click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(posts.at(-1).allow_offers).toBe(1);
@@ -142,7 +139,6 @@ describe("the Allow offers switch", () => {
     const s = await mount();
 
     await act(async () => { s.offers().click(); });
-    await act(async () => { s.save().click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(posts.at(-1).allow_offers).toBe(0);

@@ -383,17 +383,17 @@ export function etsyBlockers(listing = {},
   if (settings) {
     if (!etsyProfile(l, settings, "shipping_profile_id")) {
       add("etsy_shipping_profile", "etsy_shipping_profile", "Etsy shipping profile",
-        "Pick one on the Etsy card, or set a default under Settings → Etsy.");
+        "Pick one on the Etsy card, or set a default under Settings → More → Cross-posting → Etsy defaults.");
     }
     if (!etsyProfile(l, settings, "readiness_state_id")) {
       add("etsy_readiness_state", "etsy_readiness_state", "Etsy processing time",
         "Etsy requires a processing profile on every listing — pick one on the "
-        + "Etsy card, or set a default under Settings → Etsy.");
+        + "Etsy card, or set a default under Settings → More → Cross-posting → Etsy defaults.");
     }
     if (strict && !etsyProfile(l, settings, "return_policy_id")) {
       add("etsy_return_policy", "etsy_return_policy", "Etsy return policy",
         "Etsy requires a return policy before a listing goes live — pick one on "
-        + "the Etsy card, or set a default under Settings → Etsy.");
+        + "the Etsy card, or set a default under Settings → More → Cross-posting → Etsy defaults.");
     }
   }
   return out;

@@ -2796,6 +2796,35 @@ def _accepted(payload: Optional[dict]) -> bool:
     return (payload or {}).get("accept_terms") is True
 
 
+def _flag(payload: Optional[dict], key: str, *, default: bool) -> bool:
+    """A yes/no option from the terms dialog, with a default for a request
+    that never mentions it. Same vocabulary as _international: the JSON
+    boolean, or the "1"/"true" a form would send."""
+    value = (payload or {}).get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _choice(value, choices, default: int, what: str) -> int:
+    """An integer option that must be one eBay offers, or 400 naming it.
+    Absent means the default; present-and-wrong is refused rather than
+    silently replaced, because the dialog showed the seller the number."""
+    if value is None or value == "":
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = None
+    if number not in choices:
+        raise HTTPException(
+            400, f"Pick a {what} eBay offers: "
+                 + ", ".join(str(c) for c in choices) + " days.")
+    return number
+
+
 def _international(payload: Optional[dict]) -> bool:
     """Did the seller ask for eBay International Shipping on this policy?
 
@@ -2816,7 +2845,8 @@ def ebay_policy_preview(service_code: str = "",
                         return_days: Optional[int] = None,
                         return_payer: str = "",
                         immediate_pay: bool = True,
-                        international_shipping: bool = False) -> dict:
+                        international_shipping: bool = False,
+                        handling_days: Optional[int] = None) -> dict:
     """Exactly what "Create my policies" would commit the seller to.
 
     A business policy is a public promise -- dispatch time, return window, who
@@ -2833,7 +2863,8 @@ def ebay_policy_preview(service_code: str = "",
     return ebay_policy_terms.describe(
         service_code=service_code, return_days=return_days,
         return_payer=return_payer, immediate_pay=bool(immediate_pay),
-        international_shipping=bool(international_shipping))
+        international_shipping=bool(international_shipping),
+        handling_days=handling_days)
 
 
 @app.post("/api/ebay/ensure-policy")
@@ -2902,15 +2933,28 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     token, opts = creds["access_token"], (payload or {})
     svc = (ebay_auth.service_by_code(str(opts.get("service_code", "")))
            or ebay_auth.service_by_code("USPSGroundAdvantage"))
+    # The options the terms dialog echoes back are the terms the seller
+    # read, so each is checked against what eBay offers before any policy is
+    # made: a window eBay would refuse must fail here, before the other two
+    # policies have been created around it.
+    handling_days = _choice(opts.get("handling_days"),
+                            ebay_auth.HANDLING_DAY_CHOICES,
+                            ebay_auth.DEFAULT_HANDLING_DAYS, "handling time")
+    return_days = _choice(opts.get("return_days"), ebay_auth.RETURN_DAY_CHOICES,
+                          ebay_auth.DEFAULT_RETURN_DAYS, "return window")
+    return_payer = str(opts.get("return_payer")
+                       or ebay_auth.DEFAULT_RETURN_PAYER).upper()
+    if return_payer not in ("BUYER", "SELLER"):
+        raise HTTPException(400, "Return postage is paid by the buyer or by you.")
+    immediate_pay = _flag(opts, "immediate_pay", default=True)
     steps = {
         "fulfillment": lambda: ebay_auth.ensure_service_policy(
-            token, svc, international_shipping=_international(opts)),
-        "payment": lambda: ebay_auth.ensure_payment_policy(token),
+            token, svc, international_shipping=_international(opts),
+            handling_days=handling_days),
+        "payment": lambda: ebay_auth.ensure_payment_policy(
+            token, immediate_pay=immediate_pay),
         "return": lambda: ebay_auth.ensure_return_policy(
-            token,
-            days=int(opts.get("return_days") or ebay_auth.DEFAULT_RETURN_DAYS),
-            payer=str(opts.get("return_payer")
-                      or ebay_auth.DEFAULT_RETURN_PAYER)),
+            token, days=return_days, payer=return_payer),
     }
     out: dict = {"policies": {}, "errors": {}}
     save: dict = {}
@@ -3049,7 +3093,7 @@ def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
         out["ebay"]["verify"] = {
             "ran": False,
             "why": ("No ship-from ZIP is saved, and eBay won't check a listing "
-                    "without one — set it in Settings → Listing settings."),
+                    "without one — set it under Settings → Shipping."),
         }
         return out
     out["ebay"]["verify"] = _verify_report(verify, listing)
@@ -3209,6 +3253,53 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
         raise HTTPException(400, "No settings provided.")
     db.save_ebay_account(uid, **fields)
     return {"ok": True, "selected": fields}
+
+
+@app.patch("/api/ebay/handling-time")
+def set_handling_time(request: Request, payload: dict) -> dict:
+    """Change the dispatch promise on the seller's DEFAULT shipping policy.
+
+    Handling time is not an app setting: eBay keeps it on each fulfillment
+    policy and measures every listing under that policy against it, live
+    ones included. So this edits the policy on eBay, through
+    updateFulfillmentPolicy, and caches nothing -- the next policies read
+    shows whatever eBay now holds, whether this route or Seller Hub changed
+    it. Only the windows eBay actually offers are accepted, and only once a
+    default shipping policy has been picked, because that is the policy the
+    change lands on.
+    """
+    creds = deps.ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        days = int(payload.get("days"))
+    except (TypeError, ValueError, AttributeError):
+        days = -1
+    if days not in ebay_auth.HANDLING_DAY_CHOICES:
+        raise HTTPException(
+            400, "Pick a handling time eBay offers: "
+                 + ", ".join(str(d) for d in ebay_auth.HANDLING_DAY_CHOICES)
+                 + " business days.")
+    policy_id = str(creds.get("fulfillment_policy_id") or "").strip()
+    if not policy_id:
+        raise HTTPException(
+            400, "Pick a default shipping policy first — handling time lives "
+                 "on it.")
+    try:
+        out = ebay_auth.set_fulfillment_handling_time(
+            creds["access_token"], policy_id, days)
+    except ebay_auth.AccountApiError as exc:
+        # eBay's own refusal, in eBay's words. 502 rather than 400: nothing
+        # the seller typed is wrong (the choice list is eBay's), so the field
+        # must not go red -- the policy is what eBay would not change.
+        raise HTTPException(
+            502, "eBay wouldn't change the handling time: "
+                 f"{exc.description or exc}") from exc
+    except httpx.HTTPError as exc:
+        raise _lookup_failed("change your handling time with eBay", exc,
+                             status=503) from exc
+    return {"ok": True, "handling_days": out["handling_days"],
+            "policy_id": policy_id}
 
 
 # --- reference links: teaching an expert ------------------------------------
@@ -3578,8 +3669,25 @@ _PREF_FIELDS = {
     # as before the switch existed. See listing_sync.international_shipping_
     # enabled for the decision, and why a live listing is never touched.
     "ebay_international_shipping": (int, 0, 1),
+    # Best Offer limits, as a percentage of the asking price, applied to each
+    # NEW listing at publish (ebay_trading._best_offer_prices turns them into
+    # eBay's BestOfferAutoAcceptPrice / MinimumBestOfferPrice). 0 = no limit
+    # of that kind: with neither set, every offer reaches the seller, which
+    # is what "Allow offers" promised before these existed. eBay has no
+    # account-level home for these, which is why they live here.
+    "best_offer_auto_accept_pct": (float, 1, 100),
+    "best_offer_auto_decline_pct": (float, 1, 100),
+    # The ad rate auto-promote runs at. 0 = eBay's suggested rate for each
+    # listing, and NO promotion where eBay suggests none -- see
+    # ebay_provider.promote for why a rate nobody was quoted is never used.
+    # eBay's floor for Promoted Listings Standard is 2%.
+    "auto_promote_rate": (float, 2, 100),
 }
 _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
+# Settings no longer shows the package weight and size defaults (they only
+# ever applied to a draft the AI left at zero, which the prompt forbids), but
+# the keys stay honoured by _apply_listing_defaults so a row that carries them
+# keeps meaning what it did.
 
 
 @app.get("/api/prefs")
@@ -3591,10 +3699,22 @@ def get_prefs(request: Request) -> dict:
     return {"prefs": db.get_prefs(uid)}
 
 
+_OFFER_LIMITS_INVERTED = (
+    "Auto-decline has to be below auto-accept — otherwise every offer "
+    "would be declined before you saw it.")
+
+
+@app.patch("/api/prefs")
 @app.post("/api/prefs")
 def save_prefs(request: Request, payload: dict) -> dict:
     """Save new-listing defaults. Only known fields are stored, clamped to
-    sane ranges; they pre-fill every future AI draft."""
+    sane ranges; they pre-fill every future AI draft.
+
+    PATCH and POST are the same handler: the write has always merged into
+    the saved row and ignored keys it does not know, so a Settings control
+    that saves itself the moment it changes sends one key and nothing else is
+    touched. The alias just says so in the method.
+    """
     uid = deps.uid(request)
     if not uid:
         raise HTTPException(401, "Log in first.")
@@ -3616,6 +3736,18 @@ def save_prefs(request: Request, payload: dict) -> dict:
         clean[key] = min(max(val, lo), hi) if val else val
     if not clean:
         raise HTTPException(400, "No settings provided.")
+    if "best_offer_auto_accept_pct" in clean or \
+            "best_offer_auto_decline_pct" in clean:
+        # The two limits are checked against each other as they WILL be
+        # saved, which means reading the half this request does not carry.
+        # Read strictly: a row that cannot be read cannot be validated
+        # against, and the StorageUnavailable it raises is the same 503 the
+        # GET answers with -- never a guess that the other limit is unset.
+        would_be = {**db.get_prefs(uid), **clean}
+        accept = float(would_be.get("best_offer_auto_accept_pct") or 0)
+        decline = float(would_be.get("best_offer_auto_decline_pct") or 0)
+        if accept and decline and decline >= accept:
+            raise HTTPException(400, _OFFER_LIMITS_INVERTED)
     merged = db.save_prefs(uid, clean)
     # `clean` is non-empty by the check above, so a merge that landed always
     # comes back non-empty: `{}` here means the write did not happen. It used
@@ -3759,6 +3891,7 @@ def put_listing_views(request: Request, payload: dict) -> dict:
 # Moved to marketplaces/ebay_provider.py with the publish pipeline; the local
 # name keeps the sync routes below unchanged.
 _auto_promote_enabled = ebay_provider.auto_promote_enabled
+_auto_promote_settings = ebay_provider.auto_promote_settings
 
 
 def _load_prefs(uid: Optional[str]) -> dict:
@@ -7772,6 +7905,9 @@ class _BulkContext:
     # written before it existed), and missing keys are simply items the seller
     # left blank -- both mean the same thing to the prompt as no step at all.
     item_notes: dict = field(default_factory=dict)
+    # The ad rate the account's auto-promote runs at, or None for eBay's
+    # suggestion per listing. Read once with `auto_promote`, same as prefs.
+    auto_promote_rate: Optional[float] = None
 
 
 class _BulkProgress:
@@ -7948,6 +8084,11 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         # the queue card shows what will actually happen at publish
         # rather than an unchecked box that promotes anyway.
         listing.promote = listing.promote or ctx.auto_promote
+        if ctx.auto_promote and not listing.ad_rate_percent \
+                and ctx.auto_promote_rate:
+            # And the rate it will run at, so the card shows the number the
+            # seller typed rather than a blank that bills at it anyway.
+            listing.ad_rate_percent = ctx.auto_promote_rate
         _resolve_category(listing)
         _assign_store_category(listing, ctx.uid)
         # Fill item specifics (and the maker) up front so the draft the
@@ -8095,6 +8236,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     prefs = _load_prefs(uid)                   # one DB read for the whole batch
     strategy = _pricing_strategy(uid, prefs)
     auto_promote = _auto_promote_enabled(uid)  # ditto
+    # The rate it runs at is only worth reading when it is on.
+    auto_promote_rate = _auto_promote_settings(uid)[1] if auto_promote else None
     billing = tokens.enabled() and uid is not None
     # The seller's hints for this pile, saved with the staging session by the
     # endpoint. Read from disk rather than passed in so a batch RESUMED after
@@ -8262,7 +8405,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 return
 
         ctx = _BulkContext(uid=uid, prefs=prefs, strategy=strategy,
-                           auto_promote=auto_promote, billing=billing,
+                           auto_promote=auto_promote,
+                           auto_promote_rate=auto_promote_rate, billing=billing,
                            notes=notes, names=names, groups=groups,
                            opt_dir=opt_dir, precharged=precharged,
                            item_notes=item_notes or {})

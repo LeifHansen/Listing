@@ -51,7 +51,7 @@ function server(prefs, posts) {
   return (url, init) => {
     const path = String(url);
     if (path.startsWith("/api/prefs")) {
-      if ((init?.method || "GET") === "POST") {
+      if (["POST", "PATCH"].includes(init?.method || "GET")) {
         const body = JSON.parse(init.body);
         posts.push(body);
         return json({ ok: true, prefs: body });
@@ -85,8 +85,6 @@ async function mount() {
     text: () => host.textContent || "",
     abroad: () => find("Use eBay International Shipping on new listings")
       ?.querySelector("input[type=checkbox]"),
-    save: () => [...host.querySelectorAll("button")]
-      .find((b) => (b.textContent || "").includes("Save defaults")),
     tips: () => [...host.querySelectorAll("[aria-label]")]
       .map((el) => el.getAttribute("aria-label")).join(" | "),
   };
@@ -104,11 +102,11 @@ describe("the eBay International Shipping switch", () => {
 
     expect(s.abroad()).toBeTruthy();
     expect(s.abroad().checked).toBe(true);
-    // The terms, where the seller decides. Section explainers on this
-    // screen live behind the hover ⓘ, so that is where they are asserted.
-    expect(s.tips()).toContain("US shipping hub");
-    expect(s.tips()).toContain("enrolled in the program on eBay");
-    expect(s.tips()).toContain("already live are left as they are");
+    // The terms, where the seller decides — visible under the switch, not
+    // behind a hover ⓘ the phone shell never shows.
+    expect(s.text()).toContain("US shipping hub");
+    expect(s.text()).toContain("enrolled in the program on eBay");
+    expect(s.text()).toContain("already live are left as they are");
     await act(async () => { s.root.unmount(); });
   });
 
@@ -127,7 +125,6 @@ describe("the eBay International Shipping switch", () => {
     const s = await mount();
 
     await act(async () => { s.abroad().click(); });
-    await act(async () => { s.save().click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(posts.at(-1).ebay_international_shipping).toBe(1);
@@ -141,7 +138,6 @@ describe("the eBay International Shipping switch", () => {
     const s = await mount();
 
     await act(async () => { s.abroad().click(); });
-    await act(async () => { s.save().click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     expect(posts.at(-1).ebay_international_shipping).toBe(0);
@@ -149,19 +145,17 @@ describe("the eBay International Shipping switch", () => {
   });
 
   it("does not flip the Allow offers switch beside it", async () => {
-    /* Two switches, one Save: turning on abroad must post offers exactly as
-       it was. */
+    /* Each switch saves itself, one key at a time: turning on abroad must
+       not send the offers switch at all. */
     const posts = [];
     vi.stubGlobal("fetch", vi.fn(server(
       () => json({ prefs: { allow_offers: 0 } }), posts)));
     const s = await mount();
 
     await act(async () => { s.abroad().click(); });
-    await act(async () => { s.save().click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
-    expect(posts.at(-1).ebay_international_shipping).toBe(1);
-    expect(posts.at(-1).allow_offers).toBe(0);
+    expect(posts.at(-1)).toEqual({ ebay_international_shipping: 1 });
     await act(async () => { s.root.unmount(); });
   });
 

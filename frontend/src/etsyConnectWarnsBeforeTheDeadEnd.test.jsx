@@ -82,6 +82,11 @@ async function mount(marketplaces) {
     );
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  // The row is folded under "More" and mounts its contents when opened.
+  const row = [...document.querySelectorAll("button[aria-expanded]")]
+    .find((b) => (b.textContent || "").includes("Cross-posting marketplaces"));
+  await act(async () => { row.click(); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   const button = (label) => [...document.querySelectorAll("button")]
     .find((b) => (b.textContent || "").includes(label));
   return {

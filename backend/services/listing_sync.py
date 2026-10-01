@@ -1442,7 +1442,40 @@ def offers_enabled(uid: Optional[str]) -> bool:
     flipping it must not go back through a live store silently opening
     hundreds of existing listings to negotiation.
     """
-    return _switch_on(uid, "allow_offers", "offers")
+    return offers_terms(uid)["enabled"]
+
+
+def offers_terms(uid: Optional[str]) -> dict:
+    """The seller's Best Offer defaults for a NEW listing, in one read:
+    {enabled, auto_accept_pct, auto_decline_pct}.
+
+    Same fail-closed contract as the switch alone -- nobody, an absent
+    preference and an unreadable one are all "off, no limits". The limits
+    are percentages of the asking price; 0 means that limit is not set, so
+    with both at 0 the listing goes up exactly as "Allow offers" always
+    did: every offer reaches the seller. They are read together with the
+    switch so a publish cannot see one half of the setting and not the other.
+    """
+    off = {"enabled": False, "auto_accept_pct": 0.0, "auto_decline_pct": 0.0}
+    if not uid:
+        return off
+    try:
+        prefs = db.get_prefs(uid)
+    except Exception as exc:  # noqa: BLE001 - an outage is not a choice
+        log.warning("offers: couldn't read the allow-offers preference for "
+                    "%s, treating as off: %s", uid, exc)
+        return off
+
+    def _pct(key: str) -> float:
+        try:
+            value = float(prefs.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if 0 < value <= 100 else 0.0
+
+    return {"enabled": bool(prefs.get("allow_offers")),
+            "auto_accept_pct": _pct("best_offer_auto_accept_pct"),
+            "auto_decline_pct": _pct("best_offer_auto_decline_pct")}
 
 
 def _switch_on(uid: Optional[str], key: str, what: str) -> bool:
@@ -1491,7 +1524,13 @@ def publish_best_offer(creds: Optional[dict]) -> bool:
     the same creds dict, so create_on_ebay and the verifier below cannot
     disagree about what the real publish sends.
     """
-    return offers_enabled(str((creds or {}).get("_uid") or ""))
+    return publish_best_offer_terms(creds)["enabled"]
+
+
+def publish_best_offer_terms(creds: Optional[dict]) -> dict:
+    """The Best Offer terms a publish made with `creds` carries -- the
+    switch and the two limits, from the account's own preferences."""
+    return offers_terms(str((creds or {}).get("_uid") or ""))
 
 
 def publish_international_shipping(creds: Optional[dict]) -> bool:
@@ -1517,8 +1556,9 @@ def verifier(token: str, image_urls: list[str],
         return None
     # Read once, here: publish_block_issues re-puts the listing several times
     # to narrow a rejection down, and each probe must describe the same
-    # publish — including whether it carries Best Offer.
-    best_offer = publish_best_offer(c)
+    # publish — including whether it carries Best Offer, and at what limits.
+    best_offer_terms = publish_best_offer_terms(c)
+    best_offer = best_offer_terms["enabled"]
     international_shipping = publish_international_shipping(c)
 
     def verify(candidate: Listing, *, with_policies: bool = True,
@@ -1537,6 +1577,7 @@ def verifier(token: str, image_urls: list[str],
             image_urls if with_photos else [],
             policies=publish_policies(candidate, c) if with_policies else None,
             postal_code=postal, best_offer=best_offer,
+            best_offer_terms=best_offer_terms,
             international_shipping=international_shipping)
     return verify
 
@@ -1679,12 +1720,16 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
             if not db.save_ebay_account_best_effort(c["_uid"],
                                                     ship_from_postal=postal):
                 log.info("sync: couldn't cache the resolved ship-from ZIP")
+    # One read for the switch and its limits, so the publish cannot carry
+    # Best Offer from one answer and the limits from another.
+    best_offer_terms = publish_best_offer_terms(c)
     try:
         res = ebay_trading.create_listing(
             token, listing, image_urls,
             policies=publish_policies(listing, c),
             postal_code=postal, idempotency_key=idempotency_key,
-            best_offer=publish_best_offer(c),
+            best_offer=best_offer_terms["enabled"],
+            best_offer_terms=best_offer_terms,
             international_shipping=publish_international_shipping(c))
     except AlreadyListedError as exc:
         # This publish already produced a listing — a retry, or a second

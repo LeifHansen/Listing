@@ -37,7 +37,12 @@ const controlClasses = cn(
 
 // Field — label above control. Helper prose (`help`) hides behind a hover ⓘ
 // next to the label instead of a visible line of text, keeping forms quiet.
-export function Field({ label, hint, help, error, required, children, className }) {
+//
+// `note` is the other kind of help: one visible line under the control,
+// for a setting whose consequence the seller must read before deciding (a
+// fee, a promise eBay scores them on). Settings uses it because the app
+// ships inside a phone shell where a hover ⓘ is never seen.
+export function Field({ label, hint, help, note, error, required, children, className }) {
   return (
     <label className={cn("flex flex-col gap-1.5 min-w-0", className)}>
       {label && (
@@ -51,6 +56,7 @@ export function Field({ label, hint, help, error, required, children, className 
       {children}
       {/* No label to hang the ⓘ on — fall back to the old inline line. */}
       {!label && help && <span className="text-xs text-ink-secondary">{help}</span>}
+      {note && <span className="text-xs text-ink-secondary leading-relaxed">{note}</span>}
       {error && <span className="text-xs font-medium text-error">{error}</span>}
     </label>
   );
@@ -96,15 +102,23 @@ export const Select = forwardRef(function Select({
   );
 });
 
-export function Toggle({ checked, onChange, label, help, className }) {
+// `note` is the visible one-line consequence under the label (see Field);
+// `help` stays the hover ⓘ. `disabled` greys the switch while a save is in
+// flight so a second tap cannot race the first.
+export function Toggle({ checked, onChange, label, help, note, disabled, className }) {
   const id = useId();
   return (
-    <label htmlFor={id} className={cn("flex items-start gap-3 cursor-pointer select-none", className)}>
+    <label
+      htmlFor={id}
+      className={cn("flex items-start gap-3 select-none",
+        disabled ? "cursor-default opacity-70" : "cursor-pointer", className)}
+    >
       <span className="relative inline-flex shrink-0 mt-0.5">
         <input
           id={id}
           type="checkbox"
           checked={checked}
+          disabled={disabled}
           onChange={(e) => onChange(e.target.checked)}
           className="peer sr-only"
         />
@@ -123,9 +137,12 @@ export function Toggle({ checked, onChange, label, help, className }) {
           )}
         />
       </span>
-      <span className="min-w-0 flex items-center gap-1.5">
-        <span className="text-sm font-semibold text-ink">{label}</span>
-        {help && <InfoTip text={help} />}
+      <span className="min-w-0 flex flex-col gap-0.5">
+        <span className="flex items-center gap-1.5">
+          <span className="text-sm font-semibold text-ink">{label}</span>
+          {help && <InfoTip text={help} />}
+        </span>
+        {note && <span className="text-xs text-ink-secondary leading-relaxed">{note}</span>}
       </span>
     </label>
   );
