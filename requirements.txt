@@ -25,8 +25,11 @@ PyJWT==2.13.0
 cryptography>=50.0.1
 boto3==1.43.89
 # rembg's own dependency, declared as a floor rather than a pin so pip is free
-# to resolve whatever onnxruntime and rembg want.
-numpy>=2.5.3
+# to resolve whatever onnxruntime and rembg want. The floor has to stay
+# installable on the Python the image runs (3.11, see the Dockerfile): numpy
+# 2.5 dropped 3.11, so a floor of 2.5.3 -- which a dependency bump once set --
+# made every `pip install -r requirements.txt` fail before the app could boot.
+numpy>=2.3
 
 # In-house background removal: rembg pulls in onnxruntime + a ~176MB
 # isnet-general-use model (baked into the image at build time, see Dockerfile).

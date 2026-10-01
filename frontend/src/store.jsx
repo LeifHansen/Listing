@@ -253,8 +253,9 @@ export function AppProvider({ children }) {
     try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
   }, []);
   // The ticks on the LIVE listings (the drafts have draftSelection below):
-  // an id -> true map of what the seller picked for a crosspost. Memory-only,
-  // and held here so opening a listing to fix it keeps the other ticks.
+  // an id -> true map of what the seller picked for a bulk action on the
+  // Manage tab (End & relist, or a crosspost). Memory-only, and held here so
+  // opening a listing to fix it keeps the other ticks.
   const [liveSelection, setLiveSelection] = useState({});
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {

@@ -11,10 +11,11 @@ The bans are the same guidance's other half: Cassini ignores caps, emoji and
 punctuation runs, buyers read them as spam, and a SKU in a public title is
 characters spent on a string nobody types.
 
-Three passes can write the title a buyer ends up seeing — the first draft, the
-research lookup, and the art lookup, the last two by REPLACING a hedged one
-outright — so the rules have to reach all three. TITLE_BUDGET_AND_BANS is the
-one copy the second passes carry.
+Four passes can write the title a buyer ends up seeing — the first draft, the
+research lookup and the art lookup (those two by REPLACING a hedged one
+outright), and End & relist's fresh copy, which writes a NEW title for an item
+going back up — so the rules have to reach all four. TITLE_BUDGET_AND_BANS is
+the one copy the later passes carry.
 
 Imports services.listing_prompt and reads services/claude_ai.py as text: the
 Anthropic SDK is not installed in CI, and a test that importorskips it is a
@@ -102,10 +103,15 @@ def test_the_second_passes_carry_the_same_rules():
             f"the shared rule no longer bans {banned!r}")
     assert "never hand back a title shorter than the draft's" in shared
 
+    # The import, the research schema, the art schema, and End & relist's
+    # fresh copy (claude_ai.fresh_copy): a rewrite for an item going back up
+    # as a new listing, which is a whole new title and answers to every rule.
     source = CLAUDE_AI.read_text()
-    assert source.count("TITLE_BUDGET_AND_BANS") == 3, (
-        "the research schema, the art schema, or the import stopped carrying "
-        "the shared title rule")
+    assert source.count("TITLE_BUDGET_AND_BANS") == 4, (
+        "the research schema, the art schema, the fresh-copy pass, or the "
+        "import stopped carrying the shared title rule")
+    assert "TITLE_BUDGET_AND_BANS" in source.split("def fresh_copy(")[1].split("\ndef ")[0], (
+        "End & relist's fresh copy no longer carries the shared title rule")
 
 
 def test_a_refine_cannot_hand_back_a_shorter_or_shoutier_title():
