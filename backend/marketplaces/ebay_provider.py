@@ -230,15 +230,32 @@ def auto_promote_enabled(uid: Optional[str]) -> bool:
     Per-listing Promote is untouched: ticking it IS explicit consent for that
     listing. Anonymous/env-token publishes stay explicit-only.
     """
+    return auto_promote_settings(uid)[0]
+
+
+def auto_promote_settings(uid: Optional[str]) -> tuple[bool, Optional[float]]:
+    """(auto-promote on?, the ad rate it runs at) in one read.
+
+    The rate is the one the seller typed in Settings, or None when they left
+    it blank -- in which case promote() asks eBay for its suggestion and
+    skips the listing when there is none. Same consent rule as the switch:
+    nobody, an absent preference and an unreadable one are all (False, None),
+    and the two are read together so a publish cannot promote on one answer
+    and bill at a rate from another.
+    """
     if not uid:
-        return False
+        return False, None
     try:
-        value = db.get_prefs(uid).get("auto_promote")
+        prefs = db.get_prefs(uid)
     except Exception as exc:  # noqa: BLE001 - an outage is not consent
         log.warning("promote: couldn't read the auto-promote preference for "
                     "%s, treating as off: %s", uid, exc)
-        return False
-    return bool(value)
+        return False, None
+    try:
+        rate = float(prefs.get("auto_promote_rate") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    return bool(prefs.get("auto_promote")), (rate if rate > 0 else None)
 
 
 def promote(record_id: str, listing: Listing, creds: Optional[dict],
@@ -1284,10 +1301,15 @@ class EbayProvider:
                                   if not res.get("already_listed") else
                                   "This listing was already live on eBay — "
                                   "reusing it instead of posting a duplicate.")}
-            if listing.promote or auto_promote_enabled(ctx.uid):
+            auto_on, account_rate = auto_promote_settings(ctx.uid)
+            if listing.promote or auto_on:
                 result["promote_status"] = promote(
                     session_id, listing, creds,
-                    rate=listing.ad_rate_percent,
+                    # The listing's own rate when the seller set one; else
+                    # the account rate from Settings for an auto-promoted
+                    # listing; else None, and promote() asks eBay.
+                    rate=(listing.ad_rate_percent
+                          or (None if listing.promote else account_rate)),
                     ebay_listing_id=res["listing_id"],
                     # Read BEFORE promote() sets it: the per-listing toggle is
                     # the seller's own choice, made beside a rate slider and a
@@ -1363,15 +1385,18 @@ class EbayProvider:
         """
         listing = ctx.listing
         urls = ebay.image_urls_for(ctx.session_id, listing, ctx.base_url)
+        offer_terms = listing_sync.offers_terms(ctx.uid)
         call, body = ebay_trading.build_add_item(
             listing, urls,
             policies={"fulfillment_policy_id": config.EBAY_FULFILLMENT_POLICY_ID,
                       "payment_policy_id": config.EBAY_PAYMENT_POLICY_ID,
                       "return_policy_id": config.EBAY_RETURN_POLICY_ID},
-            # The seller's "Allow offers" switch reaches the preview too. A
-            # dry run whose whole job is to show the request a publish would
-            # make cannot leave out a field the real publish sends.
-            best_offer=listing_sync.offers_enabled(ctx.uid),
+            # The seller's "Allow offers" switch reaches the preview too, with
+            # its limits. A dry run whose whole job is to show the request a
+            # publish would make cannot leave out a field the real publish
+            # sends.
+            best_offer=offer_terms["enabled"],
+            best_offer_terms=offer_terms,
             # And the "Use eBay International Shipping" switch, for the same
             # reason: it is a field of the request being previewed.
             international_shipping=listing_sync.international_shipping_enabled(

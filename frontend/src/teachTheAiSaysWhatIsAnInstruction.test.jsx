@@ -78,6 +78,11 @@ async function mount() {
     );
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  // The row is folded under "More" and mounts its contents when opened.
+  const row = [...document.querySelectorAll("button[aria-expanded]")]
+    .find((b) => (b.textContent || "").includes("Teach the AI"));
+  await act(async () => { row.click(); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   return { root, host, text: () => host.textContent || "" };
 }
 

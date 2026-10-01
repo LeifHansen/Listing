@@ -684,8 +684,8 @@ def _scope_issue(scope: str) -> dict:
                     "listing. That usually means a policy was deleted or "
                     "renamed on eBay, or the saved ids belong to an eBay "
                     "account that was connected before this one. Open "
-                    "Settings → Listing settings, re-pick each of the three "
-                    "policies, and publish again."),
+                    "Settings → Shipping and Settings → Returns & payment, "
+                    "re-pick each of the three policies, and publish again."),
         }
     if scope == "photos":
         return {

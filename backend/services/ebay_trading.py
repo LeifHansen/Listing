@@ -1530,6 +1530,7 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
                    postal_code: str = "",
                    idempotency_key: str = "",
                    best_offer: bool = False,
+                   best_offer_terms: Optional[dict] = None,
                    international_shipping: bool = False) -> dict:
     """Publish a NEW listing through the Trading API.
 
@@ -1555,9 +1556,10 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     response can still find what it made. A collision raises
     AlreadyListedError instead of duplicating. Pass "" to opt out.
 
-    `best_offer` enables Best Offer on the new listing, with no minimum —
-    see build_add_item. `international_shipping` opts it into eBay
-    International Shipping — likewise.
+    `best_offer` enables Best Offer on the new listing; `best_offer_terms`
+    carries the seller's auto-accept / auto-decline limits, if any — see
+    build_add_item. `international_shipping` opts it into eBay International
+    Shipping — likewise.
     """
     if not postal_code:
         # eBay's own words for this are "Your item's location was not filled
@@ -1565,9 +1567,10 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
         # field. Say what to actually do instead of letting the call fail.
         raise TradingError(
             "eBay needs to know where this ships from. Add your ship-from ZIP "
-            "in Settings → Listing settings and publish again.")
+            "under Settings → Shipping and publish again.")
     call, body = build_add_item(listing, image_urls, policies, postal_code,
                                 idempotency_key, best_offer=best_offer,
+                                best_offer_terms=best_offer_terms,
                                 international_shipping=international_shipping)
     try:
         root = _call(call, token, body)
@@ -1602,11 +1605,49 @@ def create_listing(token: str, listing: Listing, image_urls: list[str],
     return out
 
 
+def _best_offer_prices(listing: Listing, terms: Optional[dict]) -> str:
+    """The <ListingDetails> children for the seller's Best Offer limits, or "".
+
+    `terms` is listing_sync.offers_terms: percentages of the asking price,
+    0 when a limit is not set. eBay wants absolute amounts, so they are
+    computed off THIS listing's price at publish and rounded to the cent --
+    a later price edit on eBay does not move them, which the Settings copy
+    says. eBay refuses a floor at or above the accept price, so an inverted
+    pair sends the accept price alone rather than fail the whole publish on
+    a pair the prefs route should already have refused.
+    """
+    t = terms or {}
+    try:
+        price = float(listing.price or 0)
+        accept_pct = float(t.get("auto_accept_pct") or 0)
+        decline_pct = float(t.get("auto_decline_pct") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if price <= 0:
+        return ""
+    cur = _esc(listing.currency or config.EBAY_CURRENCY)
+    accept = round(price * accept_pct / 100, 2) if 0 < accept_pct <= 100 else 0.0
+    decline = round(price * decline_pct / 100, 2) if 0 < decline_pct <= 100 else 0.0
+    if accept and decline and decline >= accept:
+        log.warning("best offer: auto-decline %.2f is not below auto-accept "
+                    "%.2f; sending the accept price alone", decline, accept)
+        decline = 0.0
+    out = ""
+    if accept and accept < price:
+        out += (f'<BestOfferAutoAcceptPrice currencyID="{cur}">{accept:.2f}'
+                "</BestOfferAutoAcceptPrice>")
+    if decline and decline < price:
+        out += (f'<MinimumBestOfferPrice currencyID="{cur}">{decline:.2f}'
+                "</MinimumBestOfferPrice>")
+    return out
+
+
 def build_add_item(listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
                    idempotency_key: str = "",
                    best_offer: bool = False,
+                   best_offer_terms: Optional[dict] = None,
                    international_shipping: bool = False) -> tuple[str, str]:
     """(call name, <Item> XML) for a NEW listing.
 
@@ -1616,13 +1657,15 @@ def build_add_item(listing: Listing, image_urls: list[str],
     the element here; create_listing is what refuses to publish without one.
 
     `best_offer` turns eBay's Best Offer on for this listing — the seller's
-    "Allow offers" account default (see listing_sync.offers_enabled). It is
-    deliberately the whole of the feature: no MinimumBestOfferPrice and no
-    BestOfferAutoAcceptPrice go with it, so no offer is auto-declined and none
-    is auto-accepted. Every offer reaches the seller to answer. Those two
-    prices are eBay's auto-decline / auto-accept thresholds, and picking
-    either on the seller's behalf would sell an item, or bin a buyer, at a
-    number they never named.
+    "Allow offers" account default (see listing_sync.offers_terms). On its
+    own it is the whole of the feature: no MinimumBestOfferPrice and no
+    BestOfferAutoAcceptPrice go with it, so every offer reaches the seller
+    to answer. Those two prices are eBay's auto-decline / auto-accept
+    thresholds, and they are sent ONLY when `best_offer_terms` carries the
+    percentages the seller typed in Settings (_best_offer_prices turns them
+    into amounts off this listing's price). Picking either on the seller's
+    behalf would sell an item, or bin a buyer, at a number they never named,
+    so an absent or empty terms dict still means no minimum.
 
     `international_shipping` opts this listing into eBay International
     Shipping — the seller's "Use eBay International Shipping" account switch
@@ -1658,6 +1701,9 @@ def build_add_item(listing: Listing, image_urls: list[str],
     if best_offer and not is_auction:
         parts.append("<BestOfferDetails><BestOfferEnabled>true"
                      "</BestOfferEnabled></BestOfferDetails>")
+        limits = _best_offer_prices(listing, best_offer_terms)
+        if limits:
+            parts.append(f"<ListingDetails>{limits}</ListingDetails>")
 
     parts.append(f"<Country>{_esc(config.EBAY_MARKETPLACE_ID[-2:] or 'US')}</Country>")
     parts.append(f"<Currency>{_esc(listing.currency or config.EBAY_CURRENCY)}</Currency>")
@@ -1729,6 +1775,7 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
                    policies: Optional[dict] = None,
                    postal_code: str = "",
                    best_offer: bool = False,
+                   best_offer_terms: Optional[dict] = None,
                    international_shipping: bool = False) -> None:
     """Ask eBay whether it WOULD accept this listing. Nothing is listed.
 
@@ -1744,6 +1791,7 @@ def verify_listing(token: str, listing: Listing, image_urls: list[str],
     """
     call, body = build_add_item(listing, image_urls, policies, postal_code,
                                 idempotency_key="", best_offer=best_offer,
+                                best_offer_terms=best_offer_terms,
                                 international_shipping=international_shipping)
     _call(_VERIFY_CALL[call], token, body)
 

@@ -315,15 +315,15 @@ def validate(listing: Listing, mode: str, *,
     # --- account prerequisites ---
     if not has_fulfillment:
         add("shipping", "No shipping policy selected",
-            "Pick a shipping policy on the Shipping card, or set a default in "
-            "Settings — it's what tells eBay which carrier service to use.")
+            "Pick a shipping policy on the Shipping card, or set a default under "
+            "Settings → Shipping — it's what tells eBay which carrier service to use.")
     if not has_payment:
-        add("policies", "No payment policy selected", "Choose a payment policy in Settings.")
+        add("policies", "No payment policy selected", "Choose a payment policy under Settings → Returns & payment.")
     if not has_return:
-        add("policies", "No return policy selected", "Choose a return policy in Settings.")
+        add("policies", "No return policy selected", "Choose a return policy under Settings → Returns & payment.")
     if not has_location:
         add("location", "No ship-from location set",
-            "Add your ship-from ZIP in Settings and save — we create the eBay location for you.")
+            "Add your ship-from ZIP under Settings → Shipping — we create the eBay location for you.")
     if not connected:
         add("generic", "No eBay account connected",
             "Publishing will run as a dry-run payload until you connect eBay.", level="warn")

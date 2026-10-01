@@ -61,7 +61,7 @@ export function screenFor(view, isSuperadmin, props = {}) {
 }
 
 function Main() {
-  const { view, setView, health, activeBulk, clearBulk, isSuperadmin } = useApp();
+  const { view, setView, openSettings, health, activeBulk, clearBulk, isSuperadmin } = useApp();
   const [search, setSearch] = useState("");
   // Tapping a nav item means "take me to the top of that screen". Without
   // this the browser keeps the scroll offset across the swap, so leaving a
@@ -83,7 +83,7 @@ function Main() {
           status bar/notch — the safe-area inset keeps the TopBar clear of it.
           On the plain web it's 0 and changes nothing. */}
       <div className="flex-1 min-w-0 px-4 sm:px-6 pb-28 md:pb-10 pt-[env(safe-area-inset-top)]">
-        <TopBar onSearch={setSearch} onManageEbay={() => setView("settings")} />
+        <TopBar onSearch={setSearch} onManageEbay={() => openSettings("ebay-account")} />
 
         {activeBulk && view !== "new" && (
           <BulkBanner

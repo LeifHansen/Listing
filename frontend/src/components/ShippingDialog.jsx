@@ -157,7 +157,7 @@ function LabelPanel({ label, onRetryEbay, marking, onVoid, voiding, onDone }) {
 
 export function ShippingDialog() {
   const {
-    shipping, closeShipping, easypost, loadNotifications, setView,
+    shipping, closeShipping, easypost, loadNotifications, openSettings,
   } = useApp();
   const { toast, confirm } = useToast();
   const open = shipping != null;
@@ -498,7 +498,7 @@ export function ShippingDialog() {
               </p>
               <div>
                 <Button variant="primary" size="sm"
-                  onClick={() => { closeShipping(); setView("settings"); }}>
+                  onClick={() => { closeShipping(); openSettings("easypost"); }}>
                   <Link2 aria-hidden /> Connect EasyPost
                 </Button>
               </div>

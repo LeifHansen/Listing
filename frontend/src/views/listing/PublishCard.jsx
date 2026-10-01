@@ -189,7 +189,7 @@ function AskEbayWhy({ w }) {
 // Publish — the last card: what will apply, the two big buttons, and a
 // friendly "what to fix" panel when eBay pushes back.
 export function PublishCard({ w }) {
-  const { canPublishLive, ebay, setView, policiesData, setPoliciesData } = useApp();
+  const { canPublishLive, ebay, openSettings, policiesData, setPoliciesData } = useApp();
   const r = w.publishResult;
 
   // Show which shipping/payment/return policies will apply.
@@ -199,7 +199,9 @@ export function PublishCard({ w }) {
   }, [ebay.connected, policiesData, setPoliciesData]);
 
   const onFix = (target) => {
-    if (target === "location" || target === "policies") { setView("settings"); return; }
+    // The fix lives on Settings: land on the card that holds it.
+    if (target === "location") { openSettings("shipping"); return; }
+    if (target === "policies") { openSettings("returns-payment"); return; }
     w.setFixTarget(null);
     // Re-set on the next frame so the flagged card re-triggers its scroll.
     requestAnimationFrame(() => w.setFixTarget(target));
@@ -230,7 +232,7 @@ export function PublishCard({ w }) {
             {nameFor(policiesData, "return", "return_policy_id")}{" "}
             <button
               type="button"
-              onClick={() => setView("settings")}
+              onClick={() => openSettings("shipping")}
               className="text-blue font-semibold cursor-pointer hover:underline"
             >
               change

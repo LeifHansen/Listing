@@ -165,6 +165,50 @@ def test_the_allow_offers_switch_round_trips(seller):
     assert seller.get("/api/prefs").json()["prefs"]["allow_offers"] == 0
 
 
+def test_the_offer_limits_and_ad_rate_round_trip_by_patch_and_post(seller):
+    """The Settings controls that save themselves send one key by PATCH;
+    the per-card Save buttons send a few by POST. Same handler, same merge:
+    neither may drop the other's keys, and 0 has to come back as 0 so a
+    limit can be cleared."""
+    assert seller.patch("/api/prefs",
+                        json={"best_offer_auto_accept_pct": 90}).status_code == 200
+    assert seller.post("/api/prefs",
+                       json={"best_offer_auto_decline_pct": 60,
+                             "auto_promote_rate": 4.5}).status_code == 200
+    prefs = seller.get("/api/prefs").json()["prefs"]
+    assert prefs["best_offer_auto_accept_pct"] == 90
+    assert prefs["best_offer_auto_decline_pct"] == 60
+    assert prefs["auto_promote_rate"] == 4.5
+    assert prefs["package_weight_lb"] == 3, "a PATCH dropped an unrelated key"
+    assert seller.patch("/api/prefs",
+                        json={"best_offer_auto_decline_pct": 0}).status_code == 200
+    assert seller.get("/api/prefs").json()["prefs"]["best_offer_auto_decline_pct"] == 0
+
+
+def test_an_inverted_pair_of_offer_limits_is_refused(seller):
+    """Auto-decline at or above auto-accept would decline every offer before
+    the seller saw it. Checked against what WOULD be saved, so the half this
+    request does not carry still counts."""
+    assert seller.post("/api/prefs",
+                       json={"best_offer_auto_accept_pct": 50}).status_code == 200
+    r = seller.patch("/api/prefs", json={"best_offer_auto_decline_pct": 50})
+    assert r.status_code == 400 and "below auto-accept" in r.json()["detail"]
+    r = seller.post("/api/prefs", json={"best_offer_auto_accept_pct": 40,
+                                        "best_offer_auto_decline_pct": 60})
+    assert r.status_code == 400
+    assert seller.get("/api/prefs").json()["prefs"]["best_offer_auto_accept_pct"] == 50
+    # Clearing one side is always allowed.
+    assert seller.patch("/api/prefs",
+                        json={"best_offer_auto_accept_pct": 0}).status_code == 200
+
+
+def test_the_ad_rate_is_clamped_to_what_ebay_sells(seller):
+    assert seller.patch("/api/prefs", json={"auto_promote_rate": 1}).status_code == 200
+    assert seller.get("/api/prefs").json()["prefs"]["auto_promote_rate"] == 2
+    assert seller.patch("/api/prefs", json={"auto_promote_rate": 250}).status_code == 200
+    assert seller.get("/api/prefs").json()["prefs"]["auto_promote_rate"] == 100
+
+
 def test_a_broken_prefs_read_does_not_allow_offers(monkeypatch):
     """An outage is not a decision to list the seller's items open to
     negotiation, any more than it is consent to an ad fee."""
