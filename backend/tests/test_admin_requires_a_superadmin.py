@@ -30,8 +30,26 @@ from backend import errors, main, ratelimit
 PASSWORD = "password123"
 
 
+def _leaf_routes(routes):
+    """Every handler route, through the routers main includes.
+
+    FastAPI 0.141 stopped flattening an included router into app.routes: it
+    sits there as one `_IncludedRouter` entry with no path of its own, and
+    its handlers are on `original_router.routes` (full paths, prefix
+    applied). Walked flat, the admin console shrank to the one route still
+    defined in main.py, and the floor below caught it -- which is the floor's
+    job. Earlier versions flatten, and have no `original_router` to descend.
+    """
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            yield from _leaf_routes(inner.routes)
+        else:
+            yield route
+
+
 def _admin_routes():
-    for route in main.app.routes:
+    for route in _leaf_routes(main.app.routes):
         path = getattr(route, "path", "")
         if not path.startswith("/api/admin/") or path == "/api/admin/diagnostics":
             continue

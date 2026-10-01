@@ -1409,6 +1409,81 @@ def refine(listing: Listing, prompt: str) -> Listing:
     return updated
 
 
+# What "End and Relist" asks the model for, and nothing else. A refine echoes
+# the WHOLE listing and rewrites any of REFINED_FIELDS; this pass rewrites two.
+# The price, the specifics, the condition and the category are the facts the
+# seller already sold this item under, and a relist that moved any of them
+# would be a different listing rather than the same one with fresh words.
+FRESH_COPY_FIELDS = ("title", "description")
+
+
+def fresh_copy(listing: Listing) -> dict:
+    """A new title and description for a listing that is being relisted.
+
+    The seller is ending a live listing to put it straight back up as a new
+    item — a new item id, a new "listed" date, and a second chance at the
+    search placement a stale listing has lost. The photos, price, specifics
+    and condition all stand; what changes is the copy, so the new listing
+    reads as new rather than as the same page eBay's search already showed
+    everyone who did not buy it.
+
+    Returns {"title", "description"} — the two fields the caller writes onto
+    the copy. Everything the draft and refine rules say about a title (lead
+    with brand, spend the 80 characters, no hype) and a description (long,
+    sectioned, keyword-rich, no links) holds here; the one instruction on
+    top is that the wording must be DIFFERENT while the facts are the same.
+    The model is not shown the photos, so it may not add a claim it cannot
+    see: a fact not in the current copy or the specifics stays out.
+    """
+    client = _client()
+    current = listing.model_dump()
+    current.pop("images", None)
+    # The eBay bookkeeping is not copy and only distracts from what is.
+    for name in ("marketplaces", "dirty_fields", "remote_shadow", "conflicts",
+                 "videos", "image_urls", "presentation"):
+        current.pop(name, None)
+    msg = (
+        "An eBay seller is ending this live listing and relisting the same "
+        "item as a NEW listing. Write a fresh title and a fresh description "
+        "for it. Here is the current listing as JSON:\n\n"
+        + json.dumps(current, indent=2) + "\n\n"
+        "Rules:\n"
+        "- Say the SAME facts in DIFFERENT words. Reorder and rephrase, "
+        "choose different synonyms and different buyer-search terms, and "
+        "give the description a different opening line and section order "
+        "— a buyer who saw the old listing should read this as a new one. "
+        "Do not invent anything: every claim must already be in the current "
+        "title, description or item specifics, and nothing in them may be "
+        "contradicted or quietly dropped (measurements, flaws, what is "
+        "included).\n"
+        "- The title: " + TITLE_BUDGET_AND_BANS + "\n"
+        "- The description: 1,800-3,500 characters, plain text with the "
+        "same labelled sections the app writes (overview, Key Details, "
+        "Condition, Measurements, Why You'll Love It), keyword-rich, with "
+        "no link or anything standing in for one, no email, phone, social "
+        "handle, or invitation off eBay, and nothing about shipping or "
+        "returns.\n"
+        "- " + REFINE_ORDER_RULE + "\n\n"
+        "Return ONLY a JSON object with exactly two string fields, "
+        "\"title\" (<= 80 characters) and \"description\". No markdown."
+    )
+    resp = client.messages.create(
+        model=config.CONTENT_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": msg}],
+    )
+    _refused(resp)
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("the AI response was too long and got cut off")
+    text = "".join(b.text for b in resp.content if b.type == "text")
+    data = _extract_json(text)
+    title = _text(data.get("title")).strip()[:TITLE_MAX_CHARS]
+    description = _text(data.get("description")).strip()
+    if not title or not description:
+        raise RuntimeError("the AI did not return a new title and description")
+    return {"title": title, "description": description}
+
+
 # ---------------------------------------------------------------------------
 # Tag targeting — the fix for "the AI can't read clothing sizes".
 #

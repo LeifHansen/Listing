@@ -2,9 +2,9 @@ import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle, Download,
-  ArrowRightLeft, X,
+  ArrowRightLeft, RefreshCcw, X,
 } from "lucide-react";
-import { postJson } from "@/lib/api";
+import { pollJob, postJson } from "@/lib/api";
 import { exportListingsCsv } from "@/lib/listingExport";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
@@ -108,6 +108,19 @@ export const STALE_TABS = { drafts: "active", sold: "inactive" };
 // fresh mints a new item id and a search-placement boost.
 const STALE_DAYS = 60;
 const dayAge = (iso) => (iso ? (Date.now() - Date.parse(iso)) / 86400000 : 0);
+
+// "• Nike hoodie: Turns out this one sold on eBay…" — one line per listing a
+// bulk run left alone or could not finish, in the server's own words. A
+// count on its own ("2 failed") is a button that did something and will not
+// say what. Three at most, and the rest counted, which is what a toast has
+// room for. The same helper the dashboard's bulk groups use.
+const reasonLines = (rows) => {
+  const lines = rows.slice(0, 3).map(
+    (r) => `• ${r.title || "A listing"}: ${r.message}`);
+  const more = rows.length - lines.length;
+  if (more > 0) lines.push(`• …and ${more} more`);
+  return lines;
+};
 
 export function ListingsView({ search = "" }) {
   const {
@@ -324,13 +337,16 @@ export function ListingsView({ search = "" }) {
     return orderListings(filterListings(shown, listingFilters), metricsById);
   }, [listingsState.items, tab, marketId, q, metricsById, listingFilters]);
 
-  // Ticks on the live listings, for the crosspost: on the tabs that show
-  // live listings, and only once there is somewhere else to post them.
+  // Ticks on the live listings, on the tabs that show them. They used to
+  // wait for a second marketplace, because the crosspost was the only thing
+  // a tick could do; End & relist works on any live eBay listing, so every
+  // seller gets the ticks now and only the crosspost button still waits for
+  // somewhere else to post to.
   //
   // Off `items`, so a filtered grid ticks what it is SHOWING. "Select all"
-  // over listings the seller cannot see is how a crosspost reaches an item
+  // over listings the seller cannot see is how a bulk action reaches an item
   // they had deliberately filtered out.
-  const selectable = otherMarketplaces && (tabId === "active" || tabId === "all");
+  const selectable = tabId === "active" || tabId === "all";
   const liveItems = selectable ? items.filter(isLive) : [];
   const selectedLive = liveItems.filter((i) => liveSelection[i.id]);
   const allLiveSelected = liveItems.length > 0 && selectedLive.length === liveItems.length;
@@ -339,6 +355,61 @@ export function ListingsView({ search = "" }) {
   const toggleAllLive = () => setLiveSelection(allLiveSelected
     ? {} : Object.fromEntries(liveItems.map((i) => [i.id, true])));
   const clearLive = () => setLiveSelection({});
+
+  // End & relist: every ticked listing comes off eBay and goes straight back
+  // up as a NEW listing — a new item id, a new "listed" date, and a fresh
+  // AI-written title and description so it reads as new to the buyers eBay
+  // already showed the old one. The server runs it as a job (an AI call and
+  // two eBay calls per listing) and this polls it, so the bar can say which
+  // listing it is on rather than sit on a spinner for minutes.
+  const [relisting, setRelisting] = useState(null); // { done, total, title }
+  const endAndRelist = async () => {
+    const picked = selectedLive;
+    if (!picked.length || relisting) return;
+    const n = picked.length;
+    const one = n === 1 ? `"${picked[0].listing?.title || picked[0].title || "this listing"}"` : null;
+    if (!(await confirm({
+      title: n === 1 ? "End and relist this listing?" : `End and relist ${n} listings?`,
+      message: (one ? `${one} comes` : "Each one comes")
+        + " off eBay and goes straight back up as a new listing, with a "
+        + "fresh AI-written title and description — same photos, price and "
+        + "details. A new listing starts over on views, watchers and "
+        + "sales history, and the old one moves to Inactive.",
+      confirmLabel: n === 1 ? "End & relist" : `End & relist ${n}`,
+      danger: true,
+    }))) return;
+    setRelisting({ done: 0, total: n, title: "" });
+    try {
+      const start = await postJson("/api/ebay/end-and-relist",
+        { listing_ids: picked.map((i) => i.id) });
+      const total = start.total || n;
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setRelisting({
+          done: j.current || 0, total: j.total_items || total,
+          title: j.current_title || "",
+        }),
+      });
+      const parts = [];
+      if (res.changed) parts.push(`Relisted ${res.changed} listing${res.changed === 1 ? "" : "s"} with fresh copy`);
+      if (res.skipped) parts.push(`${res.skipped} skipped`);
+      if (res.failed) parts.push(`${res.failed} failed`);
+      const results = res.results || {};
+      const lines = reasonLines(
+        [...(results.failed || []), ...(results.skipped || [])]);
+      toast([parts.join(" · ") || "Nothing to relist.", ...lines].join("\n"), {
+        kind: res.changed ? "success" : res.failed ? "error" : "info",
+        ttl: lines.length ? 12000 : undefined,
+      });
+      clearLive();
+      await loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't end and relist: ${e.message}`, { kind: "error" });
+      // Some may have gone through before the failure: show what is true.
+      loadListings({ quiet: true });
+    } finally {
+      setRelisting(null);
+    }
+  };
 
   // Which cards have their Quick edit panel open. Several at once is fine —
   // a seller going down a row fixing prices should not lose one panel's
@@ -647,8 +718,10 @@ export function ListingsView({ search = "" }) {
       <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
         total={view.kind === "unavailable" ? null : marketCounts[marketId]} />
 
-      {/* The crosspost's bar: arrives with the first tick on a live listing
-          and leaves with the last, like the drafts' bulk bar above. */}
+      {/* The live listings' bulk bar: arrives with the first tick on a live
+          listing and leaves with the last, like the drafts' bulk bar above.
+          End & relist is on it for every seller; the crosspost joins it once
+          there is a second marketplace to post to. */}
       {selectedLive.length > 0 && (
         <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-card
           border border-blue/35 bg-blue-soft/90 backdrop-blur px-3 py-2.5 shadow-card">
@@ -665,10 +738,25 @@ export function ListingsView({ search = "" }) {
               ({selectedLive.length} of {liveItems.length})
             </span>
           </label>
+          {relisting && (
+            <span className="text-[13px] text-ink-secondary tabular-nums truncate max-w-[60vw]"
+              role="status" aria-live="polite">
+              Relisting {Math.min(relisting.done + 1, relisting.total)} of {relisting.total}
+              {relisting.title ? ` · ${relisting.title}` : ""}
+            </span>
+          )}
           <div className="flex flex-wrap items-center gap-2 ml-auto">
+            <Button variant="primary" size="sm" onClick={endAndRelist}
+              loading={!!relisting}
+              disabled={!ebay.connected}
+              title={ebay.connected
+                ? "End each ticked listing on eBay and relist it as a new one with a fresh AI-written title and description"
+                : "Connect eBay under Settings first."}>
+              <RefreshCcw aria-hidden /> End & relist ({selectedLive.length})
+            </Button>
             {etsy && (
               <Button variant="primary" size="sm" onClick={() => setCrosspostOpen(true)}
-                disabled={!etsy.connected}
+                disabled={!etsy.connected || !!relisting}
                 title={etsy.connected ? undefined
                   : etsy.access_pending
                     ? etsy.access_pending_note
