@@ -231,8 +231,11 @@ ListHome (uploader + drafts) is unchanged apart from the Duplicate card action.
 
 ## Implementation phases (each shippable)
 
-**Phase 0 — Backend for autosave.** `_EDITOR_PATCHABLE`, locked mutate, server-field
-restore, 409 for live, tests next to `test_partial_listing_update.py`.
+**Phase 0 — Backend for autosave.** *Built (this branch).* `_EDITOR_PATCHABLE` beside
+`_PATCHABLE` on `PATCH /api/listings/{id}`, the write moved under the row lock via
+`db.mutate_listing_data` with `status=None`, a 409 for editor fields on a published,
+live or sold listing; tests in `test_partial_listing_update.py` and
+`test_autosave_patches_the_editor_fields.py`, including the publish race.
 
 **Phase 1 — Autosave + Done.** `savedRef`, `lib/fieldDiff.js`, gate, `saveState`,
 `patchListing` on success, header indicator only, Done/back without confirm for saved

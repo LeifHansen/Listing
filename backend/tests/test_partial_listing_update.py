@@ -29,6 +29,8 @@ does not fail, it publishes. The Trading request branches on
 """
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -55,8 +57,14 @@ def api(monkeypatch, tmp_path):
                         {**STORED, "listing": dict(STORED["listing"])}
                         if lid == "lst1" else None)
     monkeypatch.setattr(db, "enabled", lambda: True)
-    monkeypatch.setattr(db, "upsert_listing",
-                        lambda lid, data, **k: saved.update(data) or True)
+
+    # The route writes under the row lock (db.mutate_listing_data): the
+    # mutator is handed the row's listing and returns the dict to persist.
+    def mutate(lid, fn, status=None, user_id=None):
+        data = fn(copy.deepcopy(STORED["listing"]))
+        saved.update(data)
+        return data
+    monkeypatch.setattr(db, "mutate_listing_data", mutate)
     monkeypatch.setattr(main.deps, "uid", lambda _r: "u1")
     monkeypatch.setattr(main.deps, "assert_session_owner", lambda *a, **k: None)
     return TestClient(main.app), saved
@@ -98,10 +106,13 @@ def test_the_merged_listing_comes_back(api):
 
 def test_a_field_outside_the_allowed_set_is_refused(api):
     """A patch route that accepts anything is a full replace with extra steps:
-    the caller sends every field and the lost update is back."""
+    the caller sends every field and the lost update is back. The editor's
+    own fields joined the set for autosave (see
+    test_autosave_patches_the_editor_fields); the server-owned ones never
+    will."""
     client, saved = api
     resp = client.patch("/api/listings/lst1",
-                        json={"title": "from a stale tab"})
+                        json={"ebay_listing_id": "from a stale tab"})
 
     assert resp.status_code == 400, resp.text
     assert saved == {}
@@ -129,7 +140,7 @@ def test_a_patch_that_did_not_commit_is_not_reported_as_saved(api, monkeypatch):
     from backend import db
 
     client, _ = api
-    monkeypatch.setattr(db, "upsert_listing", lambda *a, **k: False)
+    monkeypatch.setattr(db, "mutate_listing_data", lambda *a, **k: None)
 
     resp = client.patch("/api/listings/lst1", json={"category_id": "222"})
     assert resp.status_code == 503, resp.text
@@ -210,12 +221,22 @@ def test_the_format_is_queued_for_ebay(api):
     assert "listing_format" in saved["dirty_fields"]
 
 
-def test_the_auction_length_stays_a_full_editor_field(api):
-    """Not every field the format uses belongs on a card. The length defaults
-    to seven days and is chosen in the editor; the card would be a third
-    control on an already-dense tile."""
+def test_the_auction_length_is_an_editor_field(api, monkeypatch):
+    """Not every field the format uses belongs on a card: the length defaults
+    to seven days and is chosen in the editor, so it is an EDITOR field --
+    saved on a draft, and refused on a listing eBay already has, where only
+    the card fields go through this door."""
+    from backend import db
+
     client, saved = api
     resp = client.patch("/api/listings/lst1", json={"auction_duration": "DAYS_10"})
+    assert resp.status_code == 200, resp.text
+    assert saved["auction_duration"] == "DAYS_10"
 
-    assert resp.status_code == 400, resp.text
+    saved.clear()
+    monkeypatch.setattr(db, "get_listing", lambda lid:
+                        {**STORED, "status": "published",
+                         "listing": dict(STORED["listing"])})
+    resp = client.patch("/api/listings/lst1", json={"auction_duration": "DAYS_10"})
+    assert resp.status_code == 409, resp.text
     assert saved == {}
