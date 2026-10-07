@@ -237,10 +237,16 @@ ListHome (uploader + drafts) is unchanged apart from the Duplicate card action.
 live or sold listing; tests in `test_partial_listing_update.py` and
 `test_autosave_patches_the_editor_fields.py`, including the publish race.
 
-**Phase 1 — Autosave + Done.** `savedRef`, `lib/fieldDiff.js`, gate, `saveState`,
-`patchListing` on success, header indicator only, Done/back without confirm for saved
-drafts. Tests: debounce; skip while live/sold/aiBusy/publishing; flush before publish;
-baseline reset after refine/autofill/addImages; failure keeps the confirm.
+**Phase 1 — Autosave + Done.** *Built.* `lib/fieldDiff.js` (the allow-list mirrored
+from the server, and "same value" by meaning rather than representation); in
+`useListingForm` a `saved` baseline every writing path updates, a 1.5 s debounce
+sending only the changed keys through `PATCH /api/listings/{id}`, a gate on live,
+sold, AI-busy, uploading and publishing, a wait on the in-flight save before any
+publish, retries at 2/5/15 s with one warning, and a stop on the server's 409;
+`saveStatus`/`dirty`/`flushSave` exported. The header shows Unsaved / Saving… /
+Saved / Not saved yet; Exit, My drafts and the bar's Done (was Cancel) flush and
+leave without a confirm on a draft, and still confirm on a live listing or after a
+failed save. Tests: `lib/fieldDiff.test.js`, `views/listing/autosave.test.jsx`.
 
 **Phase 2 — `Section` and layout.** New `views/listing/Section.jsx` replacing
 `WorkflowCard` 1:1 (same `id, title, hint, state, flagged, expand`, drop `icon`; same

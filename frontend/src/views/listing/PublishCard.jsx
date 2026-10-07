@@ -347,17 +347,26 @@ export function PublishBar({ w }) {
     requestAnimationFrame(() => w.setFixTarget(target));
   };
 
+  // A draft is saved on the way out, not discarded: autosave has been
+  // sending edits all along (useListingForm) and this sends the rest, so
+  // there is nothing to confirm. The question stays for a live listing --
+  // its edits go to eBay with Update, never by a timer -- and for a draft
+  // whose last save failed, where "discarded" is true again.
   const askCancel = async () => {
-    if (await confirm({
-      title: "Close without saving?",
-      message: w.isLive
-        ? "Changes you made here since the last update are discarded — the live listing stays as it is on eBay."
-        : "Changes since the last save are discarded — the listing stays in Drafts exactly as last saved.",
-      confirmLabel: "Close",
-    })) {
-      setSession(null);
-      openListings(w.isLive ? "active" : "drafts");
+    const mustConfirm = w.isLive || w.saveStatus === "off" || w.saveStatus === "error";
+    if (mustConfirm) {
+      if (!(await confirm({
+        title: "Close without saving?",
+        message: w.isLive
+          ? "Changes you made here since the last update are discarded — the live listing stays as it is on eBay."
+          : "Changes since the last save are discarded — the listing stays in Drafts exactly as last saved.",
+        confirmLabel: "Close",
+      }))) return;
+    } else {
+      await w.flushSave();
     }
+    setSession(null);
+    openListings(w.isLive ? "active" : "drafts");
   };
 
   const askDelete = async () => {
@@ -517,8 +526,11 @@ export function PublishBar({ w }) {
             <>
               {/* Right where a listing that won't publish leaves you — no
                   hunting back through the list for its card. */}
-              <Button variant="ghost" size="md" onClick={askCancel} aria-label="Cancel editing">
-                Cancel
+              {/* "Done", not "Cancel": on a draft this saves what is left
+                  and closes -- nothing is cancelled. (The live bar keeps
+                  Cancel: there, leaving really does drop the edits.) */}
+              <Button variant="ghost" size="md" onClick={askCancel} aria-label="Done editing">
+                Done
               </Button>
               <Button variant="ghost" size="md" onClick={askDelete}
                 aria-label="Delete this listing">

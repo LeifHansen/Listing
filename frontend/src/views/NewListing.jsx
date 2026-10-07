@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import {
   Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
   LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown, Camera,
+  Loader2, CloudOff,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -31,6 +32,40 @@ const rise = {
   hidden: { opacity: 0, y: 10 },
   show: { opacity: 1, y: 0, transition: { duration: 0.22, ease: "easeOut" } },
 };
+
+// SaveStatus — one quiet word in the header for what autosave is doing.
+//
+// A draft saves itself (useListingForm, "autosave"): every edit reaches the
+// server a moment after the seller stops typing, so the editor can be closed
+// without a "discard?" question and a crashed tab loses nothing. This is the
+// only place that says so. It stays silent until there is something to say
+// (a fresh open shows nothing), and it never shows "Saved" over a keystroke
+// that has not gone yet -- "dirty" wins (see saveStatus in the hook). On a
+// live or sold listing autosave is off and this draws nothing: those have
+// their own, explicit save, and the bar says so.
+function SaveStatus({ status }) {
+  if (status === "idle" || status === "off") return null;
+  const look = {
+    dirty: { text: "Unsaved changes", cls: "text-ink-faint", icon: null },
+    saving: { text: "Saving…", cls: "text-ink-secondary",
+              icon: <Loader2 size={13} className="animate-spin" aria-hidden /> },
+    saved: { text: "Saved", cls: "text-success",
+             icon: <CheckCircle2 size={13} aria-hidden /> },
+    error: { text: "Not saved yet — retrying", cls: "text-warning",
+             icon: <CloudOff size={13} aria-hidden /> },
+  }[status];
+  if (!look) return null;
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-save-status={status}
+      className={cn("inline-flex items-center gap-1 text-[12.5px] font-semibold", look.cls)}
+    >
+      {look.icon}{look.text}
+    </span>
+  );
+}
 
 // RefineBar — the "AI, make it better" prompt pinned under the page title.
 function RefineBar({ w }) {
@@ -268,12 +303,40 @@ export function Workflow() {
   // { name } — the photo open in the studio (clean up, remove background, crop).
   const [editing, setEditing] = useState(null);
 
+  // Leaving a DRAFT asks nothing. Autosave has been sending every edit as it
+  // was made (useListingForm), and Done sends whatever the timer has not
+  // reached yet, so there are no "unsaved edits here" to warn about -- the
+  // question that used to stand here was answering a danger that no longer
+  // exists, and a confirm nobody needs is one more click on every listing.
+  // Two cases still ask: a live listing (edited with Update Live Listing,
+  // never by a timer; its status reads "off"), and a draft whose last save
+  // failed or was refused, where the warning is true again.
+  const mustConfirmLeaving = w.isLive || w.saveStatus === "off" || w.saveStatus === "error";
+  const leave = async (then) => {
+    if (mustConfirmLeaving) {
+      if (!(await confirm({
+        title: "Close this listing?",
+        message: w.isLive
+          ? "Changes you made here since the last update are discarded — the live listing stays as it is on eBay."
+          : "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
+        confirmLabel: "Close",
+      }))) return;
+    } else {
+      await w.flushSave();
+    }
+    then();
+  };
+
   const restart = async () => {
     if (await confirm({
       title: "Start a new listing?",
       message: "Your current draft stays saved in Drafts — you can come back to it anytime.",
       confirmLabel: "Start new",
-    })) startNew();
+    })) {
+      // "Stays saved" has to be true before the new one opens.
+      if (!mustConfirmLeaving) await w.flushSave();
+      startNew();
+    }
   };
 
   // Delete — for a listing that can't be salvaged. Without this the only way
@@ -290,28 +353,16 @@ export function Workflow() {
     }
   };
 
-  // Exit — close the editor without publishing. The listing stays saved as
-  // it last was; edits made since the last save are discarded.
-  const exit = async () => {
-    if (await confirm({
-      title: "Close this listing?",
-      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
-      confirmLabel: "Close",
-    })) {
-      setSession(null);
-      setView("dashboard");
-    }
-  };
+  // Exit — close the editor without publishing. A draft is saved on the way
+  // out (see `leave`); a live listing asks first.
+  const exit = () => leave(() => {
+    setSession(null);
+    setView("dashboard");
+  });
 
   // My drafts — the drafts grid is the List tab, so getting there means
-  // closing the editor; confirm since unsaved edits are dropped.
-  const toDrafts = async () => {
-    if (await confirm({
-      title: "Close this listing?",
-      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
-      confirmLabel: "Close",
-    })) openListings("drafts");
-  };
+  // closing the editor.
+  const toDrafts = () => leave(() => openListings("drafts"));
 
   // A live publish replaces the workflow with the success screen — staying on
   // the just-posted listing was confusing.
@@ -357,6 +408,7 @@ export function Workflow() {
               </span>
             )}
             {session.status === "ended" && <TagPill tone="neutral">Ended on eBay</TagPill>}
+            <SaveStatus status={w.saveStatus} />
           </div>
         </div>
         <div className="flex items-center gap-2">
