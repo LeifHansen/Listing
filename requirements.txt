@@ -1,21 +1,21 @@
 fastapi==0.141.1
-uvicorn[standard]==0.52.4
+uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 Pillow==12.3.0
-pillow-heif==1.7.0
-anthropic==1.4.0
+pillow-heif==1.8.0
+anthropic==1.9.0
 pydantic==2.13.5
 python-dotenv==1.2.3
 httpx==0.28.1
-SQLAlchemy==2.0.52
+SQLAlchemy==2.1.1
 # Schema migrations. Not on the boot path yet -- the app still calls
 # create_all plus the guarded ALTERs -- but shipped in the image so the
 # cutover is `alembic stamp head` then `alembic upgrade head` on the box
 # rather than a redeploy. See alembic/env.py.
-alembic==1.19.2
-psycopg[binary]==3.3.5
+alembic==1.20.0
+psycopg[binary]==3.3.6
 bcrypt==5.0.0
-PyJWT==2.13.0
+PyJWT==2.15.1
 
 # Encrypts the marketplace refresh tokens at rest (backend/crypto.py, imported
 # by backend/db.py -- the app cannot start without it). Declared explicitly for
@@ -23,15 +23,15 @@ PyJWT==2.13.0
 # extra of PyJWT/oauthlib, which nothing here requests, so a clean install had
 # every right not to have it.
 cryptography>=50.0.1
-boto3==1.43.89
+boto3==1.43.104
 # rembg's own dependency, declared as a floor rather than a pin so pip is free
 # to resolve whatever onnxruntime and rembg want. The floor has to stay
 # installable on the Python the image runs (3.11, see the Dockerfile): numpy
 # 2.5 dropped 3.11, so a floor of 2.5.3 -- which a dependency bump once set --
 # made every `pip install -r requirements.txt` fail before the app could boot.
-numpy>=2.3
+numpy>=2.5.3
 
 # In-house background removal: rembg pulls in onnxruntime + a ~176MB
 # isnet-general-use model (baked into the image at build time, see Dockerfile).
-rembg==2.0.83
-onnxruntime==1.29.0
+rembg==2.0.85
+onnxruntime==1.30.0
