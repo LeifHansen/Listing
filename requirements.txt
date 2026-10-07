@@ -29,7 +29,7 @@ boto3==1.43.104
 # installable on the Python the image runs (3.11, see the Dockerfile): numpy
 # 2.5 dropped 3.11, so a floor of 2.5.3 -- which a dependency bump once set --
 # made every `pip install -r requirements.txt` fail before the app could boot.
-numpy>=2.5.3
+numpy>=2.3
 
 # In-house background removal: rembg pulls in onnxruntime + a ~176MB
 # isnet-general-use model (baked into the image at build time, see Dockerfile).
