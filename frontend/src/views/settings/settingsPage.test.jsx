@@ -194,8 +194,13 @@ describe("the Settings page", () => {
     const scrolled = [];
     Element.prototype.scrollIntoView = function scrollIntoView() { scrolled.push(this.id); };
     const s = await mount({ section: "easypost" });
-    await act(async () => { await new Promise((r) => requestAnimationFrame(() => r())); });
-    await s.tick();
+    // The scroll runs on an animation frame after the view change (so it
+    // lands after App.jsx's own scroll-to-top). jsdom paces frames on a
+    // timer, so wait for the call rather than assume which frame it lands
+    // on -- a slow runner made the frame-order assumption flaky.
+    for (let i = 0; i < 40 && !scrolled.includes("settings-easypost"); i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 25)); });
+    }
     const row = [...s.host.querySelectorAll("button[aria-expanded]")]
       .find((b) => (b.textContent || "").includes("Shipping labels"));
     expect(row.getAttribute("aria-expanded")).toBe("true");

@@ -57,9 +57,12 @@ export function SettingsView() {
 
   // A deep link lands on its section. After App.jsx's own scroll-to-top for
   // the view change, and only once — the request is cleared so the next
-  // plain visit lands at the top again.
+  // plain visit lands at the top again. Not before the account has loaded:
+  // until then the page is the "Log in first" card and the sections do not
+  // exist, so a link consumed at that moment would scroll to nothing and be
+  // gone by the time they render. `user` in the deps re-runs it when they do.
   useEffect(() => {
-    if (!settingsSection) return undefined;
+    if (!settingsSection || !user) return undefined;
     const raf = requestAnimationFrame(() => {
       const el = document.getElementById(`settings-${settingsSection}`);
       if (el) {
@@ -72,7 +75,7 @@ export function SettingsView() {
       clearSettingsSection();
     });
     return () => cancelAnimationFrame(raf);
-  }, [settingsSection, clearSettingsSection]);
+  }, [settingsSection, user, clearSettingsSection]);
 
   if (!user) {
     return (
