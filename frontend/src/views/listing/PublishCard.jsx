@@ -8,7 +8,7 @@ import { postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { WorkflowCard } from "./WorkflowCard";
+import { Section } from "./Section";
 import { blockerHeadline, marketNames } from "./blockers";
 import { MarketTargetChips, usePublishTargets } from "./publishShared";
 import { loadPolicies } from "./ShippingPolicySelect";
@@ -210,8 +210,8 @@ export function PublishCard({ w }) {
     && (r.published || r.draft || r.ebay_draft || r.dry_run || r.preflight);
 
   return (
-    <WorkflowCard
-      id="publish" icon={Rocket} title="Publish"
+    <Section
+      id="publish" title="Publish"
       hint={w.isLive
         ? "This listing is LIVE on eBay — Update Live Listing pushes your edits straight to it; End listing takes it off eBay"
         : canPublishLive
@@ -300,7 +300,7 @@ export function PublishCard({ w }) {
           </motion.div>
         )}
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 

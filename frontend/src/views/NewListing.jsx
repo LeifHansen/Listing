@@ -21,6 +21,7 @@ import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
 import { ConflictBanner } from "./listing/ConflictBanner";
+import { SearchPreview } from "./listing/SearchPreview";
 import { PublishCard, PublishBar } from "./listing/PublishCard";
 import {
   PhotosCard, VideoCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
@@ -250,12 +251,12 @@ function MoreDetails({ w, children }) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="border-t border-line pt-5 pb-5">
       <button
         type="button"
         onClick={() => setManual(!open)}
         aria-expanded={open}
-        className="w-full flex items-center gap-3 px-1 text-left cursor-pointer group"
+        className="w-full flex items-center gap-3 text-left cursor-pointer group"
       >
         <span className="text-[15px] font-bold text-ink whitespace-nowrap">More details</span>
         {!open && (
@@ -285,7 +286,7 @@ function MoreDetails({ w, children }) {
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.2 }}
-          className="flex flex-col gap-4"
+          className="mt-5 flex flex-col"
         >
           {children}
         </motion.div>
@@ -477,50 +478,66 @@ export function Workflow() {
         <RefineBar w={w} />
       </motion.div>
 
-      {/* Hero fields first — photos, title, price & condition, category are
-          what the seller actually looks at; the AI-filled rest sits behind
-          the More Details fold (which opens itself when it needs a human). */}
-      <motion.div variants={rise} className="flex flex-col gap-4">
-        {/* Photo delete is confirmed: the button sits on every tile, always
-            visible, and the photo is gone from the server with no undo.
-            deleteImage has supported a confirm all along — the editor just
-            wasn't passing one. */}
-        <PhotosCard
-          w={w}
-          onEdit={(name) => setEditing({ name })}
-          onDelete={(name) => w.deleteImage(name, confirm)}
-        />
-        <TitleCard w={w} />
-        <PricingCard w={w} />
-        <CategoryCard w={w} />
-        {/* Optional, and below the fields a listing cannot publish without —
-            a video sells an item, a price is what makes it sellable. It sits
-            outside More Details all the same, because a seller who has shot
-            one has to be able to find where it goes. */}
-        {/* Confirmed for the same reason a photo delete is, and a stronger
-            one: the video is gone from the server with no undo, and getting
-            it back means re-shooting or re-sending up to 150MB. */}
-        <VideoCard w={w} onRemove={(name) => w.removeVideo(name, confirm)} />
-        {/* Marketplace extras — each renders only while its marketplace is
-            among the publish targets picked in the publish bar. */}
-        <EtsyCard w={w} />
-        <DepopCard w={w} />
-        <MoreDetails w={w}>
-          <SpecificsCard w={w} />
-          <DescriptionCard w={w} />
-          <ShippingCard w={w} />
-          <PromoteCard w={w} />
-        </MoreDetails>
-        {/* No "Finish up" card between the details and Publish. It offered
-            one pass over the photos to fill in everything eBay still asks
-            for — over a draft the app had just spent a minute and several
-            model calls making. A listing that arrives nearly finished, with
-            a button admitting it, is not a listing the seller asked for: the
-            pass runs at the end of drafting now (backend
-            _fill_what_is_left), and what reaches this page is filled in.
-            What is left here is reading it, changing what's wrong, and
-            publishing. */}
-        <PublishCard w={w} />
+      {/* Two columns from lg up, one below (LISTING_REDESIGN.md, Phase 2).
+          The photos and the search preview sit in a rail on the left that
+          stays put while the form scrolls: the two things a seller keeps
+          looking back at while they write are the item and how the listing
+          will read. The form is ONE surface, its parts divided by rules
+          (see Section) -- not a column of cards. On a phone the rail simply
+          comes first, in the same order. */}
+      <motion.div
+        variants={rise}
+        className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start"
+      >
+        <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto">
+          <div className="bg-card rounded-card border border-line shadow-card p-5 sm:p-6">
+            {/* Photo delete is confirmed: the button sits on every tile,
+                always visible, and the photo is gone from the server with no
+                undo. deleteImage has supported a confirm all along — the
+                editor just wasn't passing one. */}
+            <PhotosCard
+              w={w}
+              onEdit={(name) => setEditing({ name })}
+              onDelete={(name) => w.deleteImage(name, confirm)}
+            />
+            {/* Optional, and under the photos because it is one more thing
+                shot of the item. Confirmed for the same reason a photo
+                delete is, and a stronger one: the video is gone from the
+                server with no undo, and getting it back means re-shooting or
+                re-sending up to 150MB. */}
+            <VideoCard w={w} onRemove={(name) => w.removeVideo(name, confirm)} />
+          </div>
+          <SearchPreview w={w} />
+        </div>
+        <div className="bg-card rounded-card border border-line shadow-card p-5 sm:p-6 min-w-0">
+          {/* Hero fields first — title, price & condition, category are
+              what the seller actually looks at; the AI-filled rest sits
+              behind the More Details fold (which opens itself when it needs
+              a human). */}
+          <TitleCard w={w} />
+          <PricingCard w={w} />
+          <CategoryCard w={w} />
+          {/* Marketplace extras — each renders only while its marketplace
+              is among the publish targets picked in the publish bar. */}
+          <EtsyCard w={w} />
+          <DepopCard w={w} />
+          <MoreDetails w={w}>
+            <SpecificsCard w={w} />
+            <DescriptionCard w={w} />
+            <ShippingCard w={w} />
+            <PromoteCard w={w} />
+          </MoreDetails>
+          {/* No "Finish up" card between the details and Publish. It offered
+              one pass over the photos to fill in everything eBay still asks
+              for — over a draft the app had just spent a minute and several
+              model calls making. A listing that arrives nearly finished,
+              with a button admitting it, is not a listing the seller asked
+              for: the pass runs at the end of drafting now (backend
+              _fill_what_is_left), and what reaches this page is filled in.
+              What is left here is reading it, changing what's wrong, and
+              publishing. */}
+          <PublishCard w={w} />
+        </div>
       </motion.div>
 
       {/* Pinned primary action — stays in reach as you scroll the long form

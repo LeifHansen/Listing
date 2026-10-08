@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Image as ImageIcon, Type, FolderTree, ListChecks, Coins, PackageOpen,
-  AlignLeft, Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Megaphone, Loader2, Check, Store, ShoppingBag,
+  Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
+  Sparkles, Loader2, Check,
   Video as VideoIcon,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
@@ -20,7 +19,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { specificRowIndex } from "./specifics";
-import { WorkflowCard } from "./WorkflowCard";
+import { Section } from "./Section";
 import { PhotoTile } from "./PhotoTile";
 import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
@@ -164,8 +163,8 @@ export function PhotosCard({ w, onEdit, onDelete }) {
   const fromEbay = (w.form.source || "") === "ebay" && !formImages.length;
 
   return (
-    <WorkflowCard
-      id="photos" icon={ImageIcon} title="Photos"
+    <Section
+      id="photos" title="Photos"
       hint={fromEbay
         ? "The photos on your live eBay listing"
         : "Drop more photos anywhere in here. The first photo is your eBay main image — tap Main on any other photo to promote it, or ‹ › to nudge one place. One-tap rotate & delete; hover Edit to clean up or crop"}
@@ -174,7 +173,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
       <div
         className={cn(
-          "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-3 rounded-tile",
+          "grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-3 xl:grid-cols-4 gap-3 rounded-tile",
           // The whole grid takes the drop, not just the tile at the end — a
           // seller aiming at their photos shouldn't have to hit a small target.
           fileDrag && "outline outline-2 outline-blue outline-offset-4 bg-blue-soft/40",
@@ -227,7 +226,7 @@ export function PhotosCard({ w, onEdit, onDelete }) {
         </label>
       </div>
       )}
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -301,8 +300,8 @@ export function VideoCard({ w, onRemove }) {
   };
 
   return (
-    <WorkflowCard
-      id="video" icon={VideoIcon} title="Video"
+    <Section
+      id="video" title="Video"
       hint={`Optional. eBay allows ${MAX_VIDEOS} video per listing — MP4, up `
         + "to a minute, 150MB. Upload only: eBay makes its own versions of "
         + "whatever you send, so there's nothing here to trim or crop. eBay "
@@ -394,7 +393,7 @@ export function VideoCard({ w, onRemove }) {
           </span>
         </label>
       )}
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -476,8 +475,8 @@ export function TitleCard({ w }) {
   const over = len > TITLE_MAX;
   const nearLimit = len >= TITLE_MAX - 8;
   return (
-    <WorkflowCard
-      id="title" icon={Type} title="Title"
+    <Section
+      id="title" title="Title"
       hint="What buyers see first in search"
       state={w.completion.title} flagged={w.fixTarget === "title"}
       expand={refused.length > 0}
@@ -553,7 +552,7 @@ export function TitleCard({ w }) {
           </Field>
         </div>
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -595,8 +594,8 @@ function SuggestionRow({ chosen, onClick, left, right }) {
 export function CategoryCard({ w }) {
   const s = w.catSuggestions;
   return (
-    <WorkflowCard
-      id="category" icon={FolderTree} title="Category"
+    <Section
+      id="category" title="Category"
       hint="The right category unlocks eBay's required fields"
       state={w.completion.category} flagged={w.fixTarget === "category"}
     >
@@ -656,7 +655,7 @@ export function CategoryCard({ w }) {
           )
         )}
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -1045,8 +1044,8 @@ export function SpecificsCard({ w }) {
   };
 
   return (
-    <WorkflowCard
-      id="specifics" icon={ListChecks} title="Item specifics"
+    <Section
+      id="specifics" title="Item specifics"
       hint={catAspects.length
         ? `${filledCount} of ${catAspects.length} filled by the AI`
           + (missingRequired
@@ -1257,7 +1256,7 @@ export function SpecificsCard({ w }) {
           )}
         </div>
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -1310,8 +1309,8 @@ export function PricingCard({ w }) {
     + "another way.";
 
   return (
-    <WorkflowCard
-      id="pricing" icon={Coins} title="Pricing & condition"
+    <Section
+      id="pricing" title="Pricing & condition"
       hint="Buy It Now, auction, or both — check live comps so you never guess"
       state={w.completion.pricing}
       flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
@@ -1611,7 +1610,7 @@ export function PricingCard({ w }) {
           )
         )}
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -1697,8 +1696,8 @@ function ShippingPolicyPicker({ w }) {
 
 export function ShippingCard({ w }) {
   return (
-    <WorkflowCard
-      id="shipping" icon={PackageOpen} title="Shipping package"
+    <Section
+      id="shipping" title="Shipping package"
       hint="Weight, size, and how it ships — eBay needs a weight to publish"
       state={w.completion.shipping}
       flagged={w.fixTarget === "weight" || w.fixTarget === "shipping"}
@@ -1739,16 +1738,17 @@ export function ShippingCard({ w }) {
         </div>
         <ShippingPolicyPicker w={w} />
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
 export function DescriptionCard({ w }) {
   return (
-    <WorkflowCard
-      id="description" icon={AlignLeft} title="Description"
+    <Section
+      id="description" title="Description" collapsible
       hint="The story buyers read before they commit"
       state={w.completion.description} flagged={w.fixTarget === "description"}
+      expand={issuesFor(w.publishResult, "description").length > 0}
     >
       {/* The AI now drafts a full SEO body — several hundred words in
           labelled sections — so a 7-row box showed a tenth of it at a time
@@ -1765,7 +1765,7 @@ export function DescriptionCard({ w }) {
             gets typed. Scanning only the title would leave half of it. */}
         <RiskyWordNotes text={w.form.description} field="description" />
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -1796,8 +1796,8 @@ export function PromoteCard({ w }) {
   };
 
   return (
-    <WorkflowCard
-      id="promote" icon={Megaphone} title="Promote"
+    <Section
+      id="promote" title="Promote"
       hint="Boost this listing in eBay search — you only pay if it sells through the promotion"
       state={on ? "complete" : "todo"}
     >
@@ -1888,7 +1888,7 @@ export function PromoteCard({ w }) {
           </motion.div>
         )}
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -1970,8 +1970,8 @@ export function EtsyCard({ w }) {
   };
 
   return (
-    <WorkflowCard
-      id="etsy" icon={Store} title="Etsy"
+    <Section
+      id="etsy" title="Etsy"
       hint={(w.form.marketplaces || {}).etsy?.listing_id
         ? "Updating replaces the whole Etsy copy — an edit made on etsy.com is overwritten by what's here"
         : "What Etsy needs beyond the shared fields — category, who/when made, shipping, returns, processing time"}
@@ -2102,7 +2102,7 @@ export function EtsyCard({ w }) {
           </Field>
         </div>
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }
 
@@ -2117,8 +2117,8 @@ export function DepopCard({ w }) {
   const flagged = typeof w.fixTarget === "string" && w.fixTarget.startsWith("depop_");
 
   return (
-    <WorkflowCard
-      id="depop" icon={ShoppingBag} title="Depop"
+    <Section
+      id="depop" title="Depop"
       hint="Depop extras — size and category; title, price, condition and the first 4 photos map automatically"
       state="todo" flagged={flagged}
     >
@@ -2144,6 +2144,6 @@ export function DepopCard({ w }) {
           />
         </Field>
       </div>
-    </WorkflowCard>
+    </Section>
   );
 }

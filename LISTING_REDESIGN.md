@@ -248,11 +248,15 @@ Saved / Not saved yet; Exit, My drafts and the bar's Done (was Cancel) flush and
 leave without a confirm on a draft, and still confirm on a live listing or after a
 failed save. Tests: `lib/fieldDiff.test.js`, `views/listing/autosave.test.jsx`.
 
-**Phase 2 — `Section` and layout.** New `views/listing/Section.jsx` replacing
-`WorkflowCard` 1:1 (same `id, title, hint, state, flagged, expand`, drop `icon`; same
-transition rule and ref scroll; `collapsible` prop for Description/More options). Two-
-column grid on `lg+` (`lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]`, sticky left rail).
-`SearchPreview` + `loadPrefs()`. No field moves. `npm run reach`.
+**Phase 2 — `Section` and layout.** *Built.* `views/listing/Section.jsx` replaces
+`WorkflowCard` 1:1 (same `id`, `title`, `hint`, `state`, `flagged`, `expand`; the
+icon tile, the Complete/Optional chip and the per-card collapse are gone; `collapsible`
+only on Description); the form is one surface divided by rules. Two columns from
+`lg` up with a sticky left rail holding the photos (3–4 tile columns there) and the
+new `SearchPreview` (first photo, title cut at 80, condition, price or starting bid,
+carrier from the policy in effect, "or Best Offer" from the account default via
+`lib/prefs.js`). Tests: `section.test.jsx`, `searchPreview.test.jsx`; `npm run reach`
+clean on phone and desktop.
 
 **Phase 3 — Consolidation.** Header `⋯` menu (new `components/ui/Menu.jsx`: button +
 absolutely positioned `role="menu"` list, outside-click + Esc; there is no popover
