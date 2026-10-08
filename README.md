@@ -408,7 +408,7 @@ Without eBay credentials the app runs in **dry-run mode**: it builds the exact
 saves it to `data/exports/` so you can inspect it or push later.
 
 **To publish for real, a seller connects their own eBay account** through
-Settings → Connect eBay (OAuth). That is the only way a live listing is
+Settings → eBay account → Connect eBay (OAuth). That is the only way a live listing is
 created: every publish goes out on the connected seller's account, through the
 Trading API. Server-side credentials do NOT publish on their own — they used
 to, through the Sell Inventory API, and that engine is gone.
@@ -474,6 +474,66 @@ with no Store. `Storefront.StoreCategoryID` rides the publish and the revise
 > publishing, deploy the app on a public host (or swap in an image CDN) so eBay
 > can fetch the optimized photos.
 
+### Settings: what every listing starts with
+
+Settings is laid out the way eBay's own Seller Hub teaches it, eBay-first:
+**eBay account** (the connection, payouts, the monthly selling limit, the
+programs the account is in), **Shipping** (ship-from location, the default
+shipping policy and its handling time, eBay International Shipping),
+**Returns & payment** (the default return and payment policies with their
+terms shown inline, and the three ways to get policies when the account has
+none), **Selling defaults** (Best Offer, Promoted Listings, pricing
+strategy, condition and quantity), then **More** (profile, EasyPost labels,
+cross-posting, Teach the AI, appearance, sign-in) folded into one row each,
+and the **Danger zone**. A sticky jump nav lists the groups, and every "fix
+this in Settings" link elsewhere lands on its section
+(`openSettings("shipping")` in `frontend/src/store.jsx`).
+
+**Every control saves itself.** Switches and selects apply the moment they
+change (one key, `PATCH /api/prefs`, which merges) and answer with an inline
+"Saved" or the reason they could not; typed fields keep a Save on their own
+card. There is no page-wide Save any more, because there were two systems
+behind it — this app's defaults and the seller's eBay account — and one
+button could not say honestly which half had committed. A default that could
+not be read renders the warning and a retry instead of its control, never the
+app's fallback as the seller's choice (`frontend/scripts/smoke.mjs` checks the
+built app for exactly that).
+
+Where eBay is the source of record, Settings edits eBay rather than keeping
+a copy:
+
+- **Handling time** lives on the fulfillment policy, and eBay measures every
+  listing under the policy against it. The Shipping card reads it off the
+  selected policy and changes it through `updateFulfillmentPolicy`
+  (`PATCH /api/ebay/handling-time`, `ebay_auth.set_fulfillment_handling_time`),
+  a full-body PUT that sends eBay's own policy back with only the handling
+  time changed. Nothing is cached, so Seller Hub and this screen always
+  agree.
+- **Policy terms** (return window and who pays, immediate payment, the
+  shipping service) are read off the policies `GET /api/ebay/policies`
+  already fetches, and "Create my policies…" now lets the seller choose
+  them — service, dispatch time, return window, return postage, immediate
+  pay — before agreeing; the create refuses any value eBay would.
+
+What eBay has no account-level home for stays in `users.prefs`:
+
+- **Best Offer limits.** "Allow offers" is still no-minimum by default. The
+  seller can add an auto-accept and an auto-decline limit as percentages of
+  the asking price; at publish they become eBay's
+  `BestOfferAutoAcceptPrice` and `MinimumBestOfferPrice` off that listing's
+  price (`ebay_trading._best_offer_prices`), fixed-price only, and a later
+  price edit on eBay does not move them. An inverted pair (decline at or
+  above accept) is refused at save, and dropped at publish rather than
+  failing it.
+- **Promoted Listings rate.** Auto-promote takes an optional ad rate. A
+  typed rate is used as given for every auto-promoted listing; blank keeps
+  the old behaviour — eBay's suggested rate, and no promotion where eBay
+  suggests none (`ebay_provider.auto_promote_settings`).
+- Package weight and size defaults are no longer shown: they only ever
+  applied to a draft the AI left at zero, which the prompt forbids, so the
+  per-listing Shipping card is the place for them. Rows that carry the keys
+  are still honoured.
+
 ### Selling abroad without posting abroad (eBay International Shipping)
 
 eBay International Shipping is eBay's own export programme for US sellers:
@@ -481,7 +541,8 @@ the seller posts every sale to eBay's US shipping hub with an ordinary
 domestic label, and eBay carries it the rest of the way — the international
 leg, customs, and any return from overseas are eBay's, and the buyer pays for
 that leg. Turning it on changes who a listing is sold to, so it is a switch
-the seller flips once, under Settings → *International shipping*, and it is
+the seller flips once, under Settings → Shipping → *Use eBay International
+Shipping on new listings*, and it is
 **off** until they do.
 
 The switch reaches the two places eBay reads it:
@@ -2252,7 +2313,7 @@ address included — pre-fills the package weight/dims from the matching
 listing, and buys the label through **EasyPost**:
 
 - **The seller's own EasyPost account.** Each seller pastes their EasyPost
-  API key once under Settings → *EasyPost shipping labels*. The key is proved
+  API key once under Settings → More → *Shipping labels*. The key is proved
   to work with one EasyPost read before it is stored, held Fernet-encrypted in
   `marketplace_accounts` like every other marketplace credential, erased with
   the account, and only ever shown back as its last four characters. Postage

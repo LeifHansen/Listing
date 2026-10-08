@@ -15,7 +15,7 @@ import { Composer } from "@/views/messages/Composer";
 export function MessagesView() {
   const {
     user, ebay, messages, threads, activeConversationId, openConversation,
-    sendMessage, messageSource, setMessageSource, openAuth, openListing, setView,
+    sendMessage, messageSource, setMessageSource, openAuth, openListing, openSettings,
   } = useApp();
 
   const unreadBySource = useMemo(() => {
@@ -106,7 +106,7 @@ export function MessagesView() {
               </p>
               {messages.reason === "not_connected" && (
                 <Button variant="soft" size="sm" className="mt-3"
-                  onClick={() => setView("settings")}>
+                  onClick={() => openSettings("ebay-account")}>
                   Connect a marketplace
                 </Button>
               )}

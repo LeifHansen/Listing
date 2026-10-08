@@ -483,7 +483,7 @@ const rise = {
 // One line of truth about the mirror: syncing / synced / not connected. Lives
 // in the hero so "is this my real store?" is answered before anything else.
 function MirrorStatus() {
-  const { user, ebay, storeSync, setView } = useApp();
+  const { user, ebay, storeSync, openSettings } = useApp();
   const mirror = storeMirrorView({
     user, connected: ebay.connected, ...storeSync,
   });
@@ -492,7 +492,7 @@ function MirrorStatus() {
     return (
       <button
         type="button"
-        onClick={() => setView("settings")}
+        onClick={() => openSettings("ebay-account")}
         className="inline-flex items-center gap-1.5 text-[13px] font-medium text-warning cursor-pointer hover:underline"
       >
         <Store size={14} aria-hidden /> Connect eBay in Settings to mirror your store here
@@ -614,7 +614,7 @@ function SoldRangePicker({ value, onChange }) {
 }
 
 export function Dashboard() {
-  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openListings, session, deleteListing, rotateListingPhoto, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
+  const { user, openAuth, listingsState, loadListings, startNew, openListing, setView, openSettings, openListings, session, deleteListing, rotateListingPhoto, metricsById, metricsStatus, ebay, loadEbayStatus, tokens, loadTokens } = useApp();
   const { confirm, toast } = useToast();
   // Every button on this screen that starts a listing — the hero, the three
   // quick actions, the "Listed today" tile, the empty states — is a seller
@@ -844,7 +844,7 @@ export function Dashboard() {
       if (fresh && !fresh.connected) {
         toast("Connect eBay first — these listings are live there, so filling "
           + "them in means updating them on eBay.", { kind: "warning" });
-        setView("settings");
+        openSettings("ebay-account");
         return;
       }
     }
@@ -1169,7 +1169,7 @@ export function Dashboard() {
                   eBay won’t share your views and impressions with this app yet.
                   <button
                     type="button"
-                    onClick={() => setView("settings")}
+                    onClick={() => openSettings("ebay-account")}
                     className="text-blue font-semibold cursor-pointer hover:underline"
                   >
                     Reconnect eBay to see them

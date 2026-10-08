@@ -388,9 +388,18 @@ def list_business_policies(access_token: str) -> dict:
                     "summary": _policy_summary(key, p),
                 }
                 # The shipping-service picker needs to know what each
-                # fulfillment policy actually ships with.
+                # fulfillment policy actually ships with, and Settings shows
+                # the terms a policy carries -- read off the same body eBay
+                # already returned, so the screen never describes a policy a
+                # second time beside the one it fetched.
                 if key == "fulfillment":
                     entry["services"] = [s["code"] for s in _policy_services(p)]
+                    entry["handling_days"] = _handling_days(p)
+                    entry["international_shipping"] = ships_international(p)
+                elif key == "return":
+                    entry["terms"] = _return_terms(p)
+                elif key == "payment":
+                    entry["immediate_pay"] = bool(p.get("immediatePay"))
                 out[key].append(entry)
             except Exception as exc:  # noqa: BLE001 - skip the one bad policy
                 log.warning("ebay: skipped an unreadable %s policy: %s", key, exc)
@@ -436,6 +445,77 @@ def location_keys_on_account(access_token: str) -> Optional[set[str]]:
                 if loc.get("merchantLocationKey")}
     except Exception:  # noqa: BLE001
         return None
+
+
+def _handling_days(p: dict) -> Optional[int]:
+    """The dispatch promise on a fulfillment policy, in days, or None when
+    the policy carries none readable. eBay stores it as {value, unit}; the
+    unit is DAY for every policy a seller can make in Seller Hub."""
+    period = p.get("handlingTime") or {}
+    try:
+        value = int(period.get("value"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _return_terms(p: dict) -> dict:
+    """What a return policy promises buyers: {accepted, days, payer}.
+
+    `days` is None when returns are not accepted (eBay drops the period),
+    and `payer` is eBay's own BUYER/SELLER word so the screen can translate
+    it once rather than guess from a name like "30-day returns".
+    """
+    accepted = bool(p.get("returnsAccepted", False))
+    period = p.get("returnPeriod") or {}
+    try:
+        days = int(period.get("value")) if accepted else None
+    except (TypeError, ValueError):
+        days = None
+    return {"accepted": accepted, "days": days,
+            "payer": str(p.get("returnShippingCostPayer") or "").upper()}
+
+
+def set_fulfillment_handling_time(access_token: str, policy_id: str,
+                                  days: int) -> dict:
+    """Change the dispatch promise on ONE of the seller's fulfillment policies.
+
+    eBay has no account-wide handling time: it lives on each shipping policy,
+    and every listing under the policy -- live ones included -- is measured
+    against it from the moment it changes, exactly as an edit in Seller Hub
+    would be. So this edits the policy the seller picked rather than caching
+    a number the app would then have to keep in step with eBay.
+
+    updateFulfillmentPolicy is a full-body PUT, not a patch: the policy is
+    read back first and sent again with only the handling time changed, so a
+    policy made in Seller Hub keeps every field this app never set. Read-only
+    fields eBay echoes (the id, warnings) are dropped because eBay refuses
+    them on the way back in. Any refusal surfaces with eBay's own words and
+    nothing is cached, so a failure is loud and leaves eBay untouched.
+    """
+    headers = {"Authorization": f"Bearer {access_token}",
+               "Accept": "application/json",
+               "Content-Type": "application/json"}
+    url = f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy/{policy_id}"
+    current = httpx.get(url, headers=headers, timeout=30)
+    if not current.is_success:
+        raise AccountApiError(
+            f"eBay wouldn't return shipping policy {policy_id} "
+            f"({current.status_code})",
+            description=current.text[:300], status=current.status_code)
+    body = {k: v for k, v in current.json().items()
+            if k not in ("fulfillmentPolicyId", "warnings")}
+    body["handlingTime"] = {"value": int(days), "unit": "DAY"}
+    resp = httpx.put(url, headers=headers, json=body, timeout=30)
+    if not resp.is_success:
+        raise AccountApiError(
+            f"eBay refused to change the handling time on policy {policy_id} "
+            f"({resp.status_code})",
+            description=resp.text[:300], status=resp.status_code)
+    log.info("ebay: handling time on fulfillment policy %s set to %s day(s)",
+             policy_id, days)
+    return {"handling_days": int(days), "name": body.get("name", ""),
+            "policy_id": policy_id}
 
 
 def _policy_summary(kind: str, p: dict) -> str:
@@ -542,14 +622,13 @@ def account_overview(access_token: str) -> dict:
     """Mirror the seller's most-updated eBay account settings, best-effort.
     Every section is fetched independently, so one failing leaves the rest
     intact (e.g. a seller with no business policies still gets locations)."""
-    out: dict = {"policies": {"fulfillment": [], "payment": [], "return": []},
-                 "locations": [], "programs": [], "payments": {},
+    # No policies here. The Settings screen reads them through
+    # /api/ebay/policies on the same page load, and the mirror never showed
+    # them -- so listing them again was three Account API calls per visit
+    # spent on a key nothing read.
+    out: dict = {"locations": [], "programs": [], "payments": {},
                  "programs_known": False, "locations_known": False,
                  "privileges": None}
-    try:
-        out["policies"] = list_business_policies(access_token)
-    except Exception:  # noqa: BLE001
-        pass
     try:
         resp = httpx.get(
             f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
@@ -689,6 +768,11 @@ def find_policy_for_service(access_token: str,
 # standing and can cost Top Rated status -- so it is a real commitment made on
 # the seller's behalf, and services.policy_terms shows it before it is made.
 DEFAULT_HANDLING_DAYS = 2
+# The dispatch windows eBay lets a seller promise on a US business policy.
+# The Settings screen offers these and the handling-time route refuses the
+# rest, so a typo can never reach eBay as a policy edit. 1 is what eBay
+# rewards in search; 0 is same-day.
+HANDLING_DAY_CHOICES = (0, 1, 2, 3, 4, 5, 10, 15, 20, 30)
 
 
 # eBay caps a business policy's name at 64 characters. The international
@@ -714,12 +798,16 @@ def fulfillment_policy_name(svc: dict, international_shipping: bool = False) -> 
             if svc["code"] != "USPSGroundAdvantage" else GROUND_POLICY_NAME)
 
 
-def fulfillment_body(svc: dict, international_shipping: bool = False) -> dict:
+def fulfillment_body(svc: dict, international_shipping: bool = False,
+                     handling_days: int = DEFAULT_HANDLING_DAYS) -> dict:
     """The exact JSON a fulfillment policy would be created with.
 
     Split out of ensure_service_policy so the terms the seller is shown come
     from the request itself rather than a second description of it. A preview
     that is written twice is a preview that eventually lies.
+
+    `handling_days` is the dispatch promise the seller chose in the terms
+    dialog; the default is the app's long-standing 2 days.
 
     `international_shipping` opts every listing under the policy into eBay
     International Shipping: the seller posts each sale to eBay's US hub with
@@ -733,7 +821,7 @@ def fulfillment_body(svc: dict, international_shipping: bool = False) -> dict:
         "name": fulfillment_policy_name(svc, international_shipping),
         "marketplaceId": config.EBAY_MARKETPLACE_ID,
         "categoryTypes": [{"name": "ALL_EXCLUDING_MOTORS_VEHICLES"}],
-        "handlingTime": {"value": DEFAULT_HANDLING_DAYS, "unit": "DAY"},
+        "handlingTime": {"value": int(handling_days), "unit": "DAY"},
         "shippingOptions": [{
             "costType": "CALCULATED",
             "optionType": "DOMESTIC",
@@ -750,11 +838,14 @@ def fulfillment_body(svc: dict, international_shipping: bool = False) -> dict:
 
 
 def ensure_service_policy(access_token: str, svc: dict, *,
-                          international_shipping: bool = False) -> dict:
+                          international_shipping: bool = False,
+                          handling_days: int = DEFAULT_HANDLING_DAYS) -> dict:
     """Find — or create — a fulfillment policy that ships `svc` (an entry from
-    SHIPPING_SERVICES): calculated cost, domestic, 2-day handling, and eBay
-    International Shipping on top when `international_shipping` is set.
-    Returns {id, name, created}."""
+    SHIPPING_SERVICES): calculated cost, domestic, the chosen handling time
+    (2 days unless the seller picked another), and eBay International
+    Shipping on top when `international_shipping` is set. An existing policy
+    for the service is reused as it stands -- its handling time is then
+    edited from Settings, not here. Returns {id, name, created}."""
     existing, known = find_policy_for_service(
         access_token, svc["code"],
         international_shipping=international_shipping)
@@ -764,7 +855,7 @@ def ensure_service_policy(access_token: str, svc: dict, *,
         raise PolicyLookupUnavailable(
             "We couldn't check your existing eBay shipping policies just now, "
             "so nothing was created. Try again in a moment.")
-    body = fulfillment_body(svc, international_shipping)
+    body = fulfillment_body(svc, international_shipping, handling_days)
     name = body["name"]
     resp = httpx.post(
         f"{config.EBAY_API_BASE}/sell/account/v1/fulfillment_policy",
@@ -799,6 +890,9 @@ def ensure_service_policy(access_token: str, svc: dict, *,
 # small seller wants on day one, not opinions worth hard-coding forever.
 DEFAULT_RETURN_DAYS = 30
 DEFAULT_RETURN_PAYER = "BUYER"
+# The return windows eBay US accepts on a policy that takes returns. 30 is
+# what most categories expect and what Top Rated Plus asks for.
+RETURN_DAY_CHOICES = (14, 30, 60)
 PAYMENT_POLICY_NAME = "Immediate payment (Thryft Shop)"
 def return_policy_name(days: int = DEFAULT_RETURN_DAYS) -> str:
     """The policy's name in Seller Hub. It has to carry the window it was

@@ -283,10 +283,13 @@ if (signedIn) {
 // The same question the dashboard one asks, on the screen where the answer is
 // editable. Settings shows the seller's saved defaults; if the read fails and
 // the panels render anyway, the app's own fallbacks appear as the seller's
-// choices -- and Save then posts them, so a failed READ becomes an edit
-// nobody made. Every panel here has a tri-state (loading / couldn't ask /
-// answered) covered directly in lib/settingsSections.test.js; this is the
-// part that unit test cannot see, which is whether the SCREEN is wired to it.
+// choices -- and a control that saves itself would then store them, so a
+// failed READ becomes an edit nobody made. Every panel here has a tri-state
+// (loading / couldn't ask / answered); this is the part a unit test cannot
+// see, which is whether the SCREEN is wired to it. There is no page-wide
+// Save any more: switches and selects apply as they change, and the typed
+// fields have a Save on their own card -- so the honest answer to an
+// unread default is that NO control for it is offered at all.
 const prefsOut = [];
 if (signedIn) {
   expected = /503|api\/prefs/;
@@ -309,13 +312,12 @@ if (signedIn) {
     }
     // The fallbacks, verbatim from the controls those panels render. Any of
     // them on screen means a value the seller never chose is being shown as
-    // one they did -- and it is one Save away from being stored as such.
+    // one they did -- and one tap away from being stored as such.
     // 'Allow offers on new listings' is a switch, which is the worst of
     // these to render after a failed read: an unchecked box is a statement
     // that this account is not taking offers, made having failed to find out.
-    for (const fallback of ['Off — only when I toggle Promote on a listing',
-                            'Median Pricing', 'Package weight — lb',
-                            'Allow offers on new listings']) {
+    for (const fallback of ['Auto-promote new listings', 'Quick Flip',
+                            'Let the AI decide', 'Allow offers on new listings']) {
       if (body.includes(fallback)) {
         prefsOut.push(`a default is shown as saved after a failed read: "${fallback}"`);
       }
@@ -326,18 +328,15 @@ if (signedIn) {
       prefsOut.push('no way to retry the read that failed');
     }
 
-    // And the Save button, which is the reason any of this matters. With the
-    // defaults unread and eBay unconnected there is nothing safe to send, so
-    // the honest answer is that nothing was saved. It used to say "Defaults
-    // saved" -- a green tick, on a screen saying it could not read them.
-    await page.getByRole('button', { name: 'Save defaults' }).first().click();
-    await settle(page);
-    const after = (await page.textContent('body')) || '';
-    if (/defaults saved/i.test(after)) {
-      prefsOut.push('Save reported "Defaults saved" having sent nothing');
-    }
-    if (!/nothing was saved/i.test(after)) {
-      prefsOut.push('Save sent nothing and did not say so');
+    // And the Save buttons, which are the reason any of this matters. The
+    // defaults could not be read, so there is nothing a Save could honestly
+    // send; the cards render the warning instead of their controls, so no
+    // Save for them exists at all -- a stronger claim than "pressing it says
+    // no", and the one the old page-wide "Save defaults" could not make.
+    const saves = await page.getByRole('button',
+      { name: /^Save (offer limits|ad rate|quantity)$/ }).count();
+    if (saves) {
+      prefsOut.push('a Save button was offered for defaults that could not be read');
     }
   } catch (e) {
     prefsOut.push(`settings outage: ${e.message.slice(0, 200)}`);

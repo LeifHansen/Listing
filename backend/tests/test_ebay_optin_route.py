@@ -120,7 +120,7 @@ def test_a_partial_failure_still_reports_what_was_created(connected, monkeypatch
                         lambda t, svc, **kw: {"id": "FP-1", "name": "Ship",
                                               "created": True})
     monkeypatch.setattr(main.ebay_auth, "ensure_payment_policy",
-                        lambda t: {"id": "PP-1", "name": "Pay", "created": False})
+                        lambda t, **kw: {"id": "PP-1", "name": "Pay", "created": False})
 
     def _refuse(t, **kw):
         raise main.ebay_auth.AccountApiError("no", status=400,
