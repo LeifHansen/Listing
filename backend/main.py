@@ -6396,21 +6396,54 @@ def save_listing(session_id: str, listing: Listing, request: Request) -> dict:
     return {"saved": True}
 
 
-# What a card-level control may change without opening the editor. Small on
-# purpose: a patch route that accepts anything is a full replace with extra
-# steps, and the caller can then send every field and reintroduce the very
-# lost update this exists to prevent.
+# What a card-level control may change without opening the editor, on a
+# listing at ANY stage. Small on purpose: a patch route that accepts anything
+# is a full replace with extra steps, and the caller can then send every field
+# and reintroduce the very lost update this exists to prevent.
 #
 # `listing_format` and `auction_start_price` are here for the format picker on
 # a draft card (frontend FormatQuickPick). They travel together: an auction is
 # priced by its starting bid, so a route that took the format but not the bid
 # would let a card switch a draft to a format it could not then finish -- and
 # the seller would have to open the editor anyway, which is the trip the
-# picker exists to save. `auction_duration` is deliberately NOT here; it
-# stays a full-editor field, defaulted to seven days.
+# picker exists to save.
 _PATCHABLE = ("fulfillment_policy_id", "category_id", "category_suggestion",
               "price", "quantity", "condition", "condition_descriptors",
               "listing_format", "auction_start_price")
+
+# What the EDITOR may change through the same door, one field at a time, on a
+# listing eBay does not have yet. This is the autosave's whole vocabulary: the
+# editor diffs what the seller typed against what the server holds and sends
+# the keys that differ (see LISTING_REDESIGN.md, Phase 0/1). Still an explicit
+# list, and still not a full replace -- the client has to NAME a field, and
+# nothing here is one the server owns.
+#
+# What is NOT here, and must never be: the photo set (`images`, `image_urls`)
+# and the video set have their own routes with their own guards; `sku`,
+# `source`, `ebay_listing_id`, `marketplaces` and the rest of
+# state.SERVER_OWNED_FIELDS are the publish/sync machinery's, and a client
+# echoing a stale copy of them is exactly how a live listing gets duplicated;
+# `missing_info`, `ai_confidence` and `enriched_at` are the draft's own
+# verdicts; `dirty_fields`, `remote_shadow` and `conflicts` are the sync's
+# bookkeeping; `status` is a column, not a field.
+_EDITOR_PATCHABLE = (
+    "title", "subtitle", "brand", "description", "condition_description",
+    "item_specifics",
+    "package_weight_lb", "package_weight_oz",
+    "package_length_in", "package_width_in", "package_height_in",
+    "purchase_price", "retail_price", "promote", "ad_rate_percent",
+    "auction_duration", "store_category_id", "store_category_name",
+    "etsy", "depop", "currency",
+)
+
+# The stages at which a listing is eBay's as much as the seller's. An edit to
+# one of these has to reach eBay in the same breath -- /quick-edit saves AND
+# revises, the editor's Update Live Listing does the same -- so a background
+# save that only writes the row would put the card and the live listing out of
+# step with nothing on either screen saying so. The card fields above stay
+# open here: they are what the grid has always been allowed to change on a
+# live listing, and the revise picks them up from dirty_fields.
+_PATCH_LIVE_STAGES = ("published", "live", "sold")
 
 
 @app.patch("/api/listings/{session_id}")
@@ -6441,11 +6474,19 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     if rec.get("user_id") and rec["user_id"] != deps.uid(request):
         raise HTTPException(404, "Listing not found")
 
-    changes = {k: v for k, v in (payload or {}).items() if k in _PATCHABLE}
+    allowed = _PATCHABLE + _EDITOR_PATCHABLE
+    changes = {k: v for k, v in (payload or {}).items() if k in allowed}
     if not changes:
         raise HTTPException(
-            400, "Nothing to change. Send one of: "
-                 + ", ".join(_PATCHABLE) + ".")
+            400, "Nothing to change. Send one of: " + ", ".join(allowed) + ".")
+    # A listing eBay is showing takes the card fields only. Refused rather
+    # than quietly saved: a save the seller is told happened, on a listing
+    # whose live copy never heard about it, is the worse outcome.
+    editor_only = [k for k in changes if k not in _PATCHABLE]
+    if editor_only and (rec.get("status") or "") in _PATCH_LIVE_STAGES:
+        raise HTTPException(
+            409, "This listing is live on eBay — changes to it go out with "
+                 "Update Live Listing, not a background save.")
     # Checked here rather than on the model, because the model is also what
     # every stored listing is loaded THROUGH: a validator that refused an
     # unrecognised format would turn a bad value already on disk into a
@@ -6461,33 +6502,58 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
                      "of: " + ", ".join(LISTING_FORMATS) + ".")
         changes["listing_format"] = fmt
 
-    merged = dict(rec.get("listing") or {})
-    merged.update(changes)
-    if "price" in changes:
-        # A markdown typed on a card counts exactly as much as one made in the
-        # editor or by the bulk button: it is the advice taken, and the
-        # suggestion has to stop asking for it. (Unconditional this would be a
-        # no-op — `merged` carries the stored stamp already — but the guard
-        # says which change this is here for.)
-        merged["price_lowered_at"] = recommender.price_drop_stamp(
-            rec.get("listing") or {}, merged.get("price"))
-    try:
+    def _apply(stored: dict) -> dict:
+        """Lay `changes` over the listing as stored, and nothing else."""
+        merged = dict(stored or {})
+        merged.update(changes)
+        if "price" in changes:
+            # A markdown typed on a card counts exactly as much as one made
+            # in the editor or by the bulk button: it is the advice taken,
+            # and the suggestion has to stop asking for it. (Unconditional
+            # this would be a no-op — `merged` carries the stored stamp
+            # already — but the guard says which change this is here for.)
+            merged["price_lowered_at"] = recommender.price_drop_stamp(
+                stored or {}, merged.get("price"))
         listing = Listing(**merged)
+        # Nothing in either allow-list is server-owned, so this changes
+        # nothing today. It is here so that the day a field is added to one
+        # list without being checked against the other, the stored value
+        # still wins.
+        marketplace_state.restore_server_fields(listing, stored or {})
+        # Marked so the next revise actually carries it: a live listing's
+        # shipping policy changed from a card has to reach eBay, and a
+        # revise only sends fields the seller is known to have edited.
+        listing.mark_dirty(*changes)
+        return listing.model_dump()
+
+    # Validated against the copy just read, so a bad value is a 400 with the
+    # model's own reason -- the locked write below cannot raise one, because
+    # db.mutate_listing_data turns any exception into "not saved".
+    try:
+        _apply(rec.get("listing") or {})
     except Exception as exc:  # noqa: BLE001 - a bad value is the caller's
         raise HTTPException(
             400, "That value isn't valid: " + _validation_summary(exc)) from exc
-    # Marked so the next revise actually carries it: a live listing's shipping
-    # policy changed from a card has to reach eBay, and a revise only sends
-    # fields the seller is known to have edited.
-    listing.mark_dirty(*changes)
 
-    storage.save_listing(session_id, listing)
-    data = listing.model_dump()
-    if db.enabled() and not db.upsert_listing(
-            session_id, data, status=_sticky_status(rec),
-            user_id=rec.get("user_id")):
+    # Written under the row lock, from the row as it is AT THAT MOMENT, like
+    # PATCH .../images/order. The plain read-then-upsert this replaced had a
+    # race with publish: a listing that went live between the read above and
+    # the write landed back in the row as the pre-publish copy, with no eBay
+    # id and -- `status=_sticky_status(rec)` reading the stale record -- as a
+    # draft. The next publish then found no id and listed it twice.
+    #
+    # `status=None`: a patch changes fields, never the stage. There is no
+    # sticky-status computation left to get wrong.
+    data = db.mutate_listing_data(session_id, _apply, status=None,
+                                  user_id=rec.get("user_id"))
+    if data is None:
         raise errors.StorageUnavailable(
             "Couldn't save that change just now. Try again in a moment.")
+    # Keep the on-disk copy in step; the row is the truth and was written.
+    try:
+        storage.save_listing(session_id, Listing(**data))
+    except Exception as exc:  # noqa: BLE001 - the DB row is the truth
+        log.warning("patch: disk mirror not updated for %s: %s", session_id, exc)
     return {"ok": True, "listing": data}
 
 
