@@ -91,6 +91,12 @@ SAFE_TO_REPEAT = {
     "backend.ebay_auth.ensure_inventory_location":
         "keyed on a merchant location key the app chooses, so eBay rejects a "
         "repeat rather than making a second location.",
+    "backend.ebay_auth.set_fulfillment_handling_time":
+        "replaces the handling time on ONE of the seller's shipping policies "
+        "with a full-body PUT of the policy eBay just returned. The same "
+        "number sent twice is the same policy, so a repeat changes nothing; "
+        "and nothing is cached here, so a lost answer is settled by the next "
+        "policies read, which shows whatever eBay now holds.",
     "backend.ebay_auth.opt_in_to_program":
         "opting into a program is idempotent — already opted in is not an "
         "error, and there is nothing to undo.",

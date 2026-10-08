@@ -83,8 +83,19 @@ def test_a_refused_lookup_is_unknown_too(ebay):
 
 
 def test_one_failing_section_still_leaves_the_others(ebay):
-    """The whole point of the best-effort shape: a seller with no business
-    policies still gets their locations, and vice versa."""
+    """The whole point of the best-effort shape: a seller whose programs
+    could not be read still gets their locations, and vice versa."""
     out = ebay(_Resp(200, {"locations": [{"merchantLocationKey": "HOME"}]}))
 
-    assert "policies" in out and "programs" in out
+    assert "locations" in out and "programs" in out
+
+
+def test_the_overview_no_longer_lists_policies(ebay, monkeypatch):
+    """Settings reads policies through /api/ebay/policies on the same page
+    load, and the mirror never showed them -- so the overview spending three
+    Account API calls on them was waste. Pinned so it stays gone."""
+    def _must_not_run(_t):
+        raise AssertionError("account_overview listed business policies again")
+    monkeypatch.setattr(ebay_auth, "list_business_policies", _must_not_run)
+    out = ebay(_Resp(200, {"locations": []}))
+    assert "policies" not in out

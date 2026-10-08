@@ -142,25 +142,38 @@ def describe(*, service_code: str = "",
              return_days: Optional[int] = None,
              return_payer: str = "",
              immediate_pay: bool = True,
-             international_shipping: bool = False) -> dict:
+             international_shipping: bool = False,
+             handling_days: Optional[int] = None) -> dict:
     """What creating the three policies would commit the seller to.
 
     Pure: it reads constants and builds request bodies. It makes no network
     call, so it cannot fail because eBay is unreachable and it costs no part
     of the account's daily quota — which matters, because the whole reason
     this exists is to be shown BEFORE the seller decides to spend either.
+
+    The answer also carries the choices the dialog may offer (`services`,
+    `choices`), so the screen that lets the seller change a term reads its
+    options from the same place the terms come from.
     """
     svc = (ebay_auth.service_by_code(service_code)
            or ebay_auth.service_by_code(FALLBACK_SERVICE))
     days = int(return_days if return_days is not None
                else ebay_auth.DEFAULT_RETURN_DAYS)
     payer = (return_payer or ebay_auth.DEFAULT_RETURN_PAYER).upper()
+    handling = int(handling_days if handling_days is not None
+                   else ebay_auth.DEFAULT_HANDLING_DAYS)
 
     fulfillment = ebay_auth.fulfillment_body(
-        svc, international_shipping=bool(international_shipping))
+        svc, international_shipping=bool(international_shipping),
+        handling_days=handling)
     payment = ebay_auth.payment_body(immediate_pay)
     returns = ebay_auth.return_body(days, payer)
     return {
+        "services": [{"code": s["code"], "label": s["label"],
+                      "note": s.get("note", "")}
+                     for s in ebay_auth.SHIPPING_SERVICES],
+        "choices": {"handling_days": list(ebay_auth.HANDLING_DAY_CHOICES),
+                    "return_days": list(ebay_auth.RETURN_DAY_CHOICES)},
         "kinds": {
             "fulfillment": {"title": "Postage",
                             "name": fulfillment["name"],
@@ -177,5 +190,6 @@ def describe(*, service_code: str = "",
         },
         "options": {"service_code": svc["code"], "return_days": days,
                     "return_payer": payer, "immediate_pay": immediate_pay,
-                    "international_shipping": bool(international_shipping)},
+                    "international_shipping": bool(international_shipping),
+                    "handling_days": handling},
     }

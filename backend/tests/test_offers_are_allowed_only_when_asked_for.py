@@ -14,10 +14,12 @@ answer offers on it. That is a decision, so:
   * an UNREADABLE preference is not a yes either. db.get_prefs RAISES on a
     read failure, and a database blip must not put every listing published
     during it up for negotiation.
-  * "no minimum" is the setting, so nothing may quietly acquire one.
+  * "no minimum" is the default, so nothing may quietly acquire one.
     MinimumBestOfferPrice and BestOfferAutoAcceptPrice are eBay's
     auto-decline and auto-accept thresholds; picking either on the seller's
     behalf would bin a buyer, or sell the item, at a number they never named.
+    They are sent only as the percentages the seller typed in Settings
+    (test_best_offer_limits_are_the_sellers_numbers).
   * a REVISE is not a new listing. The switch says "new listings", and
     flipping it must not walk back through a live store opening hundreds of
     existing listings to offers.
@@ -57,10 +59,12 @@ def test_offers_stay_off_when_the_switch_is_off(listing):
     assert "BestOffer" not in _xml(listing, best_offer=False)
 
 
-def test_a_listing_carries_no_minimum_offer(listing):
-    """"No minimum" is the whole setting. eBay auto-declines below
+def test_a_listing_carries_no_minimum_offer_unless_the_seller_set_one(listing):
+    """"No minimum" is the default. eBay auto-declines below
     MinimumBestOfferPrice and auto-accepts at BestOfferAutoAcceptPrice, and
-    this app names neither — every offer reaches the seller to answer."""
+    this app names neither unless the seller typed the limits in Settings
+    (test_best_offer_limits_are_the_sellers_numbers) — every offer reaches
+    the seller to answer."""
     body = _xml(listing, best_offer=True)
     assert "MinimumBestOfferPrice" not in body
     assert "BestOfferAutoAcceptPrice" not in body

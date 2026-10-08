@@ -5,7 +5,7 @@
  * the audit asks for the rename. What it also asks for, and what makes this a
  * module rather than a find-and-replace, is that the rename must not throw a
  * seller's settings away: renaming the key alone silently resets their theme,
- * their list/grid choice, their remove-background default and their publish
+ * their list/grid choice and their publish
  * targets on the first load after the release — and `bulk` holds the id of a
  * RUNNING batch, so losing it strands a job the app is still processing with
  * nothing on screen to watch it.

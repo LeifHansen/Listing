@@ -51,6 +51,7 @@ async function mount(over = {}) {
     closeShipping: vi.fn(),
     loadNotifications: vi.fn(),
     setView: vi.fn(),
+    openSettings: vi.fn(),
     easypost: { connected: true, test: false, key_hint: "abcd", loaded: true },
     ...over,
   };
@@ -123,7 +124,7 @@ describe("a seller without EasyPost", () => {
     expect(connect).toBeTruthy();
     await act(async () => { connect.click(); });
     expect(app.current.closeShipping).toHaveBeenCalled();
-    expect(app.current.setView).toHaveBeenCalledWith("settings");
+    expect(app.current.openSettings).toHaveBeenCalledWith("easypost");
   });
 
   it("is not told to connect before the shell has asked", async () => {

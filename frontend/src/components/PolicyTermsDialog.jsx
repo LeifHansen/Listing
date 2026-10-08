@@ -3,6 +3,7 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
+import { Field, Select, Toggle } from "@/components/ui/fields";
 
 /**
  * What "Create my policies" is about to promise on the seller's behalf.
@@ -18,9 +19,16 @@ import { Button } from "@/components/ui/Button";
  * agrees to them here.
  */
 export function PolicyTermsDialog({ open, onClose, onConfirm, options = {}, busy = false }) {
+  // The terms the seller may change before agreeing: the shipping service,
+  // the dispatch window, the return window and who pays return postage, and
+  // immediate payment. `options` from the caller are the starting point (the
+  // International shipping switch rides in that way); what is picked here
+  // layers over it, and the query — which keys the preview — is the merge.
+  const [choices, setChoices] = useState({});
+  const merged = useMemo(() => ({ ...options, ...choices }), [options, choices]);
   const query = useMemo(() => new URLSearchParams(
-    Object.entries(options).filter(([, v]) => v !== undefined && v !== ""),
-  ).toString(), [options]);
+    Object.entries(merged).filter(([, v]) => v !== undefined && v !== ""),
+  ).toString(), [merged]);
   // Keyed by the query rather than reset inside the effect: an answer to a
   // previous set of options must not be shown as if it described these ones.
   // Anything not keyed to the query in flight reads as still loading, which
@@ -44,13 +52,64 @@ export function PolicyTermsDialog({ open, onClose, onConfirm, options = {}, busy
   const kinds = state.status === "ready"
     ? ["fulfillment", "payment", "return"].map((k) => [k, state.data.kinds[k]])
     : [];
+  // The choices the server offers ride on the LAST answer, so the pickers
+  // stay on screen while a new preview loads instead of blinking away.
+  const [lastReady, setLastReady] = useState(null);
+  if (state.status === "ready" && state.data !== lastReady) setLastReady(state.data);
+  const shown = lastReady;
+  const pick = (key, value) => setChoices((c) => ({ ...c, [key]: value }));
+  const picked = shown ? { ...shown.options, ...choices } : choices;
+  const dayWord = (d) => (d === 0 ? "Same business day" : `${d} business day${d === 1 ? "" : "s"}`);
 
   return (
     <Dialog open={open} onClose={onClose} wide title="What these policies will say">
       <p className="text-sm text-ink-secondary">
         eBay shows these terms to buyers on every listing that uses the policy, and
-        holds you to them. You can change any of it later in Seller Hub.
+        holds you to them. Change any of it here before agreeing, or later in Seller Hub.
       </p>
+
+      {shown && (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <Field label="Shipping service">
+            <Select value={picked.service_code || ""}
+              onChange={(e) => pick("service_code", e.target.value)}>
+              {(shown.services || []).map((s) => (
+                <option key={s.code} value={s.code}>{s.label}{s.note ? ` — ${s.note}` : ""}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Dispatch time" note="A shipping policy you already have is reused as it is; change its handling time from Settings → Shipping.">
+            <Select value={String(picked.handling_days ?? "")}
+              onChange={(e) => pick("handling_days", Number(e.target.value))}>
+              {(shown.choices?.handling_days || []).map((d) => (
+                <option key={d} value={String(d)}>{dayWord(d)}</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Return window">
+            <Select value={String(picked.return_days ?? "")}
+              onChange={(e) => pick("return_days", Number(e.target.value))}>
+              {(shown.choices?.return_days || []).map((d) => (
+                <option key={d} value={String(d)}>{d} days</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Return postage">
+            <Select value={picked.return_payer || "BUYER"}
+              onChange={(e) => pick("return_payer", e.target.value)}>
+              <option value="BUYER">The buyer pays</option>
+              <option value="SELLER">I pay</option>
+            </Select>
+          </Field>
+          <Toggle
+            className="sm:col-span-2"
+            checked={picked.immediate_pay !== false}
+            onChange={(on) => pick("immediate_pay", on)}
+            label="Require immediate payment on Buy It Now"
+            note="The item stays on sale until the buyer actually pays, so an unpaid commitment can’t hold it."
+          />
+        </div>
+      )}
 
       {state.status === "loading" && (
         <p className="flex items-center gap-2 text-sm text-ink-secondary mt-5">

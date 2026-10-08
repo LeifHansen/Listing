@@ -219,3 +219,61 @@ def test_consent_is_refused_before_the_account_is_even_looked_at(
 
     connected.post("/api/ebay/ensure-all-policies", json={})
     assert saved == {}
+
+
+# ------------------------------------- the terms the seller can now change
+
+def test_the_preview_offers_the_choices_the_dialog_may_show(connected):
+    """The dialog lets the seller pick a service, a dispatch window, a
+    return window and who pays return postage. Those lists come from the
+    same answer as the terms, so the screen cannot offer a value the create
+    would refuse."""
+    body = connected.get("/api/ebay/policy-preview").json()
+    assert body["choices"]["handling_days"] == [0, 1, 2, 3, 4, 5, 10, 15, 20, 30]
+    assert body["choices"]["return_days"] == [14, 30, 60]
+    assert {s["code"] for s in body["services"]} >= {"USPSGroundAdvantage",
+                                                       "USPSPriority"}
+    assert body["options"]["handling_days"] == 2
+
+
+def test_the_dispatch_window_shown_is_the_one_chosen(connected):
+    body = connected.get("/api/ebay/policy-preview",
+                         params={"handling_days": 1}).json()
+    terms = " ".join(t["value"] for t in body["kinds"]["fulfillment"]["terms"])
+    assert "1 business day after payment" in terms
+    assert body["kinds"]["fulfillment"]["body"]["handlingTime"]["value"] == 1
+    assert body["options"]["handling_days"] == 1
+
+
+def test_the_options_the_seller_agreed_to_reach_the_create(connected, monkeypatch):
+    from backend import main
+
+    got = {}
+    monkeypatch.setattr(main.ebay_auth, "ensure_service_policy",
+                        lambda t, svc, **kw: got.update(ship=kw, svc=svc["code"])
+                        or {"id": "f", "name": "f", "created": True})
+    monkeypatch.setattr(main.ebay_auth, "ensure_payment_policy",
+                        lambda t, **kw: got.update(pay=kw)
+                        or {"id": "p", "name": "p", "created": True})
+    monkeypatch.setattr(main.ebay_auth, "ensure_return_policy",
+                        lambda t, **kw: got.update(ret=kw)
+                        or {"id": "r", "name": "r", "created": True})
+    r = connected.post("/api/ebay/ensure-all-policies", json={
+        "accept_terms": True, "service_code": "USPSPriority",
+        "handling_days": 1, "return_days": 60, "return_payer": "seller",
+        "immediate_pay": False})
+    assert r.status_code == 200, r.text
+    assert got["svc"] == "USPSPriority"
+    assert got["ship"]["handling_days"] == 1
+    assert got["pay"] == {"immediate_pay": False}
+    assert got["ret"] == {"days": 60, "payer": "SELLER"}
+
+
+def test_a_window_ebay_would_refuse_is_refused_before_any_policy_is_made(
+        connected, would_create):
+    for bad in ({"handling_days": 7}, {"return_days": 45},
+                {"return_payer": "NOBODY"}):
+        r = connected.post("/api/ebay/ensure-all-policies",
+                           json={"accept_terms": True, **bad})
+        assert r.status_code == 400, bad
+    assert would_create == [], "a policy was created around a refused option"
