@@ -207,11 +207,12 @@ describe("one grid of draft cards", () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(text()).toContain("Back to batch");         // the editor is up
 
-    // Save Draft.
-    const save = [...host.querySelectorAll("button")]
-      .find((b) => (b.textContent || "").includes("Save Draft"));
-    expect(save).toBeTruthy();
-    await act(async () => { save.click(); });
+    // Done. (It was "Save Draft": a draft saves itself now, and Done sends
+    // whatever the timer has not reached and closes -- see useListingForm.)
+    const done = [...host.querySelectorAll("button")]
+      .find((b) => b.getAttribute("aria-label") === "Done editing");
+    expect(done).toBeTruthy();
+    await act(async () => { done.click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     // Back on the batch screen — not the Sell overview, which announces

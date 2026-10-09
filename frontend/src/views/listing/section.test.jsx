@@ -48,4 +48,14 @@ describe("Section", () => {
     expect(host.querySelector("[data-body]")).not.toBeNull();
     expect(host.querySelector("button[aria-expanded]")).toBeNull();
   });
+
+  it("says what is inside a shut section, and stops once it is open", () => {
+    render(<Section id="more" title="More options" collapsible defaultOpen={false}
+      summary="Qty 3 · Promoted 8%">
+      <input data-body />
+    </Section>);
+    expect(host.querySelector("[data-section-summary]").textContent).toBe("Qty 3 · Promoted 8%");
+    act(() => host.querySelector("button[aria-expanded]").click());
+    expect(host.querySelector("[data-section-summary]")).toBeNull();
+  });
 });

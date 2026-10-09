@@ -32,12 +32,14 @@ import { InfoTip } from "@/components/ui/fields";
  *    nothing a filled or empty field did not already say, and are gone.
  *
  * Opening and closing: a section is open and stays open. Only a `collapsible`
- * section carries a chevron -- the description, whose AI-written body runs
- * to several hundred words, and (from Phase 3) "More options". The folding
- * every card used to offer was a way of coping with ten cards; with none,
- * nothing needs hiding. */
+ * section carries a chevron -- "More options", the fields most listings never
+ * touch. The folding every card used to offer was a way of coping with ten
+ * cards; with none, nothing needs hiding. A collapsible section may give a
+ * `summary`: one line, drawn beside the title only while it is closed, that
+ * says what is inside ("Qty 3 · Promoted 8%") so a seller never has to open
+ * it to learn whether they need to. */
 export function Section({ id, title, hint, state, flagged, expand, collapsible = false,
-                          defaultOpen = true, className, children }) {
+                          defaultOpen = true, summary, className, children }) {
   const [open, setOpen] = useState(defaultOpen);
   const ref = useRef(null);
 
@@ -62,8 +64,14 @@ export function Section({ id, title, hint, state, flagged, expand, collapsible =
   const heading = (
     <>
       <span className="flex-1 min-w-0 flex items-center gap-1.5">
-        <span className="font-bold text-[16px] text-ink truncate">{title}</span>
+        <span className="font-bold text-[16px] text-ink truncate shrink-0">{title}</span>
         {hint && <InfoTip text={String(hint)} />}
+        {collapsible && !open && summary && (
+          <span className="ml-1.5 text-[13px] font-normal text-ink-secondary truncate"
+            data-section-summary>
+            {summary}
+          </span>
+        )}
       </span>
       {state === "attention" && (
         <span

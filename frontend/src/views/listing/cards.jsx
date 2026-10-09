@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Search, Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
-  Sparkles, Loader2, Check,
+  Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
+  Sparkles, Loader2, Check, Pencil, ChevronDown, ChevronRight,
   Video as VideoIcon,
 } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
@@ -26,6 +26,7 @@ import {
 } from "./ShippingPolicySelect";
 import { StoreCategorySelect } from "./StoreCategorySelect";
 import { ConditionPicker } from "./ConditionPicker";
+import { CategorySuggestList } from "./CategorySuggestList";
 import { TITLE_MAX, MAX_PHOTOS, MAX_VIDEOS } from "./blockers";
 import { issuesFor } from "./publishShared";
 import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
@@ -63,7 +64,7 @@ function EbayPhotos({ urls }) {
 const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
 
 
-export function PhotosCard({ w, onEdit, onDelete }) {
+export function PhotosCard({ w, onEdit, onDelete, onRemoveVideo }) {
   const formImages = w.form.images || [];
   const { toast } = useToast();
 
@@ -224,8 +225,14 @@ export function PhotosCard({ w, onEdit, onDelete }) {
             {w.addingPhotos ? (w.addingStatus || "Adding…") : fileDrag ? "Drop to add" : "Add photos"}
           </span>
         </label>
+        {/* The video is one more tile at the end of the grid, not a card of
+            its own: it is one more thing shot of the item. What it needs
+            saying (eBay's wait, eBay's refusal) goes in a caption row under
+            the grid -- see VideoCaption. */}
+        <VideoTile w={w} />
       </div>
       )}
+      {!fromEbay && <VideoCaption w={w} onRemove={onRemoveVideo} />}
     </Section>
   );
 }
@@ -250,7 +257,11 @@ function videoSize(bytes) {
     : `${Math.max(1, Math.round(bytes / 1e3))} KB`;
 }
 
-export function VideoCard({ w, onRemove }) {
+// The tile: a dashed "Add video" at the end of the photo grid until there
+// is one, then the video itself in the same square. eBay allows one video
+// (MAX_VIDEOS), so with a video there the tile offers no picker at all --
+// nothing to click is the clearest way to say "one".
+function VideoTile({ w }) {
   const { toast } = useToast();
   const [fileDrag, setFileDrag] = useState(false);
   const dragDepth = useRef(0);
@@ -283,117 +294,127 @@ export function VideoCard({ w, onRemove }) {
   const onDragEnter = (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    // Stops the photo grid's own drop state lighting up underneath.
+    e.stopPropagation();
     dragDepth.current += 1;
     setFileDrag(true);
   };
-  const onDragLeave = () => {
+  const onDragLeave = (e) => {
+    e.stopPropagation();
     dragDepth.current = Math.max(0, dragDepth.current - 1);
     if (!dragDepth.current) setFileDrag(false);
   };
   const onDrop = (e) => {
     if (!hasFiles(e)) return;
     e.preventDefault();
+    e.stopPropagation();
     dragDepth.current = 0;
     setFileDrag(false);
     if (w.addingVideo) return;
     addVideo(Array.from(e.dataTransfer.files || []));
   };
 
-  return (
-    <Section
-      id="video" title="Video"
-      hint={`Optional. eBay allows ${MAX_VIDEOS} video per listing — MP4, up `
-        + "to a minute, 150MB. Upload only: eBay makes its own versions of "
-        + "whatever you send, so there's nothing here to trim or crop. eBay "
-        + "reviews every video, which is why it appears on the listing within "
-        + "48 hours rather than straight away."}
-      state={videos.length ? "complete" : "todo"}
-    >
-      {videos.length ? (
-        <div className="flex flex-col gap-3">
-          {videos.map((v) => (
-            <div key={v.file || v.status}
-                 className="flex flex-col sm:flex-row gap-4 items-start">
-              {v.url ? (
-                // Plain <video controls>: the browser's own player, the
-                // seller's own file. Nothing here uploads on play, and
-                // nothing re-encodes.
-                <video
-                  src={v.url} controls preload="metadata"
-                  className="w-full sm:w-64 rounded-tile bg-bg-sunken aspect-video object-contain"
-                />
-              ) : (
-                // A video already on the eBay listing whose bytes this app
-                // never held (an imported listing). There is nothing to play
-                // — eBay hosts it — and pretending otherwise is a dead player.
-                <div className="w-full sm:w-64 aspect-video rounded-tile bg-bg-sunken
-                                grid place-items-center text-ink-faint text-[12.5px] px-4 text-center">
-                  This listing’s video is hosted by eBay
-                </div>
-              )}
-              <div className="flex-1 min-w-0 flex flex-col gap-2">
-                <p className="text-[13px] text-ink">{v.note}</p>
-                {/* eBay's own words when it refused one — the seller has no
-                    other way to learn why, because the refusal lands days
-                    after they stopped looking. */}
-                {v.message && (
-                  <p className="text-[12.5px] text-ink-secondary">{v.message}</p>
-                )}
-                {v.size ? (
-                  <p className="text-[12px] text-ink-faint">{videoSize(v.size)}</p>
-                ) : null}
-                <div>
-                  <Button
-                    variant="ghost" size="sm"
-                    onClick={() => onRemove?.(v.file)}
-                    disabled={!v.file}
-                  >
-                    <X size={15} aria-hidden /> Remove video
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <label
-          onDragEnter={onDragEnter}
-          onDragOver={(e) => { if (hasFiles(e)) e.preventDefault(); }}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          className={cn(
-            "flex flex-col items-center justify-center gap-2 rounded-tile border-2",
-            "border-dashed border-line bg-bg-sunken/40 px-6 py-10 cursor-pointer",
-            "text-ink-secondary transition-colors duration-150",
-            "hover:border-blue/50 hover:text-blue",
-            fileDrag && "border-blue text-blue bg-blue-soft",
-            w.addingVideo && "pointer-events-none opacity-70",
-          )}
-        >
-          <input
-            type="file" accept={VIDEO_ACCEPT} className="sr-only"
-            disabled={w.addingVideo}
-            onChange={(e) => {
-              // Copied before the input is cleared: `value = ""` empties this
-              // very FileList.
-              addVideo(Array.from(e.target.files || []));
-              e.target.value = "";
-            }}
+  if (videos.length) {
+    const v = videos[0];
+    return (
+      <div
+        data-video-tile
+        className="relative rounded-tile overflow-hidden bg-bg-sunken aspect-square grid place-items-center"
+      >
+        {v.url ? (
+          // Plain <video controls>: the browser's own player, the seller's
+          // own file. Nothing here uploads on play, and nothing re-encodes.
+          <video
+            src={v.url} controls preload="metadata"
+            className="size-full object-contain bg-black/80"
           />
-          {w.addingVideo
-            ? <Loader2 size={22} className="animate-spin" aria-hidden />
-            : <VideoIcon size={22} aria-hidden />}
-          <span className="text-[13px] font-semibold">
-            {w.addingVideo ? "Uploading…"
-              : fileDrag ? "Drop to add" : "Add a video"}
+        ) : (
+          // A video already on the eBay listing whose bytes this app never
+          // held (an imported listing). There is nothing to play — eBay
+          // hosts it — and pretending otherwise is a dead player.
+          <span className="px-3 text-center text-[12px] text-ink-faint">
+            <VideoIcon size={20} className="mx-auto mb-1" aria-hidden />
+            This listing’s video is hosted by eBay
           </span>
-          <span className="text-[12px] text-ink-faint text-center">
-            MP4, up to a minute, 150MB. eBay reviews it before it shows on the
-            listing.
-          </span>
-        </label>
+        )}
+        <span className="absolute top-1.5 left-1.5 rounded-full bg-black/55 text-white text-[10.5px] font-bold px-1.5 py-0.5 pointer-events-none">
+          Video
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <label
+      data-video-tile
+      onDragEnter={onDragEnter}
+      onDragOver={(e) => { if (hasFiles(e)) { e.preventDefault(); e.stopPropagation(); } }}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      title={`Optional. eBay allows ${MAX_VIDEOS} video per listing — MP4, up to a minute, 150MB. eBay reviews it, so it appears on the listing within 48 hours rather than straight away.`}
+      className={cn(
+        "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",
+        "grid place-items-center cursor-pointer text-ink-secondary transition-colors duration-150",
+        "hover:border-blue/50 hover:text-blue",
+        fileDrag && "border-blue text-blue bg-blue-soft",
+        w.addingVideo && "pointer-events-none opacity-70",
       )}
-    </Section>
+    >
+      <input
+        type="file" accept={VIDEO_ACCEPT} className="sr-only"
+        disabled={w.addingVideo}
+        onChange={(e) => {
+          // Copied before the input is cleared: `value = ""` empties this
+          // very FileList.
+          addVideo(Array.from(e.target.files || []));
+          e.target.value = "";
+        }}
+      />
+      <span className="flex flex-col items-center gap-1 text-[12px] font-semibold">
+        {w.addingVideo
+          ? <Loader2 size={20} className="animate-spin" aria-hidden />
+          : <VideoIcon size={20} aria-hidden />}
+        {w.addingVideo ? "Uploading…" : fileDrag ? "Drop to add" : "Add video"}
+      </span>
+    </label>
+  );
+}
+
+// Under the grid, only while there is a video: what eBay is doing with it
+// (the 48-hour review, or its refusal in its own words), the size, and
+// Remove. Remove is disabled when the app never held the file -- an eBay-
+// hosted video on an imported listing is eBay's to remove.
+function VideoCaption({ w, onRemove }) {
+  const videos = w.videos || [];
+  if (!videos.length) return null;
+  return (
+    <div className="mt-3 flex flex-col gap-2" data-video-caption>
+      {videos.map((v) => (
+        <div key={v.file || v.status}
+          className="flex flex-wrap items-start gap-x-3 gap-y-1 text-[13px]">
+          <VideoIcon size={15} className="text-ink-faint shrink-0 mt-0.5" aria-hidden />
+          <span className="flex-1 min-w-0">
+            <span className="text-ink">{v.note}</span>
+            {/* eBay's own words when it refused one — the seller has no
+                other way to learn why, because the refusal lands days
+                after they stopped looking. */}
+            {v.message && (
+              <span className="block mt-0.5 text-[12.5px] text-ink-secondary">{v.message}</span>
+            )}
+            {v.size ? (
+              <span className="block text-[12px] text-ink-faint">{videoSize(v.size)}</span>
+            ) : null}
+          </span>
+          <Button
+            variant="ghost" size="sm"
+            onClick={() => onRemove?.(v.file)}
+            disabled={!v.file}
+          >
+            <X size={15} aria-hidden /> Remove video
+          </Button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -526,31 +547,11 @@ export function TitleCard({ w }) {
           />
         </Field>
         <RiskyWordNotes text={w.form.title} field="title" />
-        <div className="grid sm:grid-cols-2 gap-4">
-          {/* Until now this was collected and thrown away — the Trading
-              request never emitted a SubTitle, so a seller who typed one got
-              no subtitle and no explanation. It goes to eBay now, and a
-              subtitle is a paid listing upgrade there (eBay's SubtitleFee),
-              so the field says so rather than a charge turning up on their
-              eBay invoice for something they were never told about. */}
-          <Field label="Subtitle"
-            hint="(optional · eBay charges a small fee for this)"
-            help="Shown under your title in search results. eBay bills its
-                  subtitle fee when the listing goes live; leave it empty to
-                  avoid the charge.">
-            <Input
-              maxLength={55}
-              value={w.form.subtitle}
-              onChange={(e) => w.set("subtitle", e.target.value)}
-            />
-          </Field>
-          <Field label="Brand">
-            <Input
-              value={w.form.brand}
-              onChange={(e) => w.set("brand", e.target.value)}
-            />
-          </Field>
-        </div>
+        {/* Subtitle and Brand used to sit under the title. The subtitle is
+            a paid upgrade most listings skip and lives in More options now;
+            the brand is mirrored into the Brand item specific (see
+            renderAspect) and edited there, with a plain field under More
+            options for a category that has no Brand aspect. */}
       </div>
     </Section>
   );
@@ -591,70 +592,157 @@ function SuggestionRow({ chosen, onClick, left, right }) {
   );
 }
 
+/* The condition, in a section of its own under the title.
+ *
+ * It shared a card with the price, as the last row of the price grid, and
+ * was the field sellers missed most often -- a wrong condition is also the
+ * one eBay will not revise quietly and the one buyers open disputes over.
+ * ConditionPicker keeps the trading-card two-step (Graded / Ungraded, then
+ * the grading service or the card's grade), fed by eBay's own answer for
+ * the category. The note under it is one line until it is focused, because
+ * most listings leave it empty and a two-row box asked for prose every
+ * seller felt they had to write. */
+export function ConditionCard({ w }) {
+  const [noteFocus, setNoteFocus] = useState(false);
+  const note = w.form.condition_description || "";
+  return (
+    <Section
+      id="condition" title="Condition"
+      hint="Asked the way eBay asks it. The note is what a buyer should know — a mark, a missing button, a repair."
+      state={w.completion.condition}
+      flagged={w.fixTarget === "condition"}
+    >
+      <div className="flex flex-col gap-4">
+        <div className="grid sm:grid-cols-3 gap-4">
+          <ConditionPicker
+            conditions={w.categoryMeta.conditions}
+            /* When the lookup could not run, the list is the generic one,
+               not eBay's for this category — so a pick that looks fine
+               here can still come back as error 25021 at publish. The
+               picker says so beside the field. */
+            checked={w.categoryMeta.conditionsChecked !== false}
+            condition={w.form.condition}
+            descriptors={w.form.condition_descriptors}
+            fixLevel={w.fixLevel("condition")}
+            onChange={({ condition, condition_descriptors }) => {
+              w.set("condition", condition);
+              w.set("condition_descriptors", condition_descriptors);
+            }}
+          />
+        </div>
+        <Field label="Condition note" hint="(optional)"
+          help="What a buyer should know before they commit — a mark, a missing button, a repair.">
+          <Textarea
+            rows={noteFocus || note.length > 60 ? 3 : 1}
+            value={note}
+            placeholder="e.g. Light scuff on the left heel, otherwise clean"
+            onFocus={() => setNoteFocus(true)}
+            onBlur={() => setNoteFocus(false)}
+            onChange={(e) => w.set("condition_description", e.target.value)}
+            className="min-h-11 py-2.5"
+          />
+        </Field>
+      </div>
+    </Section>
+  );
+}
+
+/* The category, as a line: the path eBay files the item under, its leaf
+ * in bold, and a pencil.
+ *
+ * The old card had three boxes -- a free-text label, a numeric eBay id and
+ * a store shelf -- and a "Suggest categories" button under them. The id was
+ * the field a seller could not possibly know and the label was one eBay
+ * never reads; both exist only to carry what the picker chooses. So the
+ * line shows the path, the pencil swaps in the picker (the same list the
+ * draft cards use, CategorySuggestList, with a search box for a category
+ * the title alone does not reach), and the number is read-only under More
+ * options for anyone who needs to quote it. The store shelf moved there too:
+ * it is a different question (where this lives in the seller's own store),
+ * and most sellers have no store. */
 export function CategoryCard({ w }) {
   const s = w.catSuggestions;
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const path = (w.form.category_suggestion || "").trim();
+  const parts = path.split(">").map((x) => x.trim()).filter(Boolean);
+  const leaf = parts.pop() || "";
+  const id = String(w.form.category_id || "").trim();
+  const missing = !id;
+  // The blocker ring, on the line itself: there is no input to wear it.
+  const level = w.fixLevel("category");
+
+  const openPicker = () => {
+    setOpen(true);
+    w.suggestCategories();
+  };
+  const choose = (c) => {
+    w.chooseCategory(c);
+    setOpen(false);
+    setSearch("");
+  };
+  const runSearch = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (search.trim()) w.suggestCategories(search);
+  };
+
   return (
     <Section
       id="category" title="Category"
-      hint="The right category unlocks eBay's required fields"
+      hint="Where eBay files it — the category decides which details eBay asks for"
       state={w.completion.category} flagged={w.fixTarget === "category"}
     >
-      <div className="flex flex-col gap-4">
-        <div className="grid sm:grid-cols-[1fr_auto] gap-4">
-          <Field label="Category" help="A human-readable label — the numeric ID is what eBay uses.">
-            <Input
-              value={w.form.category_suggestion}
-              needsFix={w.fixLevel("category")}
-              onChange={(e) => w.set("category_suggestion", e.target.value)}
-            />
-          </Field>
-          <Field label="eBay Category ID" hint="(numeric)">
-            <Input
-              className="sm:w-40"
-              value={w.form.category_id}
-              needsFix={w.fixLevel("category")}
-              onChange={(e) => w.set("category_id", e.target.value)}
-              onBlur={() => w.loadCategoryMeta()}
-            />
-          </Field>
-        </div>
-        {/* The seller's own shelf, which is a different question from the
-            category above: that one says what the item IS (and decides which
-            fields eBay demands), this one says where it lives in their store.
-            Draws nothing at all for a seller without an eBay Store. */}
-        <StoreCategorySelect
-          value={w.form.store_category_id}
-          name={w.form.store_category_name}
-          onChange={(id, label) => {
-            w.set("store_category_id", id);
-            w.set("store_category_name", label);
-          }}
-        />
-        <div>
-          <Button variant="soft" onClick={w.suggestCategories}>
-            <Search aria-hidden /> Suggest eBay categories
-          </Button>
-        </div>
-        {s?.loading && <AIStatusInline message="Matching eBay categories…" />}
-        {s?.error && <p className="text-sm text-ink-secondary">{s.error}</p>}
-        {s?.items && (
-          s.items.length ? (
-            <div className="flex flex-col gap-2">
-              {s.items.map((c) => (
-                <SuggestionRow
-                  key={c.category_id}
-                  chosen={c.category_id === w.form.category_id}
-                  onClick={() => w.chooseCategory(c)}
-                  left={c.path || c.category_name}
-                  right={`#${c.category_id}`}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-ink-secondary">No category matches found. Try editing the title.</p>
-          )
-        )}
-      </div>
+      {open ? (
+        <CategorySuggestList
+          sugg={s}
+          currentId={id}
+          onChoose={choose}
+          onClose={() => { setOpen(false); setSearch(""); }}
+        >
+          {/* Reaching past the title's own matches: type what the item is
+              and press Enter. */}
+          <Input
+            value={search}
+            placeholder="Search eBay's categories…"
+            aria-label="Search eBay categories"
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={runSearch}
+            className="h-10 text-[14px] mb-1"
+          />
+        </CategorySuggestList>
+      ) : (
+        <button
+          type="button"
+          onClick={openPicker}
+          data-fix={level || undefined}
+          aria-label={missing ? "Pick a category" : `Category: ${path || `#${id}`} — change`}
+          className={cn(
+            "w-full flex items-center gap-2 text-left rounded-input border px-3.5 py-2.5",
+            "cursor-pointer transition-colors duration-150 hover:border-line-strong hover:bg-bg-sunken/60",
+            level === "true" ? "border-error ring-2 ring-error/25"
+              : level === "warn" || missing ? "border-warning ring-2 ring-warning/25"
+                : "border-line",
+          )}
+        >
+          <span className={cn("min-w-0 flex-1 text-[14px] leading-snug",
+            missing ? "text-warning font-semibold" : "text-ink")}>
+            {missing ? (
+              "No category yet — pick one"
+            ) : parts.length ? (
+              <>
+                <span className="text-ink-secondary">
+                  {parts.map((p) => <span key={p}>{p}<span aria-hidden> › </span></span>)}
+                </span>
+                <strong className="font-bold">{leaf}</strong>
+              </>
+            ) : (
+              <strong className="font-bold">{leaf || `Category #${id}`}</strong>
+            )}
+          </span>
+          <Pencil size={15} className="shrink-0 text-ink-faint" aria-hidden />
+        </button>
+      )}
     </Section>
   );
 }
@@ -1308,12 +1396,37 @@ export function PricingCard({ w }) {
     + "on a listing it's already showing. End it and relist to sell it "
     + "another way.";
 
+  // The comps live under a disclosure on the price row rather than behind
+  // a "Check market price" button with its results stacked under the whole
+  // card. Closed until there is something to show; opens itself the moment
+  // a lookup answers (state adjusted on the transition, so the rows are in
+  // the same commit as the data); a seller can fold it again. Pressing it
+  // with nothing loaded runs the lookup.
+  const [compsOpen, setCompsOpen] = useState(!!p);
+  const [prevP, setPrevP] = useState(p);
+  if (p !== prevP) {
+    setPrevP(p);
+    if (p) setCompsOpen(true);
+  }
+  const toggleComps = () => {
+    if (!p) { setCompsOpen(true); w.checkMarketPrice(); return; }
+    setCompsOpen((o) => !o);
+  };
+  const view = p && !p.loading && !p.error ? priceView(p) : null;
+  const lead = (p?.sources || [])[0];
+  const compsHead = !p ? "Check market price"
+    : p.loading ? "Finding comparable listings…"
+      : p.error ? "Couldn't check the market"
+        : view?.kind !== "estimate" ? "No comparable listings found"
+          : lead ? `Comps · $${lead.estimate} median of ${lead.count} listings`
+            : "Market price";
+
   return (
     <Section
-      id="pricing" title="Pricing & condition"
+      id="price" title="Price"
       hint="Buy It Now, auction, or both — check live comps so you never guess"
-      state={w.completion.pricing}
-      flagged={w.fixTarget === "price" || w.fixTarget === "condition"}
+      state={w.completion.price}
+      flagged={w.fixTarget === "price"}
     >
       <div className="flex flex-col gap-4">
         {/* The same three the draft cards offer, with the same names (see
@@ -1379,8 +1492,10 @@ export function PricingCard({ w }) {
           {/* The chosen duration used to be discarded: every auction went out
               as Days_7 whatever this said. It is sent now — and eBay charges
               an auction-length fee for the 10-day option, so the one choice
-              that costs money says so. */}
-          {isAuction ? (
+              that costs money says so. Only on the formats that take bids;
+              quantity, which took this cell on a Buy It Now, is under More
+              options with the other fields most listings leave alone. */}
+          {isAuction && (
             <Field label="Duration"
               help={settled ? settledWhy
                 : w.form.auction_duration === "DAYS_10"
@@ -1393,18 +1508,11 @@ export function PricingCard({ w }) {
                 {AUCTION_DURATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </Select>
             </Field>
-          ) : (
-            <Field label="Quantity">
-              <Input
-                type="number" min="1" inputMode="numeric"
-                value={w.form.quantity}
-                onChange={(e) => w.set("quantity", e.target.value)}
-              />
-            </Field>
           )}
           {/* Optional cost basis — auto-read from a RESALE sticker (thrift,
               consignment) when the photos showed one, or typed in Shop Mode.
-              Never required; powers profit once sold. */}
+              Never required; powers profit once sold. Beside the price on
+              purpose: the seller's call (LISTING_REDESIGN.md). */}
           <Field
             label={`You paid (${currency})`}
             help="What it cost you — used to show your profit when it sells."
@@ -1416,25 +1524,10 @@ export function PricingCard({ w }) {
               onChange={(e) => w.set("purchase_price", e.target.value)}
             />
           </Field>
-          {/* The MSRP off the item's OWN hang tag — a different fact from what
-              the seller paid, and the reason it is on this screen: a shirt
-              whose tag says $130 is not a $49 shirt. Read from the photos when
-              a brand tag was legible, and editable because a mis-read tag is
-              something only the person holding it can see is wrong. */}
-          <Field
-            label={`Retail on tag (${currency})`}
-            help="The brand's own price, read off the tag — the anchor for
-                  something still new. Not what you paid."
-          >
-            <Input
-              type="number" step="0.01" min="0" inputMode="decimal"
-              placeholder="optional"
-              value={w.form.retail_price}
-              onChange={(e) => w.set("retail_price", e.target.value)}
-            />
-          </Field>
         </div>
-        {/* What fraction of retail this is listed at. Shown only when both
+        {/* What fraction of retail this is listed at. The tag price itself
+            is edited under More options; the judgment it supports belongs
+            here, beside the price it is a judgment on. Shown only when both
             numbers exist, because that ratio is the whole judgment on a new
             item and it is the one nobody was making: a tagged piece drafted
             at a third of its tag reads as a bargain until you see the 38%.
@@ -1467,148 +1560,135 @@ export function PricingCard({ w }) {
           </p>
         )}
 
-        {/* Condition gets its own labeled row (not the last cell of the price
-            grid, where it was easy to miss) paired with its description.
-
-            Asked the way eBay asks it: one dropdown almost everywhere, and on
-            a trading card two steps — Graded or Ungraded, then the grading
-            service + grade (+ certification number) or the card condition on
-            eBay's ladder. ConditionPicker draws the second step from eBay's
-            own answer for the category, so the fields, their wording and the
-            ids behind them are eBay's (lib/conditions). The picker renders
-            one cell per answer into this grid. */}
-        <div className="flex flex-col gap-4 pt-1 border-t border-line">
-          <div className="grid sm:grid-cols-3 gap-4">
-            <ConditionPicker
-              conditions={w.categoryMeta.conditions}
-              /* When the lookup could not run, the list is the generic one,
-                 not eBay's for this category — so a pick that looks fine
-                 here can still come back as error 25021 at publish. The
-                 picker says so beside the field. */
-              checked={w.categoryMeta.conditionsChecked !== false}
-              condition={w.form.condition}
-              descriptors={w.form.condition_descriptors}
-              fixLevel={w.fixLevel("condition")}
-              onChange={({ condition, condition_descriptors }) => {
-                w.set("condition", condition);
-                w.set("condition_descriptors", condition_descriptors);
-              }}
-            />
-          </div>
-          <Field label="Condition description" hint="(what a buyer should know)">
-            <Textarea
-              rows={2}
-              value={w.form.condition_description}
-              onChange={(e) => w.set("condition_description", e.target.value)}
-            />
-          </Field>
-        </div>
-
-        <div>
-          <Button variant="soft" onClick={w.checkMarketPrice}>
-            <TrendingUp aria-hidden /> Check market price
-          </Button>
-        </div>
-
-        {p?.loading && <AIStatusInline message="Finding comparable listings…" />}
-        {p?.error && <p className="text-sm text-ink-secondary">{p.error}</p>}
-        {p && !p.loading && !p.error && (
-          priceView(p).kind !== "estimate" ? (
-            // "We couldn't check" and "the market has nothing like this" are
-            // different answers; the second one also tells the seller to
-            // rewrite a title that was never the problem. See lib/priceLookup.
-            <p className="text-sm text-ink-secondary">{priceView(p).message}</p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {/* WHERE TO OPEN, before what it is worth.
-                  An auction is started, not priced, and the two are different
-                  numbers: the comps below say what a comparable item fetches,
-                  and a no-reserve auction opened there gets no bids at all —
-                  while one opened at a dollar on an item nobody is hunting
-                  for sells for a dollar, because the sale ends at the floor
-                  when only one bidder turns up. The server works the opener
-                  out from the same measurement (services/pricing.auction_start:
-                  how DEEP the market is decides how far under it is safe to
-                  open) and says so in `basis`, so the seller can overrule it
-                  on purpose. Only on the formats that take bids, and only
-                  before eBay has the listing — a live auction's starting bid
-                  is not revisable. */}
-              {isAuction && opener && !settled && (
-                <SuggestionRow
-                  chosen={Number(w.form.auction_start_price) === opener.start_price}
-                  onClick={applyOpener}
-                  left={
-                    <>
-                      <strong>{opener.label}</strong> — {opener.basis} Click to
-                      open the bidding at ${opener.start_price?.toFixed(2)}.
-                    </>
-                  }
-                  right={`$${opener.start_price?.toFixed(2)}`}
-                />
-              )}
-              {(p.sources || []).map((src) => (
-                <div key={src.label} className="flex flex-col gap-2">
-                  {/* The row REPORTS the market (the median, as measured) and
-                      APPLIES a price (that median on the nearest .99). Rounding
-                      the reported figure instead would misstate the data; not
-                      rounding the applied one puts a whole-dollar price on the
-                      listing, which is the thing this rule exists to stop. */}
+        {/* The comps, under a disclosure line. */}
+        <div className="flex flex-col gap-2" data-comps>
+          <button
+            type="button"
+            onClick={toggleComps}
+            aria-expanded={compsOpen}
+            className={cn(
+              "inline-flex items-center gap-1.5 self-start text-[13px] font-semibold cursor-pointer",
+              "text-blue hover:underline underline-offset-2",
+            )}
+          >
+            {p?.loading
+              ? <Loader2 size={14} className="animate-spin" aria-hidden />
+              : <TrendingUp size={14} aria-hidden />}
+            {compsHead}
+            {p && !p.loading && (
+              <ChevronDown size={14} aria-hidden
+                className={cn("transition-transform duration-200", compsOpen && "rotate-180")} />
+            )}
+          </button>
+          {compsOpen && p && (
+            p.loading ? <AIStatusInline message="Finding comparable listings…" />
+            : p.error ? <p className="text-sm text-ink-secondary">{p.error}</p>
+            : view.kind !== "estimate" ? (
+              // "We couldn't check" and "the market has nothing like this"
+              // are different answers; the second one also tells the seller
+              // to rewrite a title that was never the problem. See
+              // lib/priceLookup.
+              <p className="text-sm text-ink-secondary">{view.message}</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {/* WHERE TO OPEN, before what it is worth.
+                    An auction is started, not priced, and the two are
+                    different numbers: the comps below say what a comparable
+                    item fetches, and a no-reserve auction opened there gets
+                    no bids at all — while one opened at a dollar on an item
+                    nobody is hunting for sells for a dollar, because the
+                    sale ends at the floor when only one bidder turns up. The
+                    server works the opener out from the same measurement
+                    (services/pricing.auction_start: how DEEP the market is
+                    decides how far under it is safe to open) and says so in
+                    `basis`, so the seller can overrule it on purpose. Only
+                    on the formats that take bids, and only before eBay has
+                    the listing — a live auction's starting bid is not
+                    revisable. */}
+                {isAuction && opener && !settled && (
                   <SuggestionRow
-                    chosen={compsApply && Number(w.form.price) === charmPrice(src.estimate)}
-                    onClick={compsApply ? () => applyPrice(src.estimate) : undefined}
+                    chosen={Number(w.form.auction_start_price) === opener.start_price}
+                    onClick={applyOpener}
                     left={
                       <>
-                        <strong>{src.label}</strong> — median of {src.count} listings
-                        (typical ${src.low}–${src.high}).
-                        {compsApply
-                          ? <> Click to price at ${charmPrice(src.estimate)?.toFixed(2)}.</>
-                          : <> This is what the item is worth, not where to start the bidding.</>}
+                        <strong>{opener.label}</strong> — {opener.basis} Click to
+                        open the bidding at ${opener.start_price?.toFixed(2)}.
                       </>
                     }
-                    right={`$${src.estimate}`}
+                    right={`$${opener.start_price?.toFixed(2)}`}
                   />
-                  {(src.sample || []).map((c, i) => (
+                )}
+                {(p.sources || []).map((src) => (
+                  <div key={src.label} className="flex flex-col gap-2">
+                    {/* The row REPORTS the market (the median, as measured)
+                        and APPLIES a price (that median on the nearest .99).
+                        Rounding the reported figure instead would misstate
+                        the data; not rounding the applied one puts a
+                        whole-dollar price on the listing, which is the thing
+                        this rule exists to stop. */}
                     <SuggestionRow
-                      key={i}
-                      chosen={compsApply && Number(w.form.price) === charmPrice(c.price)}
-                      onClick={compsApply ? () => applyPrice(c.price) : undefined}
+                      chosen={compsApply && Number(w.form.price) === charmPrice(src.estimate)}
+                      onClick={compsApply ? () => applyPrice(src.estimate) : undefined}
                       left={
                         <>
-                          {c.title}
-                          {c.condition && <em className="text-ink-secondary"> ({c.condition})</em>}
-                          {c.url && (
-                            <a
-                              href={c.url} target="_blank" rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="inline-flex items-center gap-0.5 ml-1.5 text-blue font-semibold"
-                            >
-                              view <ExternalLink size={11} aria-hidden />
-                            </a>
-                          )}
+                          <strong>{src.label}</strong> — median of {src.count} listings
+                          (typical ${src.low}–${src.high}).
+                          {compsApply
+                            ? <> Click to price at ${charmPrice(src.estimate)?.toFixed(2)}.</>
+                            : <> This is what the item is worth, not where to start the bidding.</>}
                         </>
                       }
-                      right={`$${c.price}`}
+                      right={`$${src.estimate}`}
                     />
-                  ))}
-                  {src.search_url && (
-                    <a
-                      href={src.search_url} target="_blank" rel="noopener noreferrer"
-                      className="text-sm font-semibold text-blue inline-flex items-center gap-1"
-                    >
-                      See all comparable listings on eBay <ExternalLink size={12} aria-hidden />
-                    </a>
-                  )}
-                </div>
-              ))}
-              {!p.suggestion.sold_data && (
-                <p className="text-xs text-ink-secondary">
-                  These are asking prices (what sellers want), not sold prices — pricing a
-                  little under the median usually sells faster.
-                </p>
-              )}
-            </div>
-          )
-        )}
+                    {(src.sample || []).map((c, i) => (
+                      <SuggestionRow
+                        key={i}
+                        chosen={compsApply && Number(w.form.price) === charmPrice(c.price)}
+                        onClick={compsApply ? () => applyPrice(c.price) : undefined}
+                        left={
+                          <>
+                            {c.title}
+                            {c.condition && <em className="text-ink-secondary"> ({c.condition})</em>}
+                            {c.url && (
+                              <a
+                                href={c.url} target="_blank" rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-0.5 ml-1.5 text-blue font-semibold"
+                              >
+                                view <ExternalLink size={11} aria-hidden />
+                              </a>
+                            )}
+                          </>
+                        }
+                        right={`$${c.price}`}
+                      />
+                    ))}
+                    {src.search_url && (
+                      <a
+                        href={src.search_url} target="_blank" rel="noopener noreferrer"
+                        className="text-sm font-semibold text-blue inline-flex items-center gap-1"
+                      >
+                        See all comparable listings on eBay <ExternalLink size={12} aria-hidden />
+                      </a>
+                    )}
+                  </div>
+                ))}
+                {!p.suggestion?.sold_data && (
+                  <p className="text-xs text-ink-secondary">
+                    These are asking prices (what sellers want), not sold prices — pricing a
+                    little under the median usually sells faster.
+                  </p>
+                )}
+                <button
+                  type="button" onClick={w.checkMarketPrice}
+                  className="self-start text-[12px] font-semibold text-ink-secondary hover:text-ink cursor-pointer underline underline-offset-2"
+                >
+                  Check again
+                </button>
+              </div>
+            )
+          )}
+        </div>
       </div>
     </Section>
   );
@@ -1644,39 +1724,94 @@ function capIssueFor(services, weightOz) {
   return null;
 }
 
-// The listing's shipping policy — an override of the Settings default, not a
-// separate setting. See ShippingPolicySelect for why there is only one of
-// these controls now.
-function ShippingPolicyPicker({ w }) {
+// The business policy's name for one of the three slots, or "not set".
+function policyName(data, key, field) {
+  return ((data?.policies?.[key] || []).find((p) => p.id === data?.selected?.[field]) || {}).name
+    || "not set";
+}
+
+/* How it ships, as one sentence: the shipping policy this listing goes out
+ * with (its own override, else the account default), the returns and
+ * payment policies beside it, and "change".
+ *
+ * The policy dropdown used to be the whole lower half of the card, and the
+ * policy names sat on the Publish card at the bottom of the page where
+ * nobody read them until a refusal sent them looking. Most listings ship
+ * on the account default and never touch this; the sentence says what will
+ * happen, and the dropdown appears only for the seller who presses change.
+ * The weight-cap and orphaned-policy warnings stay exactly as they were:
+ * both name a publish eBay will refuse. */
+function ShippingLine({ w }) {
   const { connected, policies, accountDefaultId } = useFulfillmentPolicies();
-  const chosen = w.form.fulfillment_policy_id || accountDefaultId;
-  const orphaned = usePolicyIsOrphaned(w.form.fulfillment_policy_id);
+  const { policiesData, openSettings } = useApp();
+  const [changing, setChanging] = useState(false);
+  const override = w.form.fulfillment_policy_id || "";
+  const chosen = override || accountDefaultId;
+  const orphaned = usePolicyIsOrphaned(override);
 
   if (!connected) return null;
 
+  const policy = policies.find((p) => p.id === chosen);
   // Weight caps come off the policy that will actually be used, so an
   // override naming a policy this account doesn't have has no services to
   // check — the orphan warning below is the thing to say instead.
-  const services = policies.find((p) => p.id === chosen)?.services || [];
+  const services = policy?.services || [];
   const weightOz = (parseFloat(w.form.package_weight_lb) || 0) * 16
     + (parseFloat(w.form.package_weight_oz) || 0);
   const capIssue = capIssueFor(services, weightOz);
+  // The other two policies, named only when they are set: "returns: not
+  // set" is a Settings problem, and the blockers say so when it matters.
+  const returns = policyName(policiesData, "return", "return_policy_id");
+  const payment = policyName(policiesData, "payment", "payment_policy_id");
+  const also = [
+    returns !== "not set" && `${returns} returns`,
+    payment !== "not set" && `${payment} payment`,
+  ].filter(Boolean);
 
   return (
-    <div className="flex flex-col gap-3 max-w-md">
-      <Field
-        label={
-          <span className="inline-flex items-center gap-1.5">
-            <Truck size={14} aria-hidden /> Shipping policy
-          </span>
-        }
-        help="The eBay shipping policy this listing goes out with — it's what decides the carrier service. Leave it on Default to follow Settings; USPS Ground Advantage is the cheapest for most packages, up to 70 lb."
-      >
-        <ShippingPolicySelect
-          value={w.form.fulfillment_policy_id}
-          onChange={(id) => w.set("fulfillment_policy_id", id)}
-        />
-      </Field>
+    <div className="flex flex-col gap-3" data-shipping-line>
+      <p className="text-[13.5px] text-ink flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        <Truck size={15} className="text-ink-faint shrink-0" aria-hidden />
+        <span>
+          Ships with{" "}
+          <strong className="font-semibold">
+            {policy ? policy.name : orphaned ? "a policy this account doesn’t have" : "your account default"}
+          </strong>
+          {policy?.summary && <span className="text-ink-secondary"> ({policy.summary})</span>}
+          {!override && policy && <span className="text-ink-faint"> · account default</span>}
+        </span>
+        {also.length > 0 && (
+          <span className="text-ink-secondary">· {also.join(" · ")}</span>
+        )}
+        <button
+          type="button"
+          onClick={() => setChanging((c) => !c)}
+          aria-expanded={changing}
+          className="text-blue font-semibold cursor-pointer hover:underline"
+        >
+          {changing ? "done" : "change"}
+        </button>
+      </p>
+      {changing && (
+        <div className="flex flex-col gap-2 max-w-md">
+          <Field
+            label="Shipping policy"
+            help="The eBay shipping policy this listing goes out with — it's what decides the carrier service. Leave it on Default to follow Settings; USPS Ground Advantage is the cheapest for most packages, up to 70 lb."
+          >
+            <ShippingPolicySelect
+              value={w.form.fulfillment_policy_id}
+              onChange={(id) => w.set("fulfillment_policy_id", id)}
+            />
+          </Field>
+          <button
+            type="button"
+            onClick={() => openSettings("shipping")}
+            className="self-start text-[13px] font-semibold text-blue cursor-pointer hover:underline"
+          >
+            Edit your policies in Settings
+          </button>
+        </div>
+      )}
       {orphaned && (
         <p className="text-[13px] font-medium text-warning flex gap-1.5" role="alert">
           <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
@@ -1697,8 +1832,8 @@ function ShippingPolicyPicker({ w }) {
 export function ShippingCard({ w }) {
   return (
     <Section
-      id="shipping" title="Shipping package"
-      hint="Weight, size, and how it ships — eBay needs a weight to publish"
+      id="shipping" title="Shipping"
+      hint="eBay needs a weight to publish. The box size is under More options."
       state={w.completion.shipping}
       flagged={w.fixTarget === "weight" || w.fixTarget === "shipping"}
     >
@@ -1721,50 +1856,75 @@ export function ShippingCard({ w }) {
             />
           </Field>
         </div>
-        <div className="grid grid-cols-3 gap-4 max-w-md">
-          {[
-            ["package_length_in", "Length (in)"],
-            ["package_width_in", "Width (in)"],
-            ["package_height_in", "Height (in)"],
-          ].map(([key, label]) => (
-            <Field key={key} label={label} hint="optional">
-              <Input
-                type="number" min="0" step="0.1" inputMode="decimal"
-                value={w.form[key]}
-                onChange={(e) => w.set(key, e.target.value)}
-              />
-            </Field>
-          ))}
-        </div>
-        <ShippingPolicyPicker w={w} />
+        <ShippingLine w={w} />
       </div>
     </Section>
   );
 }
 
+/* The description: three lines of it and "Edit", until the seller wants
+ * the whole thing.
+ *
+ * The AI drafts a full SEO body -- several hundred words in labelled
+ * sections -- and most sellers never change a word of it. An 18-row box
+ * made it the tallest thing on the page. It opens itself when a refusal or
+ * a fix-it target names the description (state adjusted on the transition,
+ * so the box is in the same commit as the flag), and stays open once the
+ * seller has opened it. */
 export function DescriptionCard({ w }) {
+  const refused = issuesFor(w.publishResult, "description");
+  const wants = w.fixTarget === "description" || refused.length > 0;
+  const [open, setOpen] = useState(wants);
+  const [prevWants, setPrevWants] = useState(wants);
+  if (wants !== prevWants) {
+    setPrevWants(wants);
+    if (wants) setOpen(true);
+  }
+  const text = w.form.description || "";
   return (
     <Section
-      id="description" title="Description" collapsible
-      hint="The story buyers read before they commit"
+      id="description" title="Description"
+      hint="The story buyers read before they commit. eBay doesn't require one — the title stands in."
       state={w.completion.description} flagged={w.fixTarget === "description"}
-      expand={issuesFor(w.publishResult, "description").length > 0}
+      expand={refused.length > 0}
     >
-      {/* The AI now drafts a full SEO body — several hundred words in
-          labelled sections — so a 7-row box showed a tenth of it at a time
-          and made every edit a scroll hunt. It is still resize-y. */}
-      <div className="flex flex-col gap-4">
-        <Textarea
-          rows={18}
-          value={w.form.description}
-          needsFix={w.fixTarget === "description"}
-          onChange={(e) => w.set("description", e.target.value)}
-        />
-        {/* Error 240 says "title AND/OR description", and the description is
-            where a payment method, a phone number or a guarantee actually
-            gets typed. Scanning only the title would leave half of it. */}
-        <RiskyWordNotes text={w.form.description} field="description" />
-      </div>
+      {open ? (
+        <div className="flex flex-col gap-3">
+          <Textarea
+            rows={14}
+            value={text}
+            needsFix={w.fixTarget === "description"}
+            onChange={(e) => w.set("description", e.target.value)}
+            autoFocus={!wants}
+          />
+          {/* Error 240 says "title AND/OR description", and the description
+              is where a payment method, a phone number or a guarantee
+              actually gets typed. Scanning only the title would leave half
+              of it. */}
+          <RiskyWordNotes text={text} field="description" />
+          <Button variant="ghost" size="sm" className="self-start" onClick={() => setOpen(false)}>
+            <ChevronDown size={15} className="rotate-180" aria-hidden /> Collapse
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {text.trim() ? (
+            <p
+              className="text-[14px] text-ink-secondary leading-relaxed whitespace-pre-line line-clamp-3"
+              data-description-preview
+            >
+              {text}
+            </p>
+          ) : (
+            <p className="text-[14px] text-ink-faint">No description yet.</p>
+          )}
+          <Button variant="ghost" size="sm" className="self-start" onClick={() => setOpen(true)}
+            aria-label={text.trim() ? "Edit the description" : "Write a description"}>
+            <Pencil size={14} aria-hidden /> {text.trim() ? "Edit" : "Write one"}
+            <ChevronRight size={15} aria-hidden />
+          </Button>
+        </div>
+      )}
     </Section>
   );
 }
@@ -1778,15 +1938,17 @@ const PROMO_MAX = 20;
 // to use eBay's own recommendation for the listing and fall back to this.
 const PROMO_SUGGESTED = 10;
 
-export function PromoteCard({ w }) {
+// The Promoted Listings controls, as a block inside More options: the
+// switch, and the ad-rate slider once it is on.
+function PromoteOptions({ w }) {
   const { ebay } = useApp();
   const on = !!w.form.promote;
   const rate = Number(w.form.ad_rate_percent) || 0;
   const price = Number(w.form.price) || 0;
   const fee = price > 0 && rate > 0 ? (price * rate) / 100 : 0;
   // The fee is a percentage of THIS listing's price, so it is in this
-  // listing's money. The price fields two panels up already label themselves
-  // with it; this one was formatting a pound fee with a dollar sign.
+  // listing's money. The price fields label themselves with it; this one
+  // was formatting a pound fee with a dollar sign.
   const currency = w.form.currency || "USD";
 
   const toggle = () => {
@@ -1796,96 +1958,210 @@ export function PromoteCard({ w }) {
   };
 
   return (
+    <div className="flex flex-col gap-4" data-promote>
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="font-semibold text-ink text-[14px]">Promote this listing</p>
+          <p className="text-[13px] text-ink-secondary mt-0.5">
+            eBay Promoted Listings Standard — higher in search, and you pay only if it sells through the promotion.
+          </p>
+        </div>
+        <button
+          type="button" role="switch" aria-checked={on} onClick={toggle}
+          aria-label="Promote this listing"
+          className={cn(
+            "relative shrink-0 h-7 w-12 rounded-full transition-colors duration-200 cursor-pointer",
+            on ? "bg-blue" : "bg-line-strong",
+          )}
+        >
+          <span className={cn(
+            "absolute top-0.5 left-0.5 size-6 rounded-full bg-white shadow-card transition-transform duration-200",
+            on && "translate-x-5",
+          )} />
+        </button>
+      </div>
+
+      {on && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.2 }}
+          className="flex flex-col gap-3"
+        >
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <p className="text-[13px] font-medium text-ink-secondary">Ad rate</p>
+              <p className="font-display text-[30px] font-bold text-ink tabular-nums leading-none mt-1">
+                {/* Fredoka has no tabular figures, so the digits change width
+                    as the slider steps. Reserve the widest value's box
+                    ("20.0") to keep the % from dancing mid-drag. */}
+                <span className="inline-block min-w-[1.95em]">{rate.toFixed(1)}</span>
+                <span className="text-lg align-top">%</span>
+              </p>
+            </div>
+            <div className="text-right">
+              {fee > 0 ? (
+                <>
+                  <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
+                  <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee, currency)}</p>
+                </>
+              ) : (
+                <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <input
+              type="range" min={PROMO_MIN} max={PROMO_MAX} step={0.5} value={rate}
+              onChange={(e) => w.set("ad_rate_percent", parseFloat(e.target.value))}
+              className="w-full accent-blue cursor-pointer h-2"
+              aria-label="Ad rate percentage"
+            />
+            <div className="flex justify-between items-center text-[11px] text-ink-faint mt-1 tabular-nums">
+              <span>{PROMO_MIN}%</span>
+              <button
+                type="button" onClick={() => w.set("ad_rate_percent", PROMO_SUGGESTED)}
+                className="font-semibold text-blue hover:underline cursor-pointer"
+              >
+                Suggested {PROMO_SUGGESTED}%
+              </button>
+              <span>{PROMO_MAX}%</span>
+            </div>
+          </div>
+
+          {!ebay.connected && (
+            <p className="text-[13px] font-medium text-warning flex gap-1.5" role="note">
+              <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
+              Connect eBay to run the promotion — we'll save this rate and apply it when you publish live.
+            </p>
+          )}
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
+/* More options: everything most listings never touch, behind one fold.
+ *
+ * Quantity, the subtitle, the brand, the store shelf, the price on the tag,
+ * the box size, promotion, and the eBay category number -- each used to be
+ * a row on one of the cards, where it cost the same attention as the price.
+ * The AI fills them or the account defaults cover them, and the summary
+ * line beside the heading says what is set so nobody opens this to find
+ * out. Nothing in here can block a publish, which is why it can be shut. */
+export function MoreOptions({ w }) {
+  const f = w.form;
+  const currency = f.currency || "USD";
+  const fmt = normalizeFormat(f.listing_format);
+  const isAuction = isAuctionFormat(fmt);
+  const qty = parseInt(f.quantity, 10) || 1;
+  const summary = [
+    !isAuction && qty > 1 && `Qty ${qty}`,
+    (f.subtitle || "").trim() && "Subtitle set",
+    f.store_category_name && `Shelf: ${f.store_category_name}`,
+    f.retail_price !== "" && Number(f.retail_price) > 0
+      && `Tag ${formatMoney(f.retail_price, currency)}`,
+    f.promote && `Promoted ${(Number(f.ad_rate_percent) || 0).toFixed(0)}%`,
+  ].filter(Boolean).join(" · ")
+    || "Quantity, subtitle, store shelf, box size, promotion";
+
+  return (
     <Section
-      id="promote" title="Promote"
-      hint="Boost this listing in eBay search — you only pay if it sells through the promotion"
-      state={on ? "complete" : "todo"}
+      id="more" title="More options" collapsible defaultOpen={false}
+      summary={summary}
     >
       <div className="flex flex-col gap-5">
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <p className="font-semibold text-ink text-[15px]">Promoted Listing</p>
-            <p className="text-[13px] text-ink-secondary mt-0.5">
-              eBay Promoted Listings Standard — more visibility, pay only per sale.
-            </p>
-          </div>
-          <button
-            type="button" role="switch" aria-checked={on} onClick={toggle}
-            aria-label="Promote this listing"
-            className={cn(
-              "relative shrink-0 h-7 w-12 rounded-full transition-colors duration-200 cursor-pointer",
-              on ? "bg-blue" : "bg-line-strong",
-            )}
-          >
-            <span className={cn(
-              "absolute top-0.5 left-0.5 size-6 rounded-full bg-white shadow-card transition-transform duration-200",
-              on && "translate-x-5",
-            )} />
-          </button>
+        <div className="grid sm:grid-cols-3 gap-4">
+          {!isAuction && (
+            <Field label="Quantity">
+              <Input
+                type="number" min="1" inputMode="numeric"
+                value={f.quantity}
+                onChange={(e) => w.set("quantity", e.target.value)}
+              />
+            </Field>
+          )}
+          {/* Until the SubTitle was emitted, a seller who typed one got no
+              subtitle and no explanation. It goes to eBay now, and a
+              subtitle is a paid listing upgrade there (eBay's SubtitleFee),
+              so the field says so rather than a charge turning up on their
+              eBay invoice for something they were never told about. */}
+          <Field label="Subtitle"
+            hint="(eBay charges a fee)"
+            help="Shown under your title in search results. eBay bills its
+                  subtitle fee when the listing goes live; leave it empty to
+                  avoid the charge."
+            className={isAuction ? "sm:col-span-2" : undefined}>
+            <Input
+              maxLength={55}
+              value={f.subtitle}
+              onChange={(e) => w.set("subtitle", e.target.value)}
+            />
+          </Field>
+          <Field label="Brand"
+            help="Mirrored into the Brand item specific. Most categories ask for it there.">
+            <Input
+              value={f.brand}
+              onChange={(e) => w.set("brand", e.target.value)}
+            />
+          </Field>
         </div>
 
-        {on && (
-          <motion.div
-            initial={{ opacity: 0, y: -6 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.2 }}
-            className="flex flex-col gap-4"
+        {/* The seller's own shelf, which is a different question from the
+            category: that one says what the item IS (and decides which
+            fields eBay demands), this one says where it lives in their
+            store. Draws nothing at all for a seller without an eBay Store. */}
+        <StoreCategorySelect
+          value={f.store_category_id}
+          name={f.store_category_name}
+          onChange={(id, label) => {
+            w.set("store_category_id", id);
+            w.set("store_category_name", label);
+          }}
+        />
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          {/* The MSRP off the item's OWN hang tag — a different fact from
+              what the seller paid: a shirt whose tag says $130 is not a $49
+              shirt. Read from the photos when a brand tag was legible, and
+              editable because a mis-read tag is something only the person
+              holding it can see is wrong. The Price section does the sum. */}
+          <Field
+            label={`Retail on tag (${currency})`}
+            help="The brand's own price, read off the tag — the anchor for
+                  something still new. Not what you paid."
           >
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <p className="text-[13px] font-medium text-ink-secondary">Ad rate</p>
-                <p className="font-display text-[34px] font-bold text-ink tabular-nums leading-none mt-1">
-                  {/* Fredoka has no tabular figures, so the digits change width
-                      as the slider steps. Reserve the widest value's box
-                      ("20.0") to keep the % from dancing mid-drag. */}
-                  <span className="inline-block min-w-[1.95em]">{rate.toFixed(1)}</span>
-                  <span className="text-xl align-top">%</span>
-                </p>
-              </div>
-              <div className="text-right">
-                {fee > 0 ? (
-                  <>
-                    <p className="text-[13px] font-medium text-ink-secondary">Fee if it sells</p>
-                    <p className="font-display text-lg font-bold text-blue tabular-nums mt-1">≈ {formatMoney(fee, currency)}</p>
-                  </>
-                ) : (
-                  <p className="text-[13px] text-ink-faint">Set a price to preview the fee</p>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <input
-                type="range" min={PROMO_MIN} max={PROMO_MAX} step={0.5} value={rate}
-                onChange={(e) => w.set("ad_rate_percent", parseFloat(e.target.value))}
-                className="w-full accent-blue cursor-pointer h-2"
-                aria-label="Ad rate percentage"
+            <Input
+              type="number" step="0.01" min="0" inputMode="decimal"
+              placeholder="optional"
+              value={f.retail_price}
+              onChange={(e) => w.set("retail_price", e.target.value)}
+            />
+          </Field>
+          {[
+            ["package_length_in", "Box length (in)"],
+            ["package_width_in", "Box width (in)"],
+            ["package_height_in", "Box height (in)"],
+          ].map(([key, label]) => (
+            <Field key={key} label={label}>
+              <Input
+                type="number" min="0" step="0.1" inputMode="decimal"
+                placeholder="optional"
+                value={f[key]}
+                onChange={(e) => w.set(key, e.target.value)}
               />
-              <div className="flex justify-between items-center text-[11px] text-ink-faint mt-1 tabular-nums">
-                <span>{PROMO_MIN}%</span>
-                <button
-                  type="button" onClick={() => w.set("ad_rate_percent", PROMO_SUGGESTED)}
-                  className="font-semibold text-blue hover:underline cursor-pointer"
-                >
-                  Suggested {PROMO_SUGGESTED}%
-                </button>
-                <span>{PROMO_MAX}%</span>
-              </div>
-            </div>
+            </Field>
+          ))}
+        </div>
 
-            <p className="text-[13px] text-ink-secondary">
-              Promoted listings show higher in search and on more pages. Nothing upfront —
-              eBay charges the {rate.toFixed(1)}% ad rate <strong className="text-ink">only</strong> when
-              your item sells through the promotion.
-            </p>
+        <PromoteOptions w={w} />
 
-            {!ebay.connected && (
-              <p className="text-[13px] font-medium text-warning flex gap-1.5" role="note">
-                <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden />
-                Connect eBay to run the promotion — we'll save this rate and apply it when you publish live.
-              </p>
-            )}
-          </motion.div>
+        {f.category_id && (
+          <p className="text-[12.5px] text-ink-faint" data-category-id>
+            eBay category <span className="font-display font-semibold tabular-nums">#{f.category_id}</span>
+            {" "}— picked under Category above.
+          </p>
         )}
       </div>
     </Section>

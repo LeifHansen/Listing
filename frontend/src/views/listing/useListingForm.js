@@ -170,6 +170,10 @@ export function useListingForm() {
   const [aiBusy, setAiBusy] = useState(null); // string[] of friendly messages, or null
   const [publishResult, setPublishResult] = useState(null);
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
+  // The publish bar's result panel has a close button; closing it also
+  // takes the refusal text off the sections that quote it (TitleCard,
+  // SpecificsCard), because the seller has said they have read it.
+  const dismissPublishResult = useCallback(() => setPublishResult(null), []);
   const [catSuggestions, setCatSuggestions] = useState(null);
   const [priceData, setPriceData] = useState(null);
   const [categoryMeta, setCategoryMeta] = useState(
@@ -420,13 +424,19 @@ export function useListingForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const suggestCategories = useCallback(async () => {
+  // `search` is the seller's own words, when they typed some into the
+  // picker; without it the lookup runs on the listing (brand, title and
+  // the category text it carries). The picker has no numeric-id box any
+  // more (LISTING_REDESIGN.md, "Category"), so a search is how a seller
+  // reaches a category the title alone does not suggest.
+  const suggestCategories = useCallback(async (search) => {
     if (!health.taxonomy_configured) {
-      setCatSuggestions({ error: "Automatic categories need eBay API credentials on the server. You can still enter a category ID manually." });
+      setCatSuggestions({ error: "Automatic categories need eBay API credentials on the server, and they aren't set up yet." });
       return;
     }
     const l = collect();
-    const query = [l.brand, l.title, l.category_suggestion].filter(Boolean).join(" ").trim();
+    const query = (typeof search === "string" && search.trim())
+      || [l.brand, l.title, l.category_suggestion].filter(Boolean).join(" ").trim();
     if (!query) { setCatSuggestions({ error: "Add a title or brand first." }); return; }
     setCatSuggestions({ loading: true });
     try {
@@ -1376,12 +1386,11 @@ export function useListingForm() {
       category: state("category", form.category_id.trim()),
       specifics: state("specifics",
         form.item_specifics.some((s) => s.name.trim())),
-      // Price and condition share the Pricing card; either one blocking
-      // flags it.
-      pricing: (blocked.has("price") || blocked.has("condition"))
-        ? "attention"
-        : (Number(form.price) > 0 || Number(form.auction_start_price) > 0
-          ? "complete" : "todo"),
+      // Price and condition are two sections now (LISTING_REDESIGN.md,
+      // "Condition"), so each answers for itself.
+      price: state("price",
+        Number(form.price) > 0 || Number(form.auction_start_price) > 0),
+      condition: state("condition", (form.condition || "").trim()),
       shipping: state("weight", weightOz(form) > 0),
       // eBay doesn't require a description — we fall back to the title — so
       // an empty one is grey, never a warning, and never counts toward the
@@ -1396,7 +1405,7 @@ export function useListingForm() {
     saveSaleFigures, relist,
     aiBusy,
     marketTargets, toggleMarketTarget, chipTargets,
-    publish, publishResult, runPreflight,
+    publish, publishResult, runPreflight, dismissPublishResult,
     fixTarget, setFixTarget, fixLevel,
     refine,
     autofillSpecifics,

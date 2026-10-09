@@ -1,23 +1,17 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Rocket, Save, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
-  RefreshCw, ExternalLink, Ban, Trash2,
+  Rocket, CheckCircle2, AlertTriangle, ArrowRight, Eye, ListChecks,
+  RefreshCw, ExternalLink, Ban, Sparkles, X,
 } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
-import { Section } from "./Section";
 import { blockerHeadline, marketNames } from "./blockers";
 import { MarketTargetChips, usePublishTargets } from "./publishShared";
-import { loadPolicies } from "./ShippingPolicySelect";
 import { Button } from "@/components/ui/Button";
 import { endedGraceDays, keptWhenEnded } from "@/lib/listingsView";
-
-function nameFor(data, key, field) {
-  return ((data.policies[key] || []).find((p) => p.id === data.selected[field]) || {}).name || "not set";
-}
 
 // An issue is blocking unless it says otherwise. Preflight marks its advice
 // with level "warn" (and, on newer servers, blocking:false); an eBay
@@ -27,7 +21,7 @@ const isBlocking = (it) => it.blocking !== false && it.level !== "warn";
 // One issue: what's wrong, how to fix it, and a button that jumps to the
 // field. `generic` issues have no field to jump to (an account-wide problem,
 // an eBay outage) so they get no button — and neither does `account`, which
-// is the same thing by another name: no card answers to it, so the button
+// is the same thing by another name: no section answers to it, so the button
 // scrolled nowhere and left the seller pressing "Fix this" at a page that
 // would not move.
 function IssueRow({ it, onFix }) {
@@ -90,15 +84,11 @@ function MultiResultPanel({ r, onFix }) {
   const entries = Object.entries(r.results || {});
   const anyFail = entries.some(([, res]) => !res.ok);
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      className={cn(
-        "rounded-tile border p-4",
-        anyFail ? "bg-warning-soft border-warning/30"
-          : "bg-success-soft border-success/25",
-      )}
-    >
+    <div className={cn(
+      "rounded-tile border p-4",
+      anyFail ? "bg-warning-soft border-warning/30"
+        : "bg-success-soft border-success/25",
+    )}>
       <p className="font-bold text-sm text-ink flex items-center gap-2">
         {anyFail
           ? <AlertTriangle size={17} className="text-warning" aria-hidden />
@@ -134,7 +124,7 @@ function MultiResultPanel({ r, onFix }) {
           </li>
         ))}
       </ul>
-    </motion.div>
+    </div>
   );
 }
 
@@ -186,123 +176,97 @@ function AskEbayWhy({ w }) {
   );
 }
 
-// Publish — the last card: what will apply, the two big buttons, and a
-// friendly "what to fix" panel when eBay pushes back.
-export function PublishCard({ w }) {
-  const { canPublishLive, ebay, openSettings, policiesData, setPoliciesData } = useApp();
+/* What the last publish, save, check or dry run came back with, in a
+ * panel that rides above the bar.
+ *
+ * It was the Publish card, the last of ten, at the bottom of the form: the
+ * one place a refusal was explained, and the one place a seller had to
+ * scroll to find. The bar is pinned, so the answer to "why isn't this on
+ * eBay?" is pinned with it now, with the Fix buttons that jump to the
+ * section eBay named. Closable: once read, it is in the way. */
+function ResultPanel({ w, onFix }) {
   const r = w.publishResult;
-
-  // Show which shipping/payment/return policies will apply.
-  useEffect(() => {
-    if (!ebay.connected || policiesData) return;
-    loadPolicies().then(setPoliciesData).catch(() => {});
-  }, [ebay.connected, policiesData, setPoliciesData]);
-
-  const onFix = (target) => {
-    // The fix lives on Settings: land on the card that holds it.
-    if (target === "location") { openSettings("shipping"); return; }
-    if (target === "policies") { openSettings("returns-payment"); return; }
-    w.setFixTarget(null);
-    // Re-set on the next frame so the flagged card re-triggers its scroll.
-    requestAnimationFrame(() => w.setFixTarget(target));
-  };
-
-  const multiOk = r?.multi && Object.values(r.results || {}).every((res) => res.ok);
-  const publishedOk = r && !r.error && !r.multi
+  if (!r) return null;
+  const multiOk = r.multi && Object.values(r.results || {}).every((res) => res.ok);
+  const publishedOk = !r.error && !r.multi
     && (r.published || r.draft || r.ebay_draft || r.dry_run || r.preflight);
-
+  const tone = r.error && !multiOk ? "warn" : "ok";
   return (
-    <Section
-      id="publish" title="Publish"
-      hint={w.isLive
-        ? "This listing is LIVE on eBay — Update Live Listing pushes your edits straight to it; End listing takes it off eBay"
-        : canPublishLive
-          ? "Save as Draft keeps it here only — nothing is sent to eBay; Publish Live makes it a live listing"
-          : "Dry-run mode: no eBay connection yet, so publishing generates the exact API payload to inspect"}
-      state={publishedOk || multiOk ? "complete" : "todo"}
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      role="region"
+      aria-label="Publish result"
+      data-publish-result
+      className={cn(
+        "relative rounded-card border-2 backdrop-blur shadow-float p-4 pr-11 bg-card/95",
+        "max-h-[45dvh] overflow-y-auto",
+        tone === "warn" ? "border-warning/50" : "border-success/45",
+      )}
     >
-      <div className="flex flex-col gap-5">
-        {r?.multi && <MultiResultPanel r={r} onFix={onFix} />}
-        {ebay.connected && policiesData && (
-          <p className="text-[13px] text-ink-secondary"
-            title={`Business policies applied to this listing — Shipping: ${nameFor(policiesData, "fulfillment", "fulfillment_policy_id")} · Payment: ${nameFor(policiesData, "payment", "payment_policy_id")} · Returns: ${nameFor(policiesData, "return", "return_policy_id")}`}>
-            <strong className="text-ink">Policies:</strong>{" "}
-            {nameFor(policiesData, "fulfillment", "fulfillment_policy_id")} ·{" "}
-            {nameFor(policiesData, "payment", "payment_policy_id")} ·{" "}
-            {nameFor(policiesData, "return", "return_policy_id")}{" "}
-            <button
-              type="button"
-              onClick={() => openSettings("shipping")}
-              className="text-blue font-semibold cursor-pointer hover:underline"
-            >
-              change
-            </button>
-          </p>
-        )}
+      <button
+        type="button"
+        onClick={w.dismissPublishResult}
+        aria-label="Close the publish result"
+        className="absolute top-3 right-3 grid place-items-center size-8 rounded-full cursor-pointer text-ink-faint hover:text-ink hover:bg-bg-sunken"
+      >
+        <X size={16} aria-hidden />
+      </button>
 
-        {/* Success states */}
-        {publishedOk && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-tile bg-success-soft border border-success/25 p-4 flex gap-3"
-          >
-            <CheckCircle2 size={20} className="text-success shrink-0 mt-0.5" aria-hidden />
-            <div className="text-sm text-ink min-w-0">
-              {/* Live publishes swap to the PublishedScreen; this banner covers
-                  draft saves, dry runs, and preflight results. */}
-              <p className="font-semibold">{r.message || "Done!"}</p>
-              {r.dry_run && (
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-xs font-semibold text-ink-secondary inline-flex items-center gap-1">
-                    <Eye size={12} aria-hidden /> View the exact eBay API payload
-                  </summary>
-                  <pre className="mt-2 text-xs bg-bg-sunken rounded-[10px] p-3 overflow-x-auto max-h-72">
-                    {JSON.stringify(r.payload, null, 2)}
-                  </pre>
-                  {r.export_path && (
-                    <p className="text-xs text-ink-faint mt-1.5">Saved to {r.export_path}</p>
-                  )}
-                </details>
-              )}
-            </div>
-          </motion.div>
-        )}
+      {r.multi && <MultiResultPanel r={r} onFix={onFix} />}
 
-        {/* Error → what to fix */}
-        {r?.error && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-tile bg-warning-soft border border-warning/30 p-4"
-          >
-            <p className="font-bold text-sm text-ink flex items-center gap-2">
-              <AlertTriangle size={17} className="text-warning" aria-hidden />
-              {r.message || "eBay couldn't publish this yet"}
-            </p>
-            <IssueList
-              issues={r.issues?.length
-                ? r.issues
-                : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]}
-              onFix={onFix}
-            />
-            {(r.issues || []).some((i) => i.target === "account") && (
-              <AskEbayWhy w={w} />
-            )}
-            {r.detail && (
-              <details className="mt-3">
-                <summary className="cursor-pointer text-xs font-semibold text-ink-secondary">
-                  eBay's exact message
+      {publishedOk && (
+        <div className="flex gap-3">
+          <CheckCircle2 size={20} className="text-success shrink-0 mt-0.5" aria-hidden />
+          <div className="text-sm text-ink min-w-0">
+            {/* Live publishes swap to the PublishedScreen; this covers draft
+                saves, dry runs, and preflight results. */}
+            <p className="font-semibold">{r.message || "Done!"}</p>
+            {r.dry_run && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs font-semibold text-ink-secondary inline-flex items-center gap-1">
+                  <Eye size={12} aria-hidden /> View the exact eBay API payload
                 </summary>
-                <pre className="mt-2 text-xs bg-bg-sunken rounded-[10px] p-3 overflow-x-auto max-h-60 whitespace-pre-wrap">
-                  {typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail, null, 2)}
+                <pre className="mt-2 text-xs bg-bg-sunken rounded-[10px] p-3 overflow-x-auto max-h-72">
+                  {JSON.stringify(r.payload, null, 2)}
                 </pre>
+                {r.export_path && (
+                  <p className="text-xs text-ink-faint mt-1.5">Saved to {r.export_path}</p>
+                )}
               </details>
             )}
-          </motion.div>
-        )}
-      </div>
-    </Section>
+          </div>
+        </div>
+      )}
+
+      {r.error && !r.multi && (
+        <div>
+          <p className="font-bold text-sm text-ink flex items-center gap-2">
+            <AlertTriangle size={17} className="text-warning" aria-hidden />
+            {r.message || "eBay couldn't publish this yet"}
+          </p>
+          <IssueList
+            issues={r.issues?.length
+              ? r.issues
+              : [{ target: "generic", title: r.message || "eBay rejected the listing", fix: typeof r.detail === "string" ? r.detail : "" }]}
+            onFix={onFix}
+          />
+          {(r.issues || []).some((i) => i.target === "account") && (
+            <AskEbayWhy w={w} />
+          )}
+          {r.detail && (
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs font-semibold text-ink-secondary">
+                eBay's exact message
+              </summary>
+              <pre className="mt-2 text-xs bg-bg-sunken rounded-[10px] p-3 overflow-x-auto max-h-60 whitespace-pre-wrap">
+                {typeof r.detail === "string" ? r.detail : JSON.stringify(r.detail, null, 2)}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+    </motion.div>
   );
 }
 
@@ -323,11 +287,46 @@ function MarketplaceChips({ w }) {
   );
 }
 
+/* "Ask AI" — the refine prompt, in the bar.
+ *
+ * It was a bar of its own under the page title, and the first thing on
+ * the page was a box asking what to change about a listing nobody had read
+ * yet. It is a button now, and the prompt opens when it is pressed. The
+ * input stays MOUNTED while closed (hidden, not unrendered): it is how the
+ * app's own tests recognise the editor, and a mounted input keeps whatever
+ * was half-typed when the seller closed it. */
+function AskAI({ w, open, onClose }) {
+  const [prompt, setPrompt] = useState("");
+  const apply = async () => {
+    const ok = await w.refine(prompt);
+    if (ok) { setPrompt(""); onClose(); }
+  };
+  return (
+    <div className={cn("flex items-center gap-2.5", !open && "hidden")} data-ask-ai>
+      <Sparkles size={17} className="text-blue shrink-0" aria-hidden />
+      <input
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") apply();
+          if (e.key === "Escape") onClose();
+        }}
+        placeholder='Ask AI to change anything — "make the title punchier, price at $45"'
+        aria-label="Refine listing with AI"
+        className="flex-1 min-w-0 h-10 bg-bg-sunken rounded-input border border-line px-3 text-[14px] placeholder:text-ink-faint focus:border-blue focus:outline-none focus:ring-2 focus:ring-blue/25"
+      />
+      <Button variant="primary" size="sm" onClick={apply} disabled={!prompt.trim()}>
+        Apply
+      </Button>
+    </div>
+  );
+}
+
 // PublishBar — the primary action, pinned to the bottom of the workflow so
-// Save/Publish is always one tap away instead of stranded at the end of a long
+// Publish is always one tap away instead of stranded at the end of a long
 // form. For a LIVE listing the actions flip to revise mode: Update Live
-// Listing + End listing (Save Draft disappears — on a published offer any
-// eBay save goes straight to the live listing, so a "draft" would mislead).
+// Listing + End listing (on a published offer any eBay save goes straight to
+// the live listing, so a "draft" would mislead).
 //
 // What the bar reports is ONE thing: what is stopping this listing from
 // reaching eBay. It used to count "fields left to finish" off the per-card
@@ -336,10 +335,15 @@ function MarketplaceChips({ w }) {
 // the listing wasn't ready. Now it lists w.blockers and nothing else: every
 // chip is a field eBay itself refuses the listing over, each carrying its own
 // label and jump target, and an empty list means Publish will go through.
+//
+// Delete, Check and Save to eBay drafts live in the header's ⋯ menu now
+// (LISTING_REDESIGN.md, "Sticky bar"): the bar holds the two things a
+// seller does on every listing, Done and Publish, plus Ask AI.
 export function PublishBar({ w }) {
-  const { canPublishLive, deleteListing, setSession, openListings,
-    health, listingsState } = useApp();
+  const { canPublishLive, setSession, openListings, openSettings,
+    health, listingsState, activeBulk } = useApp();
   const { confirm } = useToast();
+  const [askOpen, setAskOpen] = useState(false);
   const blockers = w.blockers;
   const ready = blockers.length === 0;
   // Never name a count without SAYING WHICH — these chips name each blocking
@@ -348,12 +352,22 @@ export function PublishBar({ w }) {
     w.setFixTarget(null);
     requestAnimationFrame(() => w.setFixTarget(target));
   };
+  const onFix = (target) => {
+    // The fix lives on Settings: land on the card that holds it.
+    if (target === "location") { openSettings("shipping"); return; }
+    if (target === "policies") { openSettings("returns-payment"); return; }
+    jumpTo(target);
+  };
 
   // A draft is saved on the way out, not discarded: autosave has been
   // sending edits all along (useListingForm) and this sends the rest, so
   // there is nothing to confirm. The question stays for a live listing --
   // its edits go to eBay with Update, never by a timer -- and for a draft
   // whose last save failed, where "discarded" is true again.
+  //
+  // Where Done lands: back on the batch when the draft was opened out of
+  // one (clearing the session alone brings the queue back -- it is still
+  // in memory), else the drafts; a live listing goes back to Manage.
   const askCancel = async () => {
     const mustConfirm = w.isLive || w.saveStatus === "off" || w.saveStatus === "error";
     if (mustConfirm) {
@@ -368,20 +382,8 @@ export function PublishBar({ w }) {
       await w.flushSave();
     }
     setSession(null);
+    if (activeBulk && !w.isLive) return;
     openListings(w.isLive ? "active" : "drafts");
-  };
-
-  const askDelete = async () => {
-    if (await confirm({
-      title: "Delete this listing?",
-      message: "It's permanently removed, photos included. This can't be undone.",
-      confirmLabel: "Delete",
-      danger: true,
-    })) {
-      await deleteListing(w.sessionId);
-      setSession(null);
-      openListings("drafts");
-    }
   };
 
   const askEnd = async () => {
@@ -428,7 +430,9 @@ export function PublishBar({ w }) {
         head: ready ? "Ready to publish"
           : `${many} ${n === 1 ? "is" : "are"} keeping this off ${names}`,
         sub: ready
-          ? `List it live on ${names}, or keep it as a draft for now.`
+          ? (canPublishLive
+            ? `List it live on ${names} — or press Done and come back to it later.`
+            : "Dry-run mode: no eBay connection yet, so Publish generates the exact API payload to inspect.")
           : "That's the whole list — fix them and it goes live.",
       };
 
@@ -454,14 +458,16 @@ export function PublishBar({ w }) {
     // have spent it. Measured, not guessed: `npm run reach` is the check.
     <div
       data-publish-bar
-      className="sticky bottom-[calc(6rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1"
+      className="sticky bottom-[calc(6rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1 flex flex-col gap-2"
     >
+      <ResultPanel w={w} onFix={onFix} />
       <div className={cn(
         "rounded-card border-2 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95",
         "flex flex-col gap-3",
         ready ? "border-success/45" : "border-warning/50",
       )}>
         <MarketplaceChips w={w} />
+        <AskAI w={w} open={askOpen} onClose={() => setAskOpen(false)} />
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <span className="flex items-center gap-3 min-w-0 flex-1">
           <span className={cn(
@@ -493,27 +499,25 @@ export function PublishBar({ w }) {
                     {b.label} <ArrowRight size={11} aria-hidden />
                   </button>
                 ))}
-                <span className="text-[12px] text-ink-faint">tap to jump — or save a draft</span>
+                <span className="text-[12px] text-ink-faint">tap to jump — or press Done and come back</span>
               </span>
             )}
           </span>
         </span>
         {/* flex-wrap, and shrink-0 only from sm up. Every child is a Button,
             and Button's base class is whitespace-nowrap, so with nowrap +
-            shrink-0 this row could not give way anywhere: at 375px the five
+            shrink-0 this row could not give way anywhere: at 375px five
             buttons measured 582px inside a 311px card, which put "Save Draft"
             54px past the right edge and "Publish Live" entirely off-screen.
             The app's primary action was unreachable on every phone size Apple
             sells, and the page scrolled sideways instead of saying so. */}
         <span className="flex flex-wrap items-center justify-end gap-2.5 w-full sm:w-auto sm:shrink-0">
+          <Button variant="ghost" size="md" onClick={() => setAskOpen((o) => !o)}
+            aria-expanded={askOpen} aria-label="Ask AI to change the listing">
+            <Sparkles aria-hidden className="text-blue" /> <span className="hidden sm:inline">Ask AI</span>
+          </Button>
           {w.isLive ? (
             <>
-              {w.ebayListingId && (
-                <Button variant="ghost" size="md" className="hidden sm:inline-flex"
-                  onClick={() => window.open(`https://www.ebay.com/itm/${w.ebayListingId}`, "_blank", "noopener")}>
-                  <ExternalLink aria-hidden /> View
-                </Button>
-              )}
               <Button variant="ghost" size="md" onClick={askCancel} aria-label="Cancel editing">
                 Cancel
               </Button>
@@ -526,28 +530,11 @@ export function PublishBar({ w }) {
             </>
           ) : (
             <>
-              {/* Right where a listing that won't publish leaves you — no
-                  hunting back through the list for its card. */}
               {/* "Done", not "Cancel": on a draft this saves what is left
                   and closes -- nothing is cancelled. (The live bar keeps
                   Cancel: there, leaving really does drop the edits.) */}
-              <Button variant="ghost" size="md" onClick={askCancel} aria-label="Done editing">
+              <Button variant="secondary" size="lg" onClick={askCancel} aria-label="Done editing">
                 Done
-              </Button>
-              <Button variant="ghost" size="md" onClick={askDelete}
-                aria-label="Delete this listing">
-                <Trash2 aria-hidden /> <span className="hidden sm:inline">Delete</span>
-              </Button>
-              {/* Reachable on a phone too: this is the safety net for the
-                  riskiest action in the app, and hiding it below the sm
-                  breakpoint left mobile sellers — most of them — with no way
-                  to check a listing before it goes live. */}
-              <Button variant="ghost" size="md" onClick={w.runPreflight}
-                aria-label="Check this listing before publishing">
-                <ListChecks aria-hidden /> <span className="hidden sm:inline">Check</span>
-              </Button>
-              <Button variant="secondary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("draft")}>
-                <Save aria-hidden /> Save Draft
               </Button>
               <Button variant="primary" size="lg" className="flex-1 sm:flex-none" onClick={() => w.publish("live")}>
                 <Rocket aria-hidden /> {liveLabel}

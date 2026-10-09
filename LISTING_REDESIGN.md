@@ -258,17 +258,30 @@ carrier from the policy in effect, "or Best Offer" from the account default via
 `lib/prefs.js`). Tests: `section.test.jsx`, `searchPreview.test.jsx`; `npm run reach`
 clean on phone and desktop.
 
-**Phase 3 — Consolidation.** Header `⋯` menu (new `components/ui/Menu.jsx`: button +
-absolutely positioned `role="menu"` list, outside-click + Esc; there is no popover
-primitive today), `MoreOptions`, `VideoTile` + caption row, category line +
-`CategorySuggestList`, Condition section, comps disclosure, publish panel in the bar,
-Ask AI in the bar, `PromoteCard` and `PublishCard` deleted. `npm run reach`.
-Tests to rewrite: `addVideo`, `theTagPriceIsNotWhatYouPaid` (mounts `PricingCard`,
-finds "Retail on tag"), `storeCategoryPicker` (mounts `CategoryCard`),
-`missingFieldColour` (condition `select[data-fix]` inside `PricingCard`),
-`sellingFormatOnDetail`, `theOpeningBidIsNotTheAskingPrice`, `priceRowsRoundTo99`
-(keep the comps strings "median of N listings", "Click to open the bidding at"),
-`oneGridOfDraftCards` ("Back to batch", "Save Draft" text), `sellIsTwoTabs`.
+**Phase 3 — Consolidation.** *Built.* The header is a back arrow, the title and
+one `⋯` menu (new `components/ui/Menu.jsx`: `role="menu"`, outside-click, Esc,
+arrow keys) holding New listing, Check with eBay, Save to eBay drafts, View on
+eBay and Delete (never while live); the five header buttons and the bar's
+Cancel/Delete/Check/Save Draft are gone. The video is an "Add video" tile at the
+end of the photo grid with a caption row under it. Condition is a section of its
+own (`completion.price` and `completion.condition` replace `pricing`). The price
+row keeps Cost beside it; "Check market price" is a disclosure that opens itself
+when the comps land. The category is a line (path, leaf bold, pencil) that swaps
+in `CategorySuggestList` (extracted from `CategoryQuickPick`, with a search box;
+`suggestCategories(query)`); the numeric id is read-only under More options.
+Shipping is the weight row and one sentence naming the policies in effect, with
+`change` opening the picker inline. The description is three lines and Edit.
+`MoreOptions` (collapsible `Section` with a `summary` line) holds quantity,
+subtitle, brand, store shelf, retail on tag, box size, promotion and the
+category number; `PromoteCard` and `PublishCard` are deleted. The sticky bar
+(`PublishBar.jsx`) holds Ask AI (the refine input, mounted and hidden), Done and
+Publish Live / Update + End, with the publish result panel above it inside
+`[data-publish-bar]`; `npm run reach` clean. Tests rewritten: `addVideo`,
+`theTagPriceIsNotWhatYouPaid`, `storeCategoryPicker`, `missingFieldColour`,
+`sellingFormatOnDetail`, `theOpeningBidIsNotTheAskingPrice`, `priceRowsRoundTo99`,
+`oneGridOfDraftCards`; new: `menu.test.jsx`, `editorHeader`, `categoryLine`,
+`publishBar`, `compsDisclosure`, `descriptionPreview`. Not in this phase: the
+keyboard shortcuts (Phase 4) and Duplicate (Phase 5), which join the menu then.
 
 **Phase 4 — Details chips + keyboard.** `views/listing/Details.jsx` (extract
 `SpecificsCard`), `ChipEditor`, Enter/Esc, `useEditorShortcuts`. Tests to rewrite:
