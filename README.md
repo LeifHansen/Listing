@@ -1218,6 +1218,15 @@ the remaining items as photo-only stub drafts so nothing is lost.
 
 ## Marketplaces (eBay · Etsy · Depop)
 
+> **The launch offers eBay alone.** Etsy and Depop are built, mapped and tested
+> as described below, but switched off: `MARKETPLACES_ENABLED` is left unset in
+> `fly.toml`, so `config.marketplaces_enabled()` answers `("ebay",)`, the
+> registry hands out no Etsy or Depop provider, `/api/marketplaces` lists eBay
+> only, and every Etsy/Depop surface in the frontend (Settings cards, publish
+> chips, editor panels, the crosspost) is hidden because it is drawn from that
+> roster. Set `MARKETPLACES_ENABLED='ebay,etsy'` (or `'all'`) to bring them
+> back — nothing is deleted. The marketing site's copy is eBay-only to match.
+
 Every marketplace is a provider behind one interface (`backend/marketplaces/`):
 OAuth connect, per-user credentials, preflight, publish, and end. `POST
 /api/publish` without a `marketplaces` field keeps the original eBay-only

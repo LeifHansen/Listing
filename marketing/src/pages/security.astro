@@ -15,7 +15,7 @@ const subprocessors = [
   { name: "Neon", purpose: "Managed Postgres — accounts, listings, token ledger", data: "Account and listing data" },
   { name: "Cloudflare R2", purpose: "Object storage for photos, and the origin marketplaces fetch images from", data: "Uploaded and optimized photos" },
   { name: "Fly.io", purpose: "Application hosting", data: "All traffic to the app" },
-  { name: "eBay, Etsy, Depop", purpose: "The marketplaces you choose to connect", data: "Only the listings you publish there" },
+  { name: "eBay", purpose: "The marketplace you choose to connect", data: "Only the listings you publish there" },
 ];
 ---
 <Base title="Security & privacy" description={description}>
@@ -156,8 +156,8 @@ const subprocessors = [
       <div class="rounded-card border border-line bg-card p-6 shadow-card">
         <h3 class="text-lg">What deletion cannot reach</h3>
         <p class="mt-3 text-ink-secondary">
-          Listings you already published stay live on eBay, Etsy or Depop under
-          your own seller account — they are yours, on their platform. End them
+          Listings you already published stay live on eBay under your own
+          seller account — they are yours, on their platform. End them
           there if you want them down. Deleting here also does not revoke the
           authorization on the marketplace's side; do that in their settings.
         </p>
