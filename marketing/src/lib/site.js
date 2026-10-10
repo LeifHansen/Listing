@@ -72,8 +72,8 @@ export const site = {
   name: "Thryft Shop",
   tagline: "Snap it · AI writes it · list it everywhere.",
   description:
-    "Turn product photos into complete, ready-to-publish listings on eBay, " +
-    "Etsy and Depop — individually or all at once.",
+    "Turn product photos into complete, ready-to-publish eBay listings — " +
+    "title, description, item specifics, category and price, from a photo.",
   // PLACEHOLDER — a company address on the real domain replaces this before
   // launch. The founder's personal inbox is deliberately not published here.
   supportEmail: "support@thryftshop.com",
@@ -150,15 +150,15 @@ export const footerNav = [
 /**
  * The marketplaces, and how available each one actually is.
  *
- * This is not aspirational. eBay is open to anyone. Etsy is approved at Etsy's
- * PERSONAL tier (fly.toml: ETSY_ACCESS_TIER = 'personal'), which seats a
- * handful of shops rather than everyone, so it ships as a beta. Depop's
- * Selling API is partner-gated and those credentials have not been granted
- * yet, so it is not connectable at all.
+ * This is not aspirational. eBay is open to anyone. The launch is eBay alone:
+ * Etsy and Depop are built but switched off in the app (fly.toml leaves
+ * MARKETPLACES_ENABLED unset) until we come back to them, so they are not
+ * advertised here either.
  *
  * Promising a marketplace a visitor cannot actually connect is the one thing
  * a page like this must not do — they would sign up for it and hit a wall.
- * Update `status` here when a tier changes and every page follows.
+ * When a marketplace is switched back on, add its entry here (the commented
+ * ones below are the last copy that ran) and every page follows.
  */
 export const marketplaces = [
   {
@@ -166,16 +166,17 @@ export const marketplaces = [
     status: "live",
     note: "Drafts or live listings, with business policies, category resolution and two-way sync.",
   },
-  {
-    name: "Etsy",
-    status: "beta",
-    note: "Draft, then activate — shop id and shipping defaults remembered. Open to a limited group of shops while we test it.",
-  },
-  {
-    name: "Depop",
-    status: "soon",
-    note: "Built and waiting on Depop partner access. It publishes from the same draft the moment that lands.",
-  },
+  // Withheld for the launch — see the note above.
+  // {
+  //   name: "Etsy",
+  //   status: "beta",
+  //   note: "Draft, then activate — shop id and shipping defaults remembered. Open to a limited group of shops while we test it.",
+  // },
+  // {
+  //   name: "Depop",
+  //   status: "soon",
+  //   note: "Built and waiting on Depop partner access. It publishes from the same draft the moment that lands.",
+  // },
 ];
 
 /** Badge styling per availability. `live` gets no badge — it is the default. */
@@ -225,10 +226,10 @@ export const pipeline = [
   {
     key: "publish",
     step: "05",
-    title: "List it everywhere",
+    title: "List it on eBay",
     blurb:
-      "Push to eBay, Etsy and Depop at once. Each marketplace succeeds or fails on its own, so one rejection never costs you the others — and you are told exactly which landed.",
-    detail: "eBay Trading API · Etsy · Depop",
+      "Push the finished draft to eBay as a draft or a live listing, with your business policies and category resolved for you — and you are told exactly what landed.",
+    detail: "eBay Trading API",
   },
 ];
 

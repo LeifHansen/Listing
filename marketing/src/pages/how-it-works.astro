@@ -8,7 +8,7 @@ import { marketplaces, marketplaceStatus, pipeline } from "../lib/site.js";
 
 const description =
   "From photo to published listing: how Thryft Shop optimizes your images, " +
-  "identifies the item with AI, and fans the result out to eBay, Etsy and Depop.";
+  "identifies the item with AI, and publishes the result to eBay.";
 
 /**
  * The pipeline as a HowTo.
@@ -103,8 +103,8 @@ const jsonLd = ({ ids, canonical }) => ({
 
   <Section
     eyebrow="Publishing"
-    title="One draft, every marketplace you've connected"
-    lede="Select the ones you want and publish once. Each is attempted independently, so a rejection on one never costs you the others."
+    title="One draft, straight to eBay"
+    lede="Review the draft and publish once — as an eBay draft or a live listing — with your business policies applied and the category resolved for you. More marketplaces will appear here as they are added."
   >
     <div class="mt-14 grid gap-5 sm:grid-cols-3">
       {marketplaces.map((m) => {

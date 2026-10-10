@@ -97,7 +97,7 @@ export async function GET(context) {
     `- The product itself: ${APP_URL} (separate origin from this site)`,
     `- Support: ${site.supportEmail}`,
     `- Platforms: web today; iOS in TestFlight beta; Android in development`,
-    `- Not affiliated with eBay, Etsy or Depop.`,
+    `- Not affiliated with eBay.`,
     "",
   ];
 
