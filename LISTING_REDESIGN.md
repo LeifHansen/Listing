@@ -237,34 +237,68 @@ ListHome (uploader + drafts) is unchanged apart from the Duplicate card action.
 live or sold listing; tests in `test_partial_listing_update.py` and
 `test_autosave_patches_the_editor_fields.py`, including the publish race.
 
-**Phase 1 — Autosave + Done.** `savedRef`, `lib/fieldDiff.js`, gate, `saveState`,
-`patchListing` on success, header indicator only, Done/back without confirm for saved
-drafts. Tests: debounce; skip while live/sold/aiBusy/publishing; flush before publish;
-baseline reset after refine/autofill/addImages; failure keeps the confirm.
+**Phase 1 — Autosave + Done.** *Built.* `lib/fieldDiff.js` (the allow-list mirrored
+from the server, and "same value" by meaning rather than representation); in
+`useListingForm` a `saved` baseline every writing path updates, a 1.5 s debounce
+sending only the changed keys through `PATCH /api/listings/{id}`, a gate on live,
+sold, AI-busy, uploading and publishing, a wait on the in-flight save before any
+publish, retries at 2/5/15 s with one warning, and a stop on the server's 409;
+`saveStatus`/`dirty`/`flushSave` exported. The header shows Unsaved / Saving… /
+Saved / Not saved yet; Exit, My drafts and the bar's Done (was Cancel) flush and
+leave without a confirm on a draft, and still confirm on a live listing or after a
+failed save. Tests: `lib/fieldDiff.test.js`, `views/listing/autosave.test.jsx`.
 
-**Phase 2 — `Section` and layout.** New `views/listing/Section.jsx` replacing
-`WorkflowCard` 1:1 (same `id, title, hint, state, flagged, expand`, drop `icon`; same
-transition rule and ref scroll; `collapsible` prop for Description/More options). Two-
-column grid on `lg+` (`lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]`, sticky left rail).
-`SearchPreview` + `loadPrefs()`. No field moves. `npm run reach`.
+**Phase 2 — `Section` and layout.** *Built.* `views/listing/Section.jsx` replaces
+`WorkflowCard` 1:1 (same `id`, `title`, `hint`, `state`, `flagged`, `expand`; the
+icon tile, the Complete/Optional chip and the per-card collapse are gone; `collapsible`
+only on Description); the form is one surface divided by rules. Two columns from
+`lg` up with a sticky left rail holding the photos (3–4 tile columns there) and the
+new `SearchPreview` (first photo, title cut at 80, condition, price or starting bid,
+carrier from the policy in effect, "or Best Offer" from the account default via
+`lib/prefs.js`). Tests: `section.test.jsx`, `searchPreview.test.jsx`; `npm run reach`
+clean on phone and desktop.
 
-**Phase 3 — Consolidation.** Header `⋯` menu (new `components/ui/Menu.jsx`: button +
-absolutely positioned `role="menu"` list, outside-click + Esc; there is no popover
-primitive today), `MoreOptions`, `VideoTile` + caption row, category line +
-`CategorySuggestList`, Condition section, comps disclosure, publish panel in the bar,
-Ask AI in the bar, `PromoteCard` and `PublishCard` deleted. `npm run reach`.
-Tests to rewrite: `addVideo`, `theTagPriceIsNotWhatYouPaid` (mounts `PricingCard`,
-finds "Retail on tag"), `storeCategoryPicker` (mounts `CategoryCard`),
-`missingFieldColour` (condition `select[data-fix]` inside `PricingCard`),
-`sellingFormatOnDetail`, `theOpeningBidIsNotTheAskingPrice`, `priceRowsRoundTo99`
-(keep the comps strings "median of N listings", "Click to open the bidding at"),
-`oneGridOfDraftCards` ("Back to batch", "Save Draft" text), `sellIsTwoTabs`.
+**Phase 3 — Consolidation.** *Built.* The header is a back arrow, the title and
+one `⋯` menu (new `components/ui/Menu.jsx`: `role="menu"`, outside-click, Esc,
+arrow keys) holding New listing, Check with eBay, Save to eBay drafts, View on
+eBay and Delete (never while live); the five header buttons and the bar's
+Cancel/Delete/Check/Save Draft are gone. The video is an "Add video" tile at the
+end of the photo grid with a caption row under it. Condition is a section of its
+own (`completion.price` and `completion.condition` replace `pricing`). The price
+row keeps Cost beside it; "Check market price" is a disclosure that opens itself
+when the comps land. The category is a line (path, leaf bold, pencil) that swaps
+in `CategorySuggestList` (extracted from `CategoryQuickPick`, with a search box;
+`suggestCategories(query)`); the numeric id is read-only under More options.
+Shipping is the weight row and one sentence naming the policies in effect, with
+`change` opening the picker inline. The description is three lines and Edit.
+`MoreOptions` (collapsible `Section` with a `summary` line) holds quantity,
+subtitle, brand, store shelf, retail on tag, box size, promotion and the
+category number; `PromoteCard` and `PublishCard` are deleted. The sticky bar
+(`PublishBar.jsx`) holds Ask AI (the refine input, mounted and hidden), Done and
+Publish Live / Update + End, with the publish result panel above it inside
+`[data-publish-bar]`; `npm run reach` clean. Tests rewritten: `addVideo`,
+`theTagPriceIsNotWhatYouPaid`, `storeCategoryPicker`, `missingFieldColour`,
+`sellingFormatOnDetail`, `theOpeningBidIsNotTheAskingPrice`, `priceRowsRoundTo99`,
+`oneGridOfDraftCards`; new: `menu.test.jsx`, `editorHeader`, `categoryLine`,
+`publishBar`, `compsDisclosure`, `descriptionPreview`. Not in this phase: the
+keyboard shortcuts (Phase 4) and Duplicate (Phase 5), which join the menu then.
 
-**Phase 4 — Details chips + keyboard.** `views/listing/Details.jsx` (extract
-`SpecificsCard`), `ChipEditor`, Enter/Esc, `useEditorShortcuts`. Tests to rewrite:
-`specificsRefusal` ("one ringed control" → "one ringed chip", "Show 4 more"),
-`aspectCheckboxes`, `specificsAreFilledNotOffered` ("Add specific", inferred
-`aria-label`), `generationFillsEveryAspect`.
+**Phase 4 — Details chips + keyboard.** *Built.* `views/listing/Details.jsx`
+holds the item specifics (extracted from `cards.jsx`) as chips: required first
+(an empty one amber, "Size — required"), the filled recommended with ✓/⚠, the
+next six empty recommended as ghosts ("+ Material"), then "Show N more"; after
+a refusal nothing is hidden, the chip eBay named is ringed red ("eBay refused
+this" / "Fix this to publish") and its editor is open. Tapping a chip swaps in
+`ChipEditor` under the chips with the aspect's own control (Select, Input with
+the `sugg-<slug>` datalist, or the tick-box list with its add-your-own box);
+Enter commits and moves forward to the next empty required chip, or closes
+when there is none; Esc closes. "eBay asked for these", "Your own specifics"
+and "Add specific" stay as they were. `useEditorShortcuts`: Ctrl/⌘+Enter runs
+`publish("live")`, standing down while the AI is busy or a dialog is up; the
+⋯ menu lists Publish Live / Update Live Listing first with the shortcut as its
+hint. Tests rewritten: `specificsRefusal`, `aspectCheckboxes`,
+`specificsAreFilledNotOffered` (and `generationFillsEveryAspect` passes
+unchanged — it tests the hook); new: `detailsChips`, `editorShortcuts`.
 
 **Phase 5 — Duplicate.** Route + test (strips eBay identity, copies R2 photos) + menu
 item + card action.

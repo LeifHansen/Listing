@@ -8,36 +8,44 @@
  * the seller had spent $130 on a $49 shirt, and the one number in the photo
  * that said this was not a $12 shirt never reached the pricing decision.
  *
- * So the card carries both, and it does the division the seller was left to do
- * in their head: what percentage of the tag is this listed at. That ratio is
- * the whole judgment on something nobody has worn, and a draft at a third of
- * its own tag reads as a bargain until the number is on the screen.
+ * So the editor carries both, and it does the division the seller was left to
+ * do in their head: what percentage of the tag is this listed at. That ratio
+ * is the whole judgment on something nobody has worn, and a draft at a third
+ * of its own tag reads as a bargain until the number is on the screen.
+ *
+ * Where they live: "You paid" beside the price, where the seller decided it
+ * should be; "Retail on tag" under More options, because most items have no
+ * readable tag -- and the ratio line stays with the price it judges
+ * (LISTING_REDESIGN.md, "Price" and "More options").
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { AppProvider } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
-import { PricingCard } from "./cards";
+import { MoreOptions, PricingCard } from "./cards";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let root;
 let host;
 
-/** The slice of useListingForm PricingCard reads, recording every set(). */
+/** The slice of useListingForm the two sections read, recording every set(). */
 function stub(sets, over = {}) {
   return {
     fixLevel: () => undefined,
     fixTarget: null,
     form: {
       title: "Scotch & Soda Amsterdam Oxford Shirt Mens L NWT",
-      price: "", quantity: 1, condition: "NEW",
+      price: "", quantity: 1, condition: "NEW", brand: "", subtitle: "",
       listing_format: "FIXED_PRICE", currency: "USD", auction_start_price: "",
       condition_description: "", purchase_price: "", retail_price: "",
-      item_specifics: [], accept_offers: false, ...over,
+      item_specifics: [], accept_offers: false, promote: false, ad_rate_percent: 0,
+      store_category_id: "", store_category_name: "", category_id: "15687",
+      package_length_in: "", package_width_in: "", package_height_in: "", ...over,
     },
-    completion: { pricing: "todo" },
+    completion: { price: "todo" },
     categoryMeta: { aspects: [], conditions: [], conditionsChecked: true },
     priceData: null,
     comps: null, compsBusy: false, isLive: false, publishResult: null,
@@ -48,10 +56,23 @@ function stub(sets, over = {}) {
 }
 
 function render(w) {
+  vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
+    ok: true, status: 200, headers: { get: () => "application/json" },
+    json: () => Promise.resolve({}), text: () => Promise.resolve("{}"),
+  })));
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  act(() => { root.render(<ToastProvider><PricingCard w={w} /></ToastProvider>); });
+  act(() => {
+    root.render(
+      <ToastProvider><AppProvider>
+        <PricingCard w={w} /><MoreOptions w={w} />
+      </AppProvider></ToastProvider>,
+    );
+  });
+  // More options is shut by default; the tag field is behind it.
+  const fold = host.querySelector('[data-section="more"] button[aria-expanded]');
+  act(() => fold.click());
   return host;
 }
 
@@ -67,6 +88,7 @@ afterEach(() => {
   host?.remove();
   root = null;
   host = null;
+  vi.unstubAllGlobals();
 });
 
 describe("the price on the tag", () => {

@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Sparkles, AlertTriangle, RotateCcw, CheckCircle2, ArrowRight, PlusCircle,
-  LayoutDashboard, ExternalLink, X, Trash2, ArrowLeft, ChevronDown, Camera,
+  AlertTriangle, CheckCircle2, ArrowRight, PlusCircle, LayoutDashboard,
+  ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
+  Rocket, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
+import { Menu } from "@/components/ui/Menu";
 import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
@@ -20,10 +22,13 @@ import { DraftsStrip } from "./listing/DraftsStrip";
 import { ImageEditor } from "./listing/ImageEditor";
 import { SoldArchive } from "./listing/SoldArchive";
 import { ConflictBanner } from "./listing/ConflictBanner";
-import { PublishCard, PublishBar } from "./listing/PublishCard";
+import { SearchPreview } from "./listing/SearchPreview";
+import { PublishBar } from "./listing/PublishBar";
+import { DetailsCard } from "./listing/Details";
+import { PUBLISH_SHORTCUT, useEditorShortcuts } from "./listing/useEditorShortcuts";
 import {
-  PhotosCard, VideoCard, TitleCard, CategoryCard, SpecificsCard, PricingCard,
-  ShippingCard, DescriptionCard, PromoteCard, EtsyCard, DepopCard,
+  PhotosCard, TitleCard, ConditionCard, CategoryCard, PricingCard,
+  ShippingCard, DescriptionCard, MoreOptions, EtsyCard, DepopCard,
 } from "./listing/cards";
 
 const stagger = { hidden: {}, show: { transition: { staggerChildren: 0.04 } } };
@@ -32,28 +37,37 @@ const rise = {
   show: { opacity: 1, y: 0, transition: { duration: 0.22, ease: "easeOut" } },
 };
 
-// RefineBar — the "AI, make it better" prompt pinned under the page title.
-function RefineBar({ w }) {
-  const [prompt, setPrompt] = useState("");
-  const apply = async () => {
-    const ok = await w.refine(prompt);
-    if (ok) setPrompt("");
-  };
+// SaveStatus — one quiet word in the header for what autosave is doing.
+//
+// A draft saves itself (useListingForm, "autosave"): every edit reaches the
+// server a moment after the seller stops typing, so the editor can be closed
+// without a "discard?" question and a crashed tab loses nothing. This is the
+// only place that says so. It stays silent until there is something to say
+// (a fresh open shows nothing), and it never shows "Saved" over a keystroke
+// that has not gone yet -- "dirty" wins (see saveStatus in the hook). On a
+// live or sold listing autosave is off and this draws nothing: those have
+// their own, explicit save, and the bar says so.
+function SaveStatus({ status }) {
+  if (status === "idle" || status === "off") return null;
+  const look = {
+    dirty: { text: "Unsaved changes", cls: "text-ink-faint", icon: null },
+    saving: { text: "Saving…", cls: "text-ink-secondary",
+              icon: <Loader2 size={13} className="animate-spin" aria-hidden /> },
+    saved: { text: "Saved", cls: "text-success",
+             icon: <CheckCircle2 size={13} aria-hidden /> },
+    error: { text: "Not saved yet — retrying", cls: "text-warning",
+             icon: <CloudOff size={13} aria-hidden /> },
+  }[status];
+  if (!look) return null;
   return (
-    <div className="bg-card border border-line rounded-card shadow-card p-2.5 pl-4 flex items-center gap-3">
-      <Sparkles size={18} className="text-blue shrink-0" aria-hidden />
-      <input
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
-        placeholder='Ask AI to change anything — "make the title punchier, price at $45"'
-        aria-label="Refine listing with AI"
-        className="flex-1 min-w-0 bg-transparent text-[15px] placeholder:text-ink-faint focus:outline-none"
-      />
-      <Button variant="primary" size="md" onClick={apply} disabled={!prompt.trim()}>
-        Apply
-      </Button>
-    </div>
+    <span
+      role="status"
+      aria-live="polite"
+      data-save-status={status}
+      className={cn("inline-flex items-center gap-1 text-[12.5px] font-semibold", look.cls)}
+    >
+      {look.icon}{look.text}
+    </span>
   );
 }
 
@@ -182,98 +196,51 @@ function PublishedScreen({ w }) {
   );
 }
 
-// The fields most listings never need to touch (the AI fills them, seller
-// defaults cover the rest) live behind this fold, keeping the visual weight on
-// photos / title / price / condition / category. It opens itself whenever
-// something inside actually needs the seller: an eBay fix-it target, a missing
-// required field, or AI-inferred specifics awaiting review.
-const FOLDED_TARGETS = ["specifics", "weight", "shipping", "description"];
-
-function MoreDetails({ w, children }) {
-  const reviewCount = (w.form.item_specifics || [])
-    .filter((s) => (s.value || "").trim() && s.confidence === "medium").length;
-  // What's behind the fold that a seller can't afford to leave folded: a card
-  // eBay is blocking the listing over, or an AI guess nobody has looked at.
-  const blocking = ["specifics", "shipping", "description"]
-    .filter((k) => w.completion[k] === "attention");
-  const auto = blocking.length > 0 || reviewCount > 0;
-  // null = follow `auto`. Seeded from the current fix target so a fold that
-  // mounts already flagged starts open.
-  const [manual, setManual] = useState(
-    () => (FOLDED_TARGETS.includes(w.fixTarget) ? true : null));
-  const open = manual === null ? auto : manual;
-  // An eBay fix-it target that lives behind the fold forces it open. This is
-  // React's "adjust state when a prop changes" recipe — the previous target is
-  // tracked in state and the comparison happens DURING render — rather than an
-  // effect, so the fold (and the flagged card inside it, which scrolls itself
-  // into view on mount) is already open in the commit that reacts to the
-  // target, instead of one painted frame later.
-  const [prevFixTarget, setPrevFixTarget] = useState(w.fixTarget);
-  if (w.fixTarget !== prevFixTarget) {
-    setPrevFixTarget(w.fixTarget);
-    if (FOLDED_TARGETS.includes(w.fixTarget)) setManual(true);
-  }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <button
-        type="button"
-        onClick={() => setManual(!open)}
-        aria-expanded={open}
-        className="w-full flex items-center gap-3 px-1 text-left cursor-pointer group"
-      >
-        <span className="text-[15px] font-bold text-ink whitespace-nowrap">More details</span>
-        {!open && (
-          <span className="text-[13px] text-ink-secondary truncate">
-            Description · Item specifics · Shipping · Promote
-            {blocking.length > 0 && (
-              <span className="ml-2 font-semibold text-warning">
-                {blocking.length === 1 ? "1 field is" : `${blocking.length} fields are`} blocking publish
-              </span>
-            )}
-            {reviewCount > 0 && (
-              <span className="ml-2 font-semibold text-blue">
-                {reviewCount} specific{reviewCount === 1 ? "" : "s"} to review
-              </span>
-            )}
-          </span>
-        )}
-        <span className="flex-1 h-px bg-line" aria-hidden />
-        <ChevronDown
-          size={18} aria-hidden
-          className={cn("shrink-0 text-ink-secondary transition-transform duration-200",
-            open && "rotate-180")}
-        />
-      </button>
-      {open && (
-        <motion.div
-          initial={{ opacity: 0, y: -6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.2 }}
-          className="flex flex-col gap-4"
-        >
-          {children}
-        </motion.div>
-      )}
-    </div>
-  );
-}
-
 export function Workflow() {
   const {
-    session, startNew, setSession, setView, openListings, deleteListing, activeBulk,
+    session, startNew, setSession, openListings, deleteListing, activeBulk,
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
+  // Ctrl/⌘+Enter publishes; see useEditorShortcuts.
+  useEditorShortcuts(w);
   // { name } — the photo open in the studio (clean up, remove background, crop).
   const [editing, setEditing] = useState(null);
+
+  // Leaving a DRAFT asks nothing. Autosave has been sending every edit as it
+  // was made (useListingForm), and Done sends whatever the timer has not
+  // reached yet, so there are no "unsaved edits here" to warn about -- the
+  // question that used to stand here was answering a danger that no longer
+  // exists, and a confirm nobody needs is one more click on every listing.
+  // Two cases still ask: a live listing (edited with Update Live Listing,
+  // never by a timer; its status reads "off"), and a draft whose last save
+  // failed or was refused, where the warning is true again.
+  const mustConfirmLeaving = w.isLive || w.saveStatus === "off" || w.saveStatus === "error";
+  const leave = async (then) => {
+    if (mustConfirmLeaving) {
+      if (!(await confirm({
+        title: "Close this listing?",
+        message: w.isLive
+          ? "Changes you made here since the last update are discarded — the live listing stays as it is on eBay."
+          : "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
+        confirmLabel: "Close",
+      }))) return;
+    } else {
+      await w.flushSave();
+    }
+    then();
+  };
 
   const restart = async () => {
     if (await confirm({
       title: "Start a new listing?",
       message: "Your current draft stays saved in Drafts — you can come back to it anytime.",
       confirmLabel: "Start new",
-    })) startNew();
+    })) {
+      // "Stays saved" has to be true before the new one opens.
+      if (!mustConfirmLeaving) await w.flushSave();
+      startNew();
+    }
   };
 
   // Delete — for a listing that can't be salvaged. Without this the only way
@@ -286,32 +253,45 @@ export function Workflow() {
       danger: true,
     })) {
       await deleteListing(session.sessionId);
-      setView("dashboard");
-    }
-  };
-
-  // Exit — close the editor without publishing. The listing stays saved as
-  // it last was; edits made since the last save are discarded.
-  const exit = async () => {
-    if (await confirm({
-      title: "Close this listing?",
-      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
-      confirmLabel: "Close",
-    })) {
       setSession(null);
-      setView("dashboard");
+      openListings("drafts");
     }
   };
 
-  // My drafts — the drafts grid is the List tab, so getting there means
-  // closing the editor; confirm since unsaved edits are dropped.
-  const toDrafts = async () => {
-    if (await confirm({
-      title: "Close this listing?",
-      message: "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
-      confirmLabel: "Close",
-    })) openListings("drafts");
-  };
+  // Back — close the editor onto the screen it was opened from (the List
+  // tab, Manage, or the batch): clearing the session is all that takes,
+  // since the editor opens where you already are (see store.openListing).
+  // A draft is saved on the way out (see `leave`); a live listing asks.
+  const back = () => leave(() => setSession(null));
+
+  // The header's ⋯ menu: the actions a seller takes once a month, which
+  // used to be five buttons across the header and four more in the bar.
+  const menuItems = [
+    // The bar's primary action, listed here for its shortcut.
+    { label: w.isLive ? "Update Live Listing" : "Publish Live",
+      icon: w.isLive ? <RefreshCw aria-hidden /> : <Rocket aria-hidden />,
+      hint: PUBLISH_SHORTCUT, onSelect: () => w.publish("live") },
+    { label: "New listing", icon: <PlusCircle aria-hidden />, onSelect: restart, divider: true },
+    { label: "Check with eBay", icon: <ListChecks aria-hidden />,
+      title: "Runs eBay's own checks on this listing without publishing it",
+      onSelect: w.runPreflight },
+    !w.isLive && {
+      label: "Save to eBay drafts", icon: <Save aria-hidden />,
+      title: "Saves here and, with eBay connected, stages the draft on your eBay account",
+      onSelect: () => w.publish("draft"),
+    },
+    w.ebayListingId && {
+      label: "View on eBay", icon: <ExternalLink aria-hidden />,
+      onSelect: () => window.open(`https://www.ebay.com/itm/${w.ebayListingId}`, "_blank", "noopener"),
+    },
+    /* No Delete while live: removing the record would strand the real
+       eBay listing with no way to manage it here. End it first (the
+       publish bar), then delete. */
+    !w.isLive && {
+      label: "Delete listing", icon: <Trash2 aria-hidden />, danger: true, divider: true,
+      onSelect: remove,
+    },
+  ];
 
   // A live publish replaces the workflow with the success screen — staying on
   // the just-posted listing was confusing.
@@ -330,7 +310,11 @@ export function Workflow() {
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show" className="flex flex-col gap-4">
-      <motion.div variants={rise} className="flex flex-wrap items-center gap-3">
+      <motion.div variants={rise} className="flex items-center gap-2 sm:gap-3">
+        <Button variant="ghost" size="icon" onClick={back} aria-label="Close this listing"
+          title="Back">
+          <ArrowLeft aria-hidden />
+        </Button>
         <div className="min-w-0 flex-1">
           <h1 className="text-xl sm:text-2xl font-bold text-ink truncate">
             {w.form.title || "New listing"}
@@ -357,9 +341,10 @@ export function Workflow() {
               </span>
             )}
             {session.status === "ended" && <TagPill tone="neutral">Ended on eBay</TagPill>}
+            <SaveStatus status={w.saveStatus} />
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           {/* Opening an item from a batch replaced the queue with this editor,
               stranding the rest of the batch. Clearing the session brings the
               queue straight back — it's still in memory. */}
@@ -368,23 +353,7 @@ export function Workflow() {
               <ArrowLeft aria-hidden /> Back to batch
             </Button>
           )}
-          <Button variant="ghost" onClick={toDrafts}>
-            <ArrowLeft aria-hidden /> My drafts
-          </Button>
-          <Button variant="ghost" onClick={restart}>
-            <RotateCcw aria-hidden /> Start over
-          </Button>
-          {/* No Delete while live: removing the record would strand the real
-              eBay listing with no way to manage it here. End it first (the
-              publish bar / card), then delete. */}
-          {!w.isLive && (
-            <Button variant="ghost" onClick={remove} aria-label="Delete this listing">
-              <Trash2 aria-hidden /> Delete
-            </Button>
-          )}
-          <Button variant="ghost" onClick={exit} aria-label="Close this listing">
-            <X aria-hidden /> Exit
-          </Button>
+          <Menu label="More actions" items={menuItems} />
         </div>
       </motion.div>
 
@@ -421,54 +390,59 @@ export function Workflow() {
         </motion.div>
       )}
 
-      <motion.div variants={rise}>
-        <RefineBar w={w} />
-      </motion.div>
-
-      {/* Hero fields first — photos, title, price & condition, category are
-          what the seller actually looks at; the AI-filled rest sits behind
-          the More Details fold (which opens itself when it needs a human). */}
-      <motion.div variants={rise} className="flex flex-col gap-4">
-        {/* Photo delete is confirmed: the button sits on every tile, always
-            visible, and the photo is gone from the server with no undo.
-            deleteImage has supported a confirm all along — the editor just
-            wasn't passing one. */}
-        <PhotosCard
-          w={w}
-          onEdit={(name) => setEditing({ name })}
-          onDelete={(name) => w.deleteImage(name, confirm)}
-        />
-        <TitleCard w={w} />
-        <PricingCard w={w} />
-        <CategoryCard w={w} />
-        {/* Optional, and below the fields a listing cannot publish without —
-            a video sells an item, a price is what makes it sellable. It sits
-            outside More Details all the same, because a seller who has shot
-            one has to be able to find where it goes. */}
-        {/* Confirmed for the same reason a photo delete is, and a stronger
-            one: the video is gone from the server with no undo, and getting
-            it back means re-shooting or re-sending up to 150MB. */}
-        <VideoCard w={w} onRemove={(name) => w.removeVideo(name, confirm)} />
-        {/* Marketplace extras — each renders only while its marketplace is
-            among the publish targets picked in the publish bar. */}
-        <EtsyCard w={w} />
-        <DepopCard w={w} />
-        <MoreDetails w={w}>
-          <SpecificsCard w={w} />
-          <DescriptionCard w={w} />
+      {/* Two columns from lg up, one below (LISTING_REDESIGN.md, Phase 2).
+          The photos and the search preview sit in a rail on the left that
+          stays put while the form scrolls: the two things a seller keeps
+          looking back at while they write are the item and how the listing
+          will read. The form is ONE surface, its parts divided by rules
+          (see Section) -- not a column of cards. On a phone the rail simply
+          comes first, in the same order. */}
+      <motion.div
+        variants={rise}
+        className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:items-start"
+      >
+        <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto">
+          <div className="bg-card rounded-card border border-line shadow-card p-5 sm:p-6">
+            {/* Photo delete is confirmed: the button sits on every tile,
+                always visible, and the photo is gone from the server with no
+                undo. deleteImage has supported a confirm all along — the
+                editor just wasn't passing one. */}
+            {/* The video is a tile in the same grid. Its removal is confirmed
+                for the same reason a photo delete is, and a stronger one:
+                the video is gone from the server with no undo, and getting
+                it back means re-shooting or re-sending up to 150MB. */}
+            <PhotosCard
+              w={w}
+              onEdit={(name) => setEditing({ name })}
+              onDelete={(name) => w.deleteImage(name, confirm)}
+              onRemoveVideo={(name) => w.removeVideo(name, confirm)}
+            />
+          </div>
+          <SearchPreview w={w} />
+        </div>
+        <div className="bg-card rounded-card border border-line shadow-card p-5 sm:p-6 min-w-0">
+          {/* The order is the order a seller reads a listing in: what it
+              is, what shape it's in, what it costs, where eBay files it,
+              the details buyers filter by, how it ships, the story -- and
+              under one fold, the fields most listings never touch
+              (LISTING_REDESIGN.md, "one page, five decisions"). No
+              "Finish up" card, and no Publish card: the pass that fills in
+              what eBay asks for runs at the end of drafting (backend
+              _fill_what_is_left), and the publish and its result live in
+              the bar. */}
+          <TitleCard w={w} />
+          <ConditionCard w={w} />
+          <PricingCard w={w} />
+          <CategoryCard w={w} />
+          <DetailsCard w={w} />
           <ShippingCard w={w} />
-          <PromoteCard w={w} />
-        </MoreDetails>
-        {/* No "Finish up" card between the details and Publish. It offered
-            one pass over the photos to fill in everything eBay still asks
-            for — over a draft the app had just spent a minute and several
-            model calls making. A listing that arrives nearly finished, with
-            a button admitting it, is not a listing the seller asked for: the
-            pass runs at the end of drafting now (backend
-            _fill_what_is_left), and what reaches this page is filled in.
-            What is left here is reading it, changing what's wrong, and
-            publishing. */}
-        <PublishCard w={w} />
+          <DescriptionCard w={w} />
+          <MoreOptions w={w} />
+          {/* Marketplace extras — each renders only while its marketplace
+              is among the publish targets picked in the publish bar. */}
+          <EtsyCard w={w} />
+          <DepopCard w={w} />
+        </div>
       </motion.div>
 
       {/* Pinned primary action — stays in reach as you scroll the long form

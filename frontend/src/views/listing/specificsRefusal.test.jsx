@@ -11,14 +11,15 @@
  * said it was the problem. So the seller re-published the same listing and
  * got the same refusal.
  *
- * Now: the card opens itself on a refusal, stops hiding any of its fields,
- * repeats eBay's complaint where the inputs are, and rings the named ones.
+ * Now: the section opens itself on a refusal, stops hiding any of its chips,
+ * repeats eBay's complaint where the chips are, rings the one eBay named and
+ * opens its editor (LISTING_REDESIGN.md, "Details").
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { SpecificsCard } from "./cards";
+import { DetailsCard } from "./Details";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -27,8 +28,9 @@ const aspect = (name, over = {}) => ({
   cardinality: "SINGLE", data_type: "STRING", ...over,
 });
 
-// One required aspect and twelve recommended ones — four more than the card
-// shows before "Show all", which is what puts the last of them out of reach.
+// One required aspect and twelve recommended ones — six more than the
+// section shows as ghost chips, which is what puts the last of them out of
+// reach.
 const ASPECTS = [
   aspect("Brand", { required: true }),
   ...["Colour", "Style", "Material", "Pattern", "Fit", "Season", "Theme",
@@ -66,7 +68,7 @@ async function mount(w) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => { root.render(<SpecificsCard w={w} />); });
+  await act(async () => { root.render(<DetailsCard w={w} />); });
   return () => host.textContent || "";
 }
 
@@ -86,16 +88,16 @@ const REFUSAL = {
   }],
 };
 
-describe("the Item specifics card after a refused publish", () => {
+describe("the Details section after a refused publish", () => {
   it("repeats eBay's complaint where the fields are", async () => {
     const text = await mount(stub({ publishResult: REFUSAL }));
     expect(text()).toContain("Missing required item specific: Sleeve Length");
     expect(text()).toContain("Fill in “Sleeve Length” under Item specifics.");
   });
 
-  it("stops hiding fields — including the one eBay named", async () => {
-    // Sleeve Length is the twelfth recommended aspect and empty, so the card
-    // would normally leave it behind "Show 4 more".
+  it("stops hiding chips — including the one eBay named", async () => {
+    // Sleeve Length is the twelfth recommended aspect and empty, so the
+    // section would normally leave it behind "Show 6 more".
     const quiet = await mount(stub());
     expect(quiet()).not.toContain("Sleeve Length");
     await act(async () => { root.unmount(); });
@@ -103,16 +105,21 @@ describe("the Item specifics card after a refused publish", () => {
 
     const text = await mount(stub({ publishResult: REFUSAL }));
     expect(text()).toContain("Sleeve Length");
-    expect(text()).not.toContain("Show 4 more");
+    expect(text()).not.toContain("Show 6 more");
   });
 
-  it("marks the field eBay named, not just the empty required ones", async () => {
+  it("rings the chip eBay named, and opens its editor", async () => {
     const text = await mount(stub({ publishResult: REFUSAL }));
     expect(text()).toContain("eBay refused this");
-    // The base field class carries a `data-[fix=true]:ring-error/25` variant,
-    // so the assertion is on the ring this card applies, not on the word.
-    const inputs = [...host.querySelectorAll("input, select")];
-    const ringed = inputs.filter((el) => el.className.includes("ring-error/70"));
+    // One ringed chip: the one eBay named, not the empty required one.
+    const refused = [...host.querySelectorAll('[data-chip-state="refused"]')];
+    expect(refused.map((c) => c.getAttribute("data-chip"))).toEqual(["Sleeve Length"]);
+    expect(host.querySelector('[data-chip="Brand"]').getAttribute("data-chip-state"))
+      .toBe("missing");
+    // ...and its editor is already open, with the box ringed the same way.
+    expect(host.querySelector('[data-chip-editor="Sleeve Length"]')).toBeTruthy();
+    const ringed = [...host.querySelectorAll("input, select")]
+      .filter((el) => el.className.includes("ring-error/70"));
     expect(ringed).toHaveLength(1);
   });
 
@@ -121,7 +128,8 @@ describe("the Item specifics card after a refused publish", () => {
       publishResult: { published: true, issues: [] },
     }));
     expect(text()).not.toContain("eBay refused this");
-    expect(text()).toContain("Show 4 more");
+    expect(text()).toContain("Show 6 more");
+    expect(host.querySelector("[data-chip-editor]")).toBeNull();
   });
 
   it("ignores a refusal that belongs to another card", async () => {
@@ -133,7 +141,7 @@ describe("the Item specifics card after a refused publish", () => {
       },
     }));
     expect(text()).not.toContain("eBay needs a valid shipping weight");
-    expect(text()).toContain("Show 4 more");
+    expect(text()).toContain("Show 6 more");
   });
 
   it("doesn't put words in eBay's mouth about a check it never saw", async () => {

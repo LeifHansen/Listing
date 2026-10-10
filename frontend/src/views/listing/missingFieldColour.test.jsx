@@ -24,7 +24,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { useListingForm } from "./useListingForm";
-import { PricingCard, TitleCard } from "./cards";
+import { ConditionCard, PricingCard, TitleCard } from "./cards";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -204,7 +204,7 @@ function stub(fixLevel, over = {}) {
       condition_description: "", purchase_price: "", item_specifics: [],
       accept_offers: false, ...over,
     },
-    completion: { title: "todo", pricing: "todo" },
+    completion: { title: "todo", price: "todo", condition: "todo" },
     categoryMeta: { aspects: [], conditions: [], conditionsChecked: true },
     comps: null, compsBusy: false, isLive: false, publishResult: null,
     set: () => {}, loadComps: () => {}, suggestTitle: () => {}, aiBusy: false,
@@ -243,7 +243,8 @@ describe("the colour reaches the input", () => {
   });
 
   it("reaches the condition dropdown, which could not be marked at all before", () => {
-    const el = render(<PricingCard w={stub((t) => (t === "condition" ? "warn" : undefined))} />);
+    // The condition is a section of its own now (LISTING_REDESIGN.md).
+    const el = render(<ConditionCard w={stub((t) => (t === "condition" ? "warn" : undefined))} />);
     const select = el.querySelector("select[data-fix]");
     expect(select).toBeTruthy();
     expect(select.getAttribute("data-fix")).toBe("warn");
