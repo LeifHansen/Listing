@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ArrowRight, PlusCircle, LayoutDashboard,
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
+  Rocket, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -23,8 +24,10 @@ import { SoldArchive } from "./listing/SoldArchive";
 import { ConflictBanner } from "./listing/ConflictBanner";
 import { SearchPreview } from "./listing/SearchPreview";
 import { PublishBar } from "./listing/PublishBar";
+import { DetailsCard } from "./listing/Details";
+import { PUBLISH_SHORTCUT, useEditorShortcuts } from "./listing/useEditorShortcuts";
 import {
-  PhotosCard, TitleCard, ConditionCard, CategoryCard, SpecificsCard, PricingCard,
+  PhotosCard, TitleCard, ConditionCard, CategoryCard, PricingCard,
   ShippingCard, DescriptionCard, MoreOptions, EtsyCard, DepopCard,
 } from "./listing/cards";
 
@@ -199,6 +202,8 @@ export function Workflow() {
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
+  // Ctrl/⌘+Enter publishes; see useEditorShortcuts.
+  useEditorShortcuts(w);
   // { name } — the photo open in the studio (clean up, remove background, crop).
   const [editing, setEditing] = useState(null);
 
@@ -262,7 +267,11 @@ export function Workflow() {
   // The header's ⋯ menu: the actions a seller takes once a month, which
   // used to be five buttons across the header and four more in the bar.
   const menuItems = [
-    { label: "New listing", icon: <PlusCircle aria-hidden />, onSelect: restart },
+    // The bar's primary action, listed here for its shortcut.
+    { label: w.isLive ? "Update Live Listing" : "Publish Live",
+      icon: w.isLive ? <RefreshCw aria-hidden /> : <Rocket aria-hidden />,
+      hint: PUBLISH_SHORTCUT, onSelect: () => w.publish("live") },
+    { label: "New listing", icon: <PlusCircle aria-hidden />, onSelect: restart, divider: true },
     { label: "Check with eBay", icon: <ListChecks aria-hidden />,
       title: "Runs eBay's own checks on this listing without publishing it",
       onSelect: w.runPreflight },
@@ -425,7 +434,7 @@ export function Workflow() {
           <ConditionCard w={w} />
           <PricingCard w={w} />
           <CategoryCard w={w} />
-          <SpecificsCard w={w} />
+          <DetailsCard w={w} />
           <ShippingCard w={w} />
           <DescriptionCard w={w} />
           <MoreOptions w={w} />

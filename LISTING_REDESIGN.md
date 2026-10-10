@@ -283,11 +283,22 @@ Publish Live / Update + End, with the publish result panel above it inside
 `publishBar`, `compsDisclosure`, `descriptionPreview`. Not in this phase: the
 keyboard shortcuts (Phase 4) and Duplicate (Phase 5), which join the menu then.
 
-**Phase 4 — Details chips + keyboard.** `views/listing/Details.jsx` (extract
-`SpecificsCard`), `ChipEditor`, Enter/Esc, `useEditorShortcuts`. Tests to rewrite:
-`specificsRefusal` ("one ringed control" → "one ringed chip", "Show 4 more"),
-`aspectCheckboxes`, `specificsAreFilledNotOffered` ("Add specific", inferred
-`aria-label`), `generationFillsEveryAspect`.
+**Phase 4 — Details chips + keyboard.** *Built.* `views/listing/Details.jsx`
+holds the item specifics (extracted from `cards.jsx`) as chips: required first
+(an empty one amber, "Size — required"), the filled recommended with ✓/⚠, the
+next six empty recommended as ghosts ("+ Material"), then "Show N more"; after
+a refusal nothing is hidden, the chip eBay named is ringed red ("eBay refused
+this" / "Fix this to publish") and its editor is open. Tapping a chip swaps in
+`ChipEditor` under the chips with the aspect's own control (Select, Input with
+the `sugg-<slug>` datalist, or the tick-box list with its add-your-own box);
+Enter commits and moves forward to the next empty required chip, or closes
+when there is none; Esc closes. "eBay asked for these", "Your own specifics"
+and "Add specific" stay as they were. `useEditorShortcuts`: Ctrl/⌘+Enter runs
+`publish("live")`, standing down while the AI is busy or a dialog is up; the
+⋯ menu lists Publish Live / Update Live Listing first with the shortcut as its
+hint. Tests rewritten: `specificsRefusal`, `aspectCheckboxes`,
+`specificsAreFilledNotOffered` (and `generationFillsEveryAspect` passes
+unchanged — it tests the hook); new: `detailsChips`, `editorShortcuts`.
 
 **Phase 5 — Duplicate.** Route + test (strips eBay identity, copies R2 photos) + menu
 item + card action.

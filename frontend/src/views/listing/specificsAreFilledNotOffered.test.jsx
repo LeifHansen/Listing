@@ -1,5 +1,5 @@
 /**
- * The Item specifics card has nothing for the seller to press.
+ * The Details section has nothing for the seller to press but its chips.
  *
  * It used to end in "Fill 8 with AI", which read as "eight fields are waiting
  * for the AI" and was never true: the AI reads this listing's photos against
@@ -20,7 +20,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { SpecificsCard } from "./cards";
+import { DetailsCard } from "./Details";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,7 +63,7 @@ async function mount(w) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => { root.render(<SpecificsCard w={w} />); });
+  await act(async () => { root.render(<DetailsCard w={w} />); });
   return () => host.textContent || "";
 }
 
@@ -82,7 +82,7 @@ const AFTER_GENERATION = [
   { name: "Material", value: "Denim", confidence: "medium" },
 ];
 
-describe("the Item specifics card", () => {
+describe("the Details section", () => {
   it("never offers to re-run the fill that already ran", async () => {
     const text = await mount(stub({ item_specifics: AFTER_GENERATION }));
     expect(text()).not.toMatch(/Fill \d+ with AI/);
@@ -137,7 +137,7 @@ describe("the Item specifics card", () => {
         })),
       ],
     }));
-    expect(text()).toContain("every one is filled");
+    expect(text()).toContain("Every detail is filled");
     expect(text()).not.toContain("the blanks are ones only you can answer");
   });
 });

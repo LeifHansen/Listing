@@ -98,15 +98,21 @@ describe("the editor header", () => {
   it("offers a draft its once-a-month actions, Delete last", async () => {
     await mountEditor(DRAFT);
     await openMenu();
-    expect(menuItems()).toEqual([
-      "New listing", "Check with eBay", "Save to eBay drafts", "Delete listing",
+    // Publish heads the list for its shortcut (Ctrl/⌘+Enter), which the
+    // menu is the one place to learn.
+    expect(menuItems().map((t) => t.replace(/[⌘↩]|Ctrl\+/g, "").trim())).toEqual([
+      "Publish Live", "New listing", "Check with eBay", "Save to eBay drafts", "Delete listing",
     ]);
+    const publish = host.querySelector('[role="menuitem"]');
+    expect(publish.textContent).toMatch(/⌘↩|Ctrl\+↩/);
   });
 
   it("never offers Delete on a live listing, and does offer View on eBay", async () => {
     await mountEditor({ ...DRAFT, ebay_listing_id: "1234567890" }, "published");
     await openMenu();
-    expect(menuItems()).toEqual(["New listing", "Check with eBay", "View on eBay"]);
+    expect(menuItems().map((t) => t.replace(/[⌘↩]|Ctrl\+/g, "").trim())).toEqual([
+      "Update Live Listing", "New listing", "Check with eBay", "View on eBay",
+    ]);
   });
 
   it("keeps Back to batch beside the menu while a batch is running", async () => {
