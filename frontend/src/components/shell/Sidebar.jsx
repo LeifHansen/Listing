@@ -39,6 +39,28 @@ const ADMIN_NAV = { id: "admin", label: "Admin", icon: ShieldCheck };
 
 const byId = (id) => NAV.find((n) => n.id === id);
 
+/** What tapping a nav entry does -- one answer for the sidebar and the thumb
+ *  bar, which used to carry a copy each.
+ *
+ *  A nav tap means "show me that screen", and for the two selling tabs that
+ *  is not the same as switching `view`: both render the editor whenever a
+ *  listing is open (see EDITOR_VIEWS in the store), so with a session left
+ *  behind, a bare setView("manage") put the EDITOR on Manage instead of the
+ *  listings. That is how a seller who had just posted a batch tapped Manage
+ *  to look at it and got the last listing back, open for editing -- the
+ *  success screen is editor state, so the remount on the way over dropped it
+ *  and showed the now-live listing as a form. List already closed the open
+ *  listing on the way in (startNew); Manage does the same. The listing
+ *  stays saved as it last was, exactly as it does for List. */
+function useNavTo() {
+  const { setView, startNew, openListings } = useApp();
+  return (id) => {
+    if (id === "new") startNew();
+    else if (id === "manage") openListings();
+    else setView(id);
+  };
+}
+
 export const APP_VERSION = "v2.0";
 
 function Brand({ collapsed }) {
@@ -105,8 +127,9 @@ function NavItem({ item, active, collapsed, badge, onClick }) {
 // Sidebar — rounded, floating, detached from the screen edges. Hidden on
 // mobile (BottomNav takes over there).
 export function Sidebar() {
-  const { view, setView, startNew, dark, toggleDark, user, openAuth, logout,
+  const { view, dark, toggleDark, user, openAuth, logout,
     listingsState, ebay, messages, isSuperadmin } = useApp();
+  const navTo = useNavTo();
   const [collapsed, setCollapsed] = useState(false);
 
   // Drafts are the List tab's, so the drafts-waiting count badges List.
@@ -146,7 +169,7 @@ export function Sidebar() {
             collapsed={collapsed}
             active={view === item.id}
             badge={counts[item.id]}
-            onClick={() => (item.id === "new" ? startNew() : setView(item.id))}
+            onClick={() => navTo(item.id)}
           />
         ))}
       </nav>
@@ -218,7 +241,8 @@ export function Sidebar() {
 
 // BottomNav — the sidebar's mobile form: thumb-sized targets around the FAB.
 export function BottomNav() {
-  const { view, setView, startNew } = useApp();
+  const { view } = useApp();
+  const navTo = useNavTo();
   // Reference by id (not index) so reordering NAV never scrambles the bar.
   // Five targets, and the FAB is one of them rather than an extra squeezed
   // between four: Manage earns a slot because it is now half of what the
@@ -246,7 +270,7 @@ export function BottomNav() {
             type="button"
             aria-label={item.label}
             aria-current={active ? "page" : undefined}
-            onClick={() => (isNew ? startNew() : setView(item.id))}
+            onClick={() => navTo(item.id)}
             className={cn(
               "flex flex-col items-center justify-center gap-0.5 min-w-11 min-h-11 rounded-button",
               "text-[10px] font-semibold transition-colors duration-150 cursor-pointer",

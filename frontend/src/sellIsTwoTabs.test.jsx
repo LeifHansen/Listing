@@ -132,6 +132,14 @@ const mainText = () => main()?.textContent || "";
 const navButton = (label) => [...host.querySelectorAll("nav button")]
   .find((b) => (b.textContent || "").trim().startsWith(label));
 
+/** A thumb-bar entry by label. Only CSS hides the bar, so jsdom renders it,
+ *  last of the navs. */
+const thumb = (label) => {
+  const bars = [...host.querySelectorAll("nav")];
+  return [...bars[bars.length - 1].querySelectorAll("button")]
+    .find((b) => b.getAttribute("aria-label") === label);
+};
+
 async function go(label) {
   const b = navButton(label);
   expect(b, `no nav entry labelled ${label}`).toBeTruthy();
@@ -305,6 +313,39 @@ describe("the editor opens where you already are", () => {
     await act(async () => { await store.openListing("l1"); });
     expect(store.session?.sessionId).toBe("l1");
     expect(store.view).toBe("manage");
+  });
+
+  it("shows the listings, not the open editor, when Manage is tapped", async () => {
+    // The nav entry means "take me to the manager". Both selling tabs render
+    // the editor while a listing is open, so a tap that only switched `view`
+    // carried the editor across: a seller who had just posted a batch and
+    // tapped Manage to look at it got the last listing back, open for
+    // editing. The success screen is editor state and did not survive the
+    // remount on the way over, so what came up was the now-live listing as a
+    // form. Manage closes the open listing on the way in, as List does.
+    await mount();
+    await go("List");
+
+    const card = [...main().querySelectorAll("button, a")]
+      .find((b) => (b.textContent || "").includes("Brass desk lamp"));
+    await press(card);
+    expect(host.querySelector('[aria-label="Refine listing with AI"]')).toBeTruthy();
+
+    await go("Manage");
+
+    expect(navButton("Manage").getAttribute("aria-current")).toBe("page");
+    expect(host.querySelector('[aria-label="Refine listing with AI"]')).toBeNull();
+    expect(mainText()).toContain("Sync with eBay");
+    expect(mainText()).toContain("Wool camp blanket");
+
+    // Same from the thumb bar, which has its own copy of the nav.
+    await go("List");
+    await press([...main().querySelectorAll("button, a")]
+      .find((b) => (b.textContent || "").includes("Brass desk lamp")));
+    expect(host.querySelector('[aria-label="Refine listing with AI"]')).toBeTruthy();
+    await press(thumb("Manage"));
+    expect(host.querySelector('[aria-label="Refine listing with AI"]')).toBeNull();
+    expect(mainText()).toContain("Wool camp blanket");
   });
 
   it("edits a draft without leaving List", async () => {
