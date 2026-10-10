@@ -72,7 +72,8 @@ export const site = {
   name: "Thryft Shop",
   tagline: "Snap it · AI writes it · list it everywhere.",
   description:
-    "Turn product photos into complete, ready-to-publish listings on eBay.",
+    "Turn product photos into complete, ready-to-publish eBay listings — " +
+    "title, description, item specifics, category and price, from a photo.",
   // PLACEHOLDER — a company address on the real domain replaces this before
   // launch. The founder's personal inbox is deliberately not published here.
   supportEmail: "support@thryftshop.com",
