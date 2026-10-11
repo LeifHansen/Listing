@@ -30,6 +30,9 @@ const changelog = defineCollection({
     date: z.coerce.date(),
     // "shipped" is the normal state; "beta" marks something behind a flag.
     state: z.enum(["shipped", "beta"]).default("shipped"),
+    // Withheld from the page: an entry about a marketplace the launch does
+    // not offer stays in the tree (it did ship) without advertising it.
+    draft: z.boolean().default(false),
   }),
 });
 

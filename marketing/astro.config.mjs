@@ -113,6 +113,20 @@ export default defineConfig({
   },
   vite: {
     plugins: [tailwindcss()],
+    resolve: {
+      // tokens.css (imported from ../frontend) begins with `@import
+      // "tailwindcss"`, and Tailwind resolves that bare specifier from the
+      // IMPORTING file's directory — frontend/src/styles — walking up for a
+      // node_modules that, on a checkout where only this site was installed
+      // (CI, a fresh clone that never ran the app), does not exist. Astro 5
+      // happened to resolve it from here; Astro 7 does not. Pin the bare
+      // import to this site's own copy so the build does not depend on
+      // the app's node_modules being present.
+      alias: [{
+        find: /^tailwindcss$/,
+        replacement: path.join(import.meta.dirname, "node_modules/tailwindcss/index.css"),
+      }],
+    },
     // The brand tokens are imported from ../frontend, which is outside this
     // project root. Vite refuses to serve files outside the root in dev
     // unless the parent is explicitly allowed.

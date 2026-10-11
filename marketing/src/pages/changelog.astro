@@ -4,7 +4,7 @@ import Base from "../layouts/Base.astro";
 import Container from "../components/Container.astro";
 import { site } from "../lib/site.js";
 
-const entries = (await getCollection("changelog")).sort((a, b) => b.data.date - a.data.date);
+const entries = (await getCollection("changelog", ({ data }) => !data.draft)).sort((a, b) => b.data.date - a.data.date);
 const rendered = await Promise.all(
   entries.map(async (entry) => ({ entry, Content: (await render(entry)).Content })),
 );
