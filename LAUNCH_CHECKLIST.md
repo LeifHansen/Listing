@@ -323,9 +323,11 @@ Ordered by what it costs a seller.
   and `count_foreign_listings` scan every row today.
 - Etsy and Depop revises send the whole payload (no shadow, no dirty
   tracking per marketplace) — the eBay three-way merge does not exist
-  there. Etsy is now offered, so this is live: an edit made on etsy.com is
-  replaced by this app's copy on the next revise, and the editor, the
-  card chip and the crosspost wizard say so. The fix is an Etsy store sync
+  there. Etsy is withheld for the launch (fly.toml leaves
+  `MARKETPLACES_ENABLED` unset, so the roster is eBay alone); the day it is
+  switched back on this is live: an edit made on etsy.com is replaced by
+  this app's copy on the next revise, and the editor, the card chip and the
+  crosspost wizard say so. The fix is an Etsy store sync
   (a shadow to reconcile against) plus per-marketplace dirty tracking —
   the roadmap's Phase 4.
 - Trading-side call budgeting: the watchers/offers walks (GetMyeBaySelling

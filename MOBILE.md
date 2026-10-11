@@ -14,9 +14,10 @@ already in the codebase:
   the backend allows the `capacitor://localhost` origin via CORS.
 - OAuth connects mint a 60-second ticket for the navigation and finish on
   an interstitial that steers the webview back into the app. Which
-  marketplaces the app offers is `MARKETPLACES_ENABLED` (production: eBay and
-  Etsy, per fly.toml); the flow is generic, so a marketplace switched on there
-  needs no mobile work.
+  marketplaces the app offers is `MARKETPLACES_ENABLED` (production: eBay
+  alone — Etsy and Depop are built but switched off in fly.toml until we come
+  back to them); the flow is generic, so a marketplace switched on there needs
+  no mobile work.
 - Token purchases open **in the system browser** (App Store guideline 3.1.1
   forbids completing a non-Apple checkout inside the app; a link out is
   allowed on the US storefront). The webhook credits the purchase, so set

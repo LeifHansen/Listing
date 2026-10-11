@@ -32,34 +32,29 @@ primary_region = 'sjc'
   # the same commit that gives it a certificate.
   APP_ORIGINS = 'https://app.thryftshop.com,https://listing-lfwjrg.fly.dev'
   DATA_DIR = '/data'
-  # WHICH MARKETPLACES THIS DEPLOY OFFERS. eBay launched to the mobile app on
-  # its own; Etsy joined it once the integration was brought up to Etsy's
-  # 2026 API (the shared-secret header, processing profiles, price changes
-  # through the inventory record) and the eBay → Etsy crosspost landed.
-  # Depop stays built and withheld until its partner credentials arrive.
-  # Withheld is the code's default, so this line is the honest, reviewable
-  # statement of what is offered rather than a switch that could be lost —
-  # deleting it takes Etsy away again. 'all' adds Depop.
+  # WHICH MARKETPLACES THIS DEPLOY OFFERS. The launch is eBay ALONE. Etsy and
+  # Depop are built, mapped and tested, and switched off here: with the
+  # variable unset the code's default (config.marketplaces_enabled) offers
+  # eBay and nothing else, so neither appears in /api/marketplaces, the
+  # Settings cards, the publish chips, the editor panels or the crosspost —
+  # and every /api/etsy/* and /api/depop/* route answers 404.
   #
+  # To bring Etsy back, uncomment the two lines below ('all' adds Depop).
   # Etsy needs, as `fly secrets`, ETSY_CLIENT_ID, ETSY_SHARED_SECRET (Etsy
   # refuses every request without it since 2026-02-09), ETSY_REDIRECT_URI
   # (OAUTH_ORIGIN + /api/etsy/callback, registered on the Etsy app exactly)
-  # and ETSY_OWNER_EMAILS — the beta roster below. Missing any of the first
-  # three, the Etsy card says which; missing the roster, the gate is inert
-  # and every seller reaches Etsy's own refusal page. That last one is
-  # warned about rather than silent now (config_warnings, and a caution plus
-  # a confirm on the Etsy card) — but the warning is not the fix, the roster
-  # is.
-  MARKETPLACES_ENABLED = 'ebay,etsy'
+  # and ETSY_OWNER_EMAILS — the beta roster. Missing any of the first three,
+  # the Etsy card says which; missing the roster, the gate is inert and every
+  # seller reaches Etsy's own refusal page (config_warnings warns, and the
+  # Etsy card shows a caution plus a confirm — but the roster is the fix).
+  # MARKETPLACES_ENABLED = 'ebay,etsy'
   # Etsy approved this app on 2026-08-31 — at the PERSONAL tier, which seats a
   # handful of shops (Etsy documents 4), not the unlimited Commercial Access
-  # above it. Not a secret, so it lives here rather than in `fly secrets`:
-  # nothing about it is worth hiding, and the tier is exactly the kind of fact
-  # that should change in a reviewable commit. It decides which wait a gated
-  # seller is told about; WHO gets through is still ETSY_OWNER_EMAILS (a
-  # secret, since it is people's email addresses). Set ETSY_ACCESS_TIER =
-  # 'commercial' the day Etsy grants it and the gate retires itself.
-  ETSY_ACCESS_TIER = 'personal'
+  # above it. Not a secret, so it lives here rather than in `fly secrets`. It
+  # decides which wait a gated seller is told about; WHO gets through is still
+  # ETSY_OWNER_EMAILS. Set 'commercial' the day Etsy grants it. Inert while
+  # Etsy is withheld above; left in place for the day it comes back.
+  # ETSY_ACCESS_TIER = 'personal'
   # WHICH ENGINE CUTS A BACKGROUND OUT. Unset here, which means "auto": every
   # remote engine that has a key, then the free on-server model. No key is set
   # on this app today, so the chain is ["local"] and the per-photo cost is
