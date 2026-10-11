@@ -142,11 +142,13 @@ function gridMarkup() {
   return `${wrapper.className}\n${clone.innerHTML}`;
 }
 
-/** Every card's action row, by label — Publish, Review & List, Delete. */
+/** Every card's action row, by label — Duplicate, Publish, Review & List,
+ *  Delete. */
 function cardActions() {
   return [...host.querySelectorAll("button")]
     .map((b) => (b.textContent || b.getAttribute("aria-label") || "").trim())
-    .filter((label) => ["Publish", "Review & List", "Delete this draft"]
+    .filter((label) => ["Duplicate this listing", "Publish", "Review & List",
+                        "Delete this draft"]
       .includes(label));
 }
 
@@ -170,8 +172,8 @@ describe("one grid of draft cards", () => {
     // Every card carries the pair the report's screenshot shows under each
     // tile, so "the same grid" is being compared against something real.
     expect(sellActions).toEqual([
-      "Publish", "Review & List", "Delete this draft",
-      "Publish", "Review & List", "Delete this draft",
+      "Duplicate this listing", "Publish", "Review & List", "Delete this draft",
+      "Duplicate this listing", "Publish", "Review & List", "Delete this draft",
     ]);
 
     await act(async () => { root.unmount(); });

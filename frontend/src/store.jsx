@@ -1367,6 +1367,31 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
+  // Duplicate -- "sell similar": a brand-new draft copied from any listing
+  // (draft, live, ended or sold), photos included, with nothing of the
+  // first listing's life on a marketplace (see the server's duplicate
+  // route). Opens the copy where the seller already is, the way openListing
+  // does, with `confidence` unset so the paid specifics fill does not run
+  // again over specifics that are already filled.
+  const duplicateListing = useCallback(async (id) => {
+    try {
+      const res = await postJson(`/api/listings/${id}/duplicate`, {});
+      loadListings({ quiet: true });
+      openRequest.current += 1;
+      setSession({ sessionId: res.id, listing: res.listing, confidence: null,
+                   status: "draft", conflicts: [] });
+      setView((v) => (EDITOR_VIEWS.includes(v) ? v : "new"));
+      toast(res.photos
+        ? "Duplicated — this is a new draft, edit it and publish when you're ready."
+        : "Duplicated — this is a new draft. It has no photos yet, so add some.",
+        { kind: res.photos ? "success" : "warning" });
+      return res.id;
+    } catch (e) {
+      toast(`Couldn't duplicate: ${e.message}`, { kind: "error" });
+      return null;
+    }
+  }, [toast, loadListings]);
+
   // Mass delete (drafts): one request for the whole selection.
   const bulkDeleteListings = useCallback(async (ids) => {
     try {
@@ -1887,6 +1912,7 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, setSession, currentSession, startNew, openListing, deleteListing, bulkDeleteListings,
+    duplicateListing,
     rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
@@ -1916,7 +1942,7 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, currentSession, startNew, openListing,
-    deleteListing, bulkDeleteListings, rotateListingPhoto,
+    deleteListing, bulkDeleteListings, duplicateListing, rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,

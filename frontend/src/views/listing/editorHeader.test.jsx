@@ -101,7 +101,8 @@ describe("the editor header", () => {
     // Publish heads the list for its shortcut (Ctrl/⌘+Enter), which the
     // menu is the one place to learn.
     expect(menuItems().map((t) => t.replace(/[⌘↩]|Ctrl\+/g, "").trim())).toEqual([
-      "Publish Live", "New listing", "Check with eBay", "Save to eBay drafts", "Delete listing",
+      "Publish Live", "New listing", "Duplicate", "Check with eBay", "Save to eBay drafts",
+      "Delete listing",
     ]);
     const publish = host.querySelector('[role="menuitem"]');
     expect(publish.textContent).toMatch(/⌘↩|Ctrl\+↩/);
@@ -111,8 +112,36 @@ describe("the editor header", () => {
     await mountEditor({ ...DRAFT, ebay_listing_id: "1234567890" }, "published");
     await openMenu();
     expect(menuItems().map((t) => t.replace(/[⌘↩]|Ctrl\+/g, "").trim())).toEqual([
-      "Update Live Listing", "New listing", "Check with eBay", "View on eBay",
+      "Update Live Listing", "New listing", "Duplicate", "Check with eBay", "View on eBay",
     ]);
+  });
+
+  it("duplicates into a fresh draft and opens it, with the fill stood down", async () => {
+    // "Sell similar": the server copies the listing; the editor swaps to
+    // the copy. `confidence` is unset on the new session so the paid
+    // specifics autofill, which keys off it, does not run over specifics
+    // the copy already carries.
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
+      const path = String(url);
+      if (path === "/api/listings/s1/duplicate" && opts.method === "POST") {
+        calls.push(path);
+        return ok({ ok: true, id: "s2", from: "s1", photos: 1,
+                    listing: { ...DRAFT, title: "Nike Air Max 90 (copy)" } });
+      }
+      return ok({});
+    }));
+    await mountEditor({ ...DRAFT, ebay_listing_id: "1234567890" }, "published");
+    await openMenu();
+    const dup = [...host.querySelectorAll('[role="menuitem"]')]
+      .find((b) => b.textContent.trim() === "Duplicate");
+    await act(async () => { dup.click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(calls).toEqual(["/api/listings/s1/duplicate"]);
+    expect(app.session.sessionId).toBe("s2");
+    expect(app.session.status).toBe("draft");
+    expect(app.session.confidence).toBeNull();
+    expect(host.querySelector("h1").textContent).toBe("Nike Air Max 90 (copy)");
   });
 
   it("keeps Back to batch beside the menu while a batch is running", async () => {

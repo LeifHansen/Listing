@@ -300,8 +300,19 @@ hint. Tests rewritten: `specificsRefusal`, `aspectCheckboxes`,
 `specificsAreFilledNotOffered` (and `generationFillsEveryAspect` passes
 unchanged — it tests the hook); new: `detailsChips`, `editorShortcuts`.
 
-**Phase 5 — Duplicate.** Route + test (strips eBay identity, copies R2 photos) + menu
-item + card action.
+**Phase 5 — Duplicate.** *Built.* `POST /api/listings/{id}/duplicate` copies any
+listing (draft, live, ended, sold) into a new draft: `_DUPLICATE_CLEARED` (the
+sale-only fields plus `marketplaces`, `videos`, `dirty_fields`, `remote_shadow`,
+`conflicts`, `ai_confidence`, `offer_sent_at`), no `carry_live_others`, photos
+copied by `_copy_photos` from disk or restored from R2 under the original's key
+(a photo found nowhere is skipped, not fatal), `image_urls` dropped once a file
+has been copied, status `draft`, the original untouched. Test:
+`test_duplicate_makes_a_fresh_draft_from_any_listing.py`. Frontend:
+`store.duplicateListing` opens the copy where the seller is with `confidence:
+null`; the ⋯ menu's **Duplicate** (a draft's unsent edits are flushed first);
+`ListingCard`'s `onDuplicate` action, wired on the drafts grid and on the
+manager's draft, live and ended cards. `oneGridOfDraftCards` asserts the new
+action; `editorHeader` covers the menu path.
 
 ## Verification
 

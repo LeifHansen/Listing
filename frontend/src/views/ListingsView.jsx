@@ -125,7 +125,7 @@ const reasonLines = (rows) => {
 export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
-    rotateListingPhoto,
+    rotateListingPhoto, duplicateListing,
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
     listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
@@ -540,6 +540,11 @@ export function ListingsView({ search = "" }) {
               item={item} onOpen={openListing} onDelete={askDelete}
               onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
               ending={endingId === item.id}
+              /* Draft and live cards: a sold record offers Relist from its
+                 archive instead, and a find was never a listing to copy. */
+              onDuplicate={(isDraft(item) || item.status === "published"
+                || item.status === "live" || item.status === "ended")
+                ? duplicateListing : undefined}
               /* Drafts only, like the category and format controls below: a
                  live listing's photos are the copy eBay already took. */
               onRotate={isDraft(item) ? rotateListingPhoto : undefined}

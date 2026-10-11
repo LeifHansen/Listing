@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ArrowRight, PlusCircle, LayoutDashboard,
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
-  Rocket, RefreshCw,
+  Rocket, RefreshCw, Copy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -198,7 +198,8 @@ function PublishedScreen({ w }) {
 
 export function Workflow() {
   const {
-    session, startNew, setSession, openListings, deleteListing, activeBulk,
+    session, startNew, setSession, openListings, deleteListing, duplicateListing,
+    activeBulk,
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
@@ -272,6 +273,14 @@ export function Workflow() {
       icon: w.isLive ? <RefreshCw aria-hidden /> : <Rocket aria-hidden />,
       hint: PUBLISH_SHORTCUT, onSelect: () => w.publish("live") },
     { label: "New listing", icon: <PlusCircle aria-hidden />, onSelect: restart, divider: true },
+    // "Sell similar": a new draft copied from this one. The copy is made
+    // from what the server holds, so a draft's unsent edits go first.
+    { label: "Duplicate", icon: <Copy aria-hidden />,
+      title: "Start a new draft with this listing's details and photos",
+      onSelect: async () => {
+        if (!mustConfirmLeaving) await w.flushSave();
+        duplicateListing(session.sessionId);
+      } },
     { label: "Check with eBay", icon: <ListChecks aria-hidden />,
       title: "Runs eBay's own checks on this listing without publishing it",
       onSelect: w.runPreflight },

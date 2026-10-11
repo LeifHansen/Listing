@@ -11272,6 +11272,99 @@ def _clone_listing(listing_id: str, rec: dict,
     return new_id, listing, copied
 
 
+# Everything a duplicate starts WITHOUT. The sale-only fields above, and on
+# top of them every piece of state the app keeps about a listing's life on
+# a marketplace: where it is live (a relist deliberately carries a live Etsy
+# copy over; a duplicate is a second item and must not claim the first one's
+# Etsy listing), its video (eBay reviews one per listing, and a copy would
+# be a second review of the same file), the sync's bookkeeping, and the
+# AI's verdict on a draft that has since been read and edited.
+_DUPLICATE_CLEARED = {
+    **_SALE_ONLY_FIELDS,
+    "marketplaces": {}, "videos": [], "dirty_fields": [], "remote_shadow": {},
+    "conflicts": {}, "ai_confidence": "", "offer_sent_at": "",
+}
+
+
+def _copy_photos(src_id: str, new_id: str, names: list[str]) -> list[str]:
+    """Copy a listing's optimized photos into a new session, by name.
+
+    From disk when the file is there; from R2 when it has been offloaded
+    (housekeeping frees local copies of anything the bucket holds, so a
+    listing that has sat for a while may have none of its photos on disk).
+    relist's copy reads the disk only, which is right for a sale -- selling
+    purges the photos everywhere -- and wrong for a duplicate, whose point
+    is to start with the same photos. A photo found nowhere is skipped, not
+    fatal: the seller gets a draft missing one photo rather than no draft.
+    Returns the names copied, in the listing's order.
+    """
+    src_dir = storage.optimized_dir(src_id)
+    dst_dir = storage.optimized_dir(new_id)
+    copied: list[str] = []
+    for name in names:
+        src = src_dir / name
+        dst = dst_dir / name
+        try:
+            if src.is_file():
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, dst)
+            elif not objstore.restore(objstore.key_for(src_id, name), dst):
+                continue
+        except OSError as exc:
+            raise HTTPException(
+                507, "The server is out of storage space — try again shortly.") from exc
+        copied.append(name)
+    if copied:
+        objstore.upload_optimized(new_id, dst_dir, copied)
+    return copied
+
+
+@app.post("/api/listings/{listing_id}/duplicate")
+def duplicate_listing(listing_id: str, request: Request) -> dict:
+    """Copy ANY listing -- draft, live, ended or sold -- into a brand-new draft.
+
+    "Sell similar", for the seller with a second of the same thing: the
+    title, price, condition, specifics, description, shipping and photos ride
+    along, and nothing that belongs to the first listing's life on a
+    marketplace does (see _DUPLICATE_CLEARED). The original is left exactly
+    as it was. The draft opens with `confidence` unset on the client, so the
+    paid specifics fill does not run again over specifics that are already
+    filled.
+
+    Photos are copied, from disk or from R2, so the copy is ours: once a
+    file has been copied the eBay-hosted `image_urls` an imported listing
+    carries are dropped, because a draft that has the files does not need
+    the fallback strip and the editor would otherwise show both.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    uid = deps.uid(request)
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+    data = dict(rec.get("listing") or {})
+    data.update(_DUPLICATE_CLEARED)
+    listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
+
+    new_id = storage.new_session_id()
+    copied = _copy_photos(listing_id, new_id,
+                          list(listing.images or storage.list_optimized(listing_id)))
+    listing.images = copied
+    if copied:
+        listing.image_urls = []
+    storage.save_listing(new_id, listing)
+    landed = db.upsert_listing(new_id, listing.model_dump(),
+                               status="draft", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        raise errors.StorageUnavailable(
+            "Couldn't create the new draft just now. Try again in a moment.")
+    log.info("duplicate: %s -> new draft %s (%d photo(s)) user=%s",
+             listing_id, new_id, len(copied), uid)
+    return {"ok": True, "id": new_id, "from": listing_id,
+            "photos": len(copied) + len(listing.image_urls or []),
+            "listing": listing.model_dump()}
+
+
 @app.delete("/api/listings/{listing_id}")
 def delete_listing(listing_id: str, request: Request) -> dict:
     """Remove a saved listing/draft and clean up its files. A missing (or
