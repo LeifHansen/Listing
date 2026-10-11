@@ -296,9 +296,13 @@ when there is none; Esc closes. "eBay asked for these", "Your own specifics"
 and "Add specific" stay as they were. `useEditorShortcuts`: Ctrl/⌘+Enter runs
 `publish("live")`, standing down while the AI is busy or a dialog is up; the
 ⋯ menu lists Publish Live / Update Live Listing first with the shortcut as its
-hint. Tests rewritten: `specificsRefusal`, `aspectCheckboxes`,
-`specificsAreFilledNotOffered` (and `generationFillsEveryAspect` passes
-unchanged — it tests the hook); new: `detailsChips`, `editorShortcuts`.
+hint. Esc also folds the other inline disclosures — the category picker, the
+shipping policy fold and the comps — and hands focus back to the line, the
+`change` link or the comps toggle that opened them. Tests rewritten:
+`specificsRefusal`, `aspectCheckboxes`, `specificsAreFilledNotOffered` (and
+`generationFillsEveryAspect` passes unchanged — it tests the hook); new:
+`detailsChips`, `editorShortcuts`, `shippingLine`, Escape cases in
+`categoryLine` and `compsDisclosure`.
 
 **Phase 5 — Duplicate.** *Built.* `POST /api/listings/{id}/duplicate` copies any
 listing (draft, live, ended, sold) into a new draft: `_DUPLICATE_CLEARED` (the

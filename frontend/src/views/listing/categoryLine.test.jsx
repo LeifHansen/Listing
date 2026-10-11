@@ -120,4 +120,15 @@ describe("the category line", () => {
     expect(host.querySelector('[role="group"]')).toBeNull();
     expect(line().textContent).toContain("Athletic Shoes");
   });
+
+  it("closes on Escape from inside it, and hands focus back to the line", () => {
+    render(stub([], {}, SUGGESTIONS));
+    act(() => line().click());
+    const box = host.querySelector('input[aria-label="Search eBay categories"]');
+    act(() => {
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(host.querySelector('[role="group"]')).toBeNull();
+    expect(document.activeElement).toBe(line());
+  });
 });

@@ -89,6 +89,17 @@ describe("the comps disclosure", () => {
     expect(toggle().textContent).toContain("median of 9 listings");
   });
 
+  it("folds on Escape from inside it, with focus back on the line", () => {
+    render(stub([], COMPS));
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    act(() => {
+      rows()[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(rows()).toHaveLength(0);
+    expect(document.activeElement).toBe(toggle());
+  });
+
   it("says while it is looking, and when it could not", () => {
     render(stub([], { loading: true }));
     expect(toggle().textContent).toContain("Finding comparable listings");

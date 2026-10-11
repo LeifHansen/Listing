@@ -659,10 +659,32 @@ export function ConditionCard({ w }) {
  * options for anyone who needs to quote it. The store shelf moved there too:
  * it is a different question (where this lives in the seller's own store),
  * and most sellers have no store. */
+/* Escape folds an inline disclosure (LISTING_REDESIGN.md, "Keyboard") and
+ * hands focus back to the control that opened it, so the keyboard lands
+ * where it left off rather than on the body. */
+function useReturnFocus(open, ref) {
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    if (wasOpen.current && !open) ref.current?.focus();
+    wasOpen.current = open;
+  }, [open, ref]);
+}
+
+function escapeTo(close) {
+  return (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+}
+
 export function CategoryCard({ w }) {
   const s = w.catSuggestions;
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const lineRef = useRef(null);
+  useReturnFocus(open, lineRef);
   const path = (w.form.category_suggestion || "").trim();
   const parts = path.split(">").map((x) => x.trim()).filter(Boolean);
   const leaf = parts.pop() || "";
@@ -712,6 +734,7 @@ export function CategoryCard({ w }) {
         </CategorySuggestList>
       ) : (
         <button
+          ref={lineRef}
           type="button"
           onClick={openPicker}
           data-fix={level || undefined}
@@ -810,6 +833,8 @@ export function PricingCard({ w }) {
     if (!p) { setCompsOpen(true); w.checkMarketPrice(); return; }
     setCompsOpen((o) => !o);
   };
+  const compsRef = useRef(null);
+  useReturnFocus(compsOpen && !!p, compsRef);
   const view = p && !p.loading && !p.error ? priceView(p) : null;
   const lead = (p?.sources || [])[0];
   const compsHead = !p ? "Check market price"
@@ -959,8 +984,10 @@ export function PricingCard({ w }) {
         )}
 
         {/* The comps, under a disclosure line. */}
-        <div className="flex flex-col gap-2" data-comps>
+        <div className="flex flex-col gap-2" data-comps
+             onKeyDown={compsOpen && p ? escapeTo(() => setCompsOpen(false)) : undefined}>
           <button
+            ref={compsRef}
             type="button"
             onClick={toggleComps}
             aria-expanded={compsOpen}
@@ -1143,6 +1170,8 @@ function ShippingLine({ w }) {
   const { connected, policies, accountDefaultId } = useFulfillmentPolicies();
   const { policiesData, openSettings } = useApp();
   const [changing, setChanging] = useState(false);
+  const changeRef = useRef(null);
+  useReturnFocus(changing, changeRef);
   const override = w.form.fulfillment_policy_id || "";
   const chosen = override || accountDefaultId;
   const orphaned = usePolicyIsOrphaned(override);
@@ -1182,6 +1211,7 @@ function ShippingLine({ w }) {
           <span className="text-ink-secondary">· {also.join(" · ")}</span>
         )}
         <button
+          ref={changeRef}
           type="button"
           onClick={() => setChanging((c) => !c)}
           aria-expanded={changing}
@@ -1191,7 +1221,7 @@ function ShippingLine({ w }) {
         </button>
       </p>
       {changing && (
-        <div className="flex flex-col gap-2 max-w-md">
+        <div className="flex flex-col gap-2 max-w-md" onKeyDown={escapeTo(() => setChanging(false))}>
           <Field
             label="Shipping policy"
             help="The eBay shipping policy this listing goes out with — it's what decides the carrier service. Leave it on Default to follow Settings; USPS Ground Advantage is the cheapest for most packages, up to 70 lb."

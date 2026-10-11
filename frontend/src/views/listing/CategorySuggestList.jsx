@@ -11,16 +11,23 @@ import { cn } from "@/lib/utils";
  * (null | {loading} | {items} | {error}), `currentId` the listing's category,
  * and `onChoose` gets the suggestion that was tapped. There is no floating
  * layer: the list swaps in where the category line was and swaps out again
- * when one is chosen (or `onClose` is pressed), so nothing can sit over the
- * form. */
+ * when one is chosen (or `onClose` is pressed, or Escape, from anywhere
+ * inside it), so nothing can sit over the form. */
 export function CategorySuggestList({
   sugg, currentId, onChoose, onClose, title = "Pick the right category",
   emptyText = "No matches — edit the title and try again.", children, className,
 }) {
   const id = String(currentId ?? "").trim();
+  const onKeyDown = (e) => {
+    if (e.key !== "Escape" || !onClose) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onClose();
+  };
   return (
     <div
       role="group" aria-label={title}
+      onKeyDown={onKeyDown}
       className={cn("flex flex-col gap-1.5 rounded-input border border-line bg-bg-sunken p-2", className)}
     >
       <div className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-faint">
