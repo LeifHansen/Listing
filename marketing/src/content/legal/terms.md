@@ -12,8 +12,8 @@ to them. Plain language, no surprises.
 
 You upload photos; Thryft Shop identifies the item, drafts listing text and
 pricing suggestions, edits the photos, and — when you connect a marketplace
-account and choose to publish — creates listings there on your behalf. eBay and
-Etsy are supported today; other marketplaces appear in Settings as they are
+account and choose to publish — creates listings there on your behalf. eBay is
+supported today; other marketplaces appear in Settings as they are
 added, and nothing is sent anywhere you have not connected and chosen.
 
 ## Your account
@@ -52,7 +52,7 @@ list on and with applicable law.
 ## The marketplaces
 
 Thryft Shop is an independent tool. It is not affiliated with, endorsed by, or
-sponsored by eBay Inc., Etsy, Inc., or any other marketplace it connects to.
+sponsored by eBay Inc. or any other marketplace it connects to.
 Your selling relationship with each of them — fees, policies, payouts,
 disputes, and account standing — is between you and that marketplace, and their
 own terms govern it.
