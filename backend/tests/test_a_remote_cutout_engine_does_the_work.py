@@ -103,47 +103,57 @@ def _remote(monkeypatch, **engines):
 
 # --- the chain -------------------------------------------------------------
 
+def _canva(monkeypatch, configured: bool) -> None:
+    """All three Canva credentials present, or none of them."""
+    value = "k" if configured else ""
+    for name in ("CANVA_CLIENT_ID", "CANVA_CLIENT_SECRET",
+                 "CANVA_REFRESH_TOKEN"):
+        monkeypatch.setattr(config, name, value)
+
+
 def test_with_no_key_the_chain_is_the_local_model_alone(monkeypatch):
     """The guarantee that lets this ship: configure nothing, change nothing."""
     monkeypatch.setattr(config, "BG_ENGINE", "auto")
-    monkeypatch.setattr(config, "REMOVEBG_API_KEY", "")
-    monkeypatch.setattr(config, "LEONARDO_API_KEY", "")
+    _canva(monkeypatch, configured=False)
     assert config.bg_engine_chain() == ["local"]
 
 
 def test_a_configured_engine_goes_in_front_of_the_local_model(monkeypatch):
     monkeypatch.setattr(config, "BG_ENGINE", "auto")
-    monkeypatch.setattr(config, "REMOVEBG_API_KEY", "k")
-    monkeypatch.setattr(config, "LEONARDO_API_KEY", "")
-    assert config.bg_engine_chain() == ["removebg", "local"]
+    _canva(monkeypatch, configured=True)
+    assert config.bg_engine_chain() == ["canva", "local"]
 
-    monkeypatch.setattr(config, "LEONARDO_API_KEY", "k2")
-    assert config.bg_engine_chain() == ["removebg", "leonardo", "local"]
+
+def test_a_partly_configured_engine_is_not_configured(monkeypatch):
+    """Canva's connection is three secrets, not one; two of them cannot cut a
+    background, and an engine that tries anyway fails every photo."""
+    monkeypatch.setattr(config, "BG_ENGINE", "auto")
+    _canva(monkeypatch, configured=True)
+    monkeypatch.setattr(config, "CANVA_REFRESH_TOKEN", "")
+    assert config.bg_engine_chain() == ["local"]
 
 
 def test_naming_an_engine_without_its_key_falls_back_to_what_is_configured(
         monkeypatch):
     """BG_ENGINE is a request, not a promise: a key that isn't there cannot
     strip a background, and failing every photo instead is worse."""
-    monkeypatch.setattr(config, "BG_ENGINE", "removebg")
-    monkeypatch.setattr(config, "REMOVEBG_API_KEY", "")
-    monkeypatch.setattr(config, "LEONARDO_API_KEY", "k")
-    assert config.bg_engine_chain() == ["leonardo", "local"]
+    monkeypatch.setattr(config, "BG_ENGINE", "canva")
+    _canva(monkeypatch, configured=False)
+    assert config.bg_engine_chain() == ["local"]
 
 
 def test_local_can_be_demanded_outright(monkeypatch):
     monkeypatch.setattr(config, "BG_ENGINE", "local")
-    monkeypatch.setattr(config, "REMOVEBG_API_KEY", "k")
+    _canva(monkeypatch, configured=True)
     assert config.bg_engine_chain() == ["local"]
 
 
 def test_the_chain_always_ends_at_local(monkeypatch):
     """Whatever else is true, there is always something that can answer."""
-    for engine in ("auto", "removebg", "leonardo", "local", "nonsense"):
+    for engine in ("auto", "canva", "local", "nonsense"):
         monkeypatch.setattr(config, "BG_ENGINE", engine)
-        for key in ("", "k"):
-            monkeypatch.setattr(config, "REMOVEBG_API_KEY", key)
-            monkeypatch.setattr(config, "LEONARDO_API_KEY", key)
+        for configured in (False, True):
+            _canva(monkeypatch, configured=configured)
             assert config.bg_engine_chain()[-1] == "local"
 
 
@@ -152,23 +162,23 @@ def test_the_chain_always_ends_at_local(monkeypatch):
 def test_a_remote_cutout_never_wakes_the_local_model(chain, no_local,
                                                      monkeypatch):
     """The whole point of the latency win: no inference, so no lock either."""
-    chain("removebg", "local")
+    chain("canva", "local")
     asked = []
-    _remote(monkeypatch, removebg=_engine(
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)), log=asked))
 
     img = _photo()
     out, engine = images.cutout_with_engine(img)
 
     assert out is not None
-    assert engine == "removebg"
+    assert engine == "canva"
     assert asked == [img.size], "the remote engine got the photo"
     assert not images._INFER_LOCK.locked()
 
 
 def test_a_remote_cutout_is_composited_on_white(chain, no_local, monkeypatch):
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
 
     out, _ = images.cutout_with_engine(_photo())
@@ -185,8 +195,8 @@ def test_a_matte_that_comes_back_a_different_size_is_scaled_to_the_photo(
     """A service answers at the size it was sent, and the upload is capped. An
     alpha of one size against a photo of another understates coverage -- which
     would refuse a perfectly good cutout -- and composites at the wrong size."""
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut((600, 450), (200, 150, 400, 300))))
 
     img = _photo((1200, 900))
@@ -194,14 +204,14 @@ def test_a_matte_that_comes_back_a_different_size_is_scaled_to_the_photo(
 
     assert out is not None, "a half-size matte must not read as an empty one"
     assert out.size == img.size
-    assert engine == "removebg"
+    assert engine == "canva"
 
 
 def test_a_remote_matte_is_not_put_through_the_local_models_gates(
         chain, no_local, monkeypatch):
     """A thin chain -- a necklace -- is what the shape gate refused on a
     flawless matte. A remote matte answers coverage and nothing else."""
-    chain("removebg", "local")
+    chain("canva", "local")
 
     def _chain_matte(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
@@ -212,12 +222,12 @@ def test_a_remote_matte_is_not_put_through_the_local_models_gates(
                      outline=ITEM + (255,), width=6)
         return out
 
-    _remote(monkeypatch, removebg=_engine(returns=_chain_matte))
+    _remote(monkeypatch, canva=_engine(returns=_chain_matte))
 
     out, engine = images.cutout_with_engine(_photo())
 
     assert out is not None, "a remote matte must not be refused for its shape"
-    assert engine == "removebg"
+    assert engine == "canva"
 
 
 def test_a_remote_engine_that_keeps_nothing_is_still_refused(chain,
@@ -225,8 +235,8 @@ def test_a_remote_engine_that_keeps_nothing_is_still_refused(chain,
     """The one gate that survives. An empty matte is an empty matte whoever
     produced it, and shipping it would erase the item — so it is refused and
     the local model gets its turn instead."""
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: Image.new("RGBA", rgb.size, (0, 0, 0, 0))))
     # The local model finds nothing either, so the photo is kept as shot.
     monkeypatch.setattr(images, "_mask",
@@ -242,18 +252,18 @@ def test_a_remote_engine_that_keeps_nothing_is_still_refused(chain,
 
 def test_a_failed_remote_engine_falls_through_to_the_next_one(chain, no_local,
                                                               monkeypatch):
-    chain("removebg", "leonardo", "local")
+    chain("canva", "other", "local")
     tried = []
     _remote(
         monkeypatch,
-        removebg=_engine(raises=cutout_api.RemoveBgError("out of credits"),
+        canva=_engine(raises=cutout_api.CanvaError("has used up its AI credits"),
                          log=tried),
-        leonardo=_engine(returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)),
+        other=_engine(returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)),
                          log=tried))
 
     out, engine = images.cutout_with_engine(_photo())
 
-    assert engine == "leonardo", "the second engine answered"
+    assert engine == "other", "the second engine answered"
     assert out is not None
     assert len(tried) == 2, "both were asked, in order"
 
@@ -261,9 +271,9 @@ def test_a_failed_remote_engine_falls_through_to_the_next_one(chain, no_local,
 def test_a_failed_remote_engine_falls_back_to_the_local_model(chain,
                                                               monkeypatch):
     """An expired key must not cost the seller their photo."""
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
-        raises=cutout_api.RemoveBgError("rejected the API key")))
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
+        raises=cutout_api.CanvaError("Reconnect the Canva account")))
     monkeypatch.setattr(
         images, "_mask",
         lambda rgb, wait=None: rgb.convert("L").point(
@@ -277,33 +287,33 @@ def test_a_failed_remote_engine_falls_back_to_the_local_model(chain,
 
 def test_with_no_local_floor_the_reason_reaches_the_seller(chain, monkeypatch):
     """When local is not in the chain there is nothing to fall back to, so the
-    real cause has to be raised rather than swallowed -- "out of credits" is
+    real cause has to be raised rather than swallowed -- "out of AI credits" is
     something somebody can act on."""
-    chain("removebg")
-    _remote(monkeypatch, removebg=_engine(
-        raises=cutout_api.RemoveBgError(
-            "The remove.bg account is out of credits")))
+    chain("canva")
+    _remote(monkeypatch, canva=_engine(
+        raises=cutout_api.CanvaError(
+            "The Canva account has used up its AI credits")))
 
-    with pytest.raises(cutout_api.CutoutApiError, match="out of credits"):
+    with pytest.raises(cutout_api.CutoutApiError, match="AI credits"):
         images.cutout_with_engine(_photo())
 
 
 def test_the_studio_reports_which_engine_answered(chain, no_local, monkeypatch):
     """remove_background_white's second return value is what the editor shows;
     hardcoding "local" is how a misconfigured key hides."""
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
 
     _, engine = images.remove_background_white(_photo())
 
-    assert engine == "removebg"
+    assert engine == "canva"
 
 
 def test_the_readiness_probe_names_the_chain(chain):
     """One field to answer "is the paid engine actually being used?"."""
-    chain("removebg", "local")
-    assert images.engine_state()["chain"] == ["removebg", "local"]
+    chain("canva", "local")
+    assert images.engine_state()["chain"] == ["canva", "local"]
 
 
 def test_a_deploy_with_no_paid_engine_is_not_degraded(chain):
@@ -316,9 +326,9 @@ def test_a_deploy_with_no_paid_engine_is_not_degraded(chain):
 def test_falling_back_to_local_with_a_key_configured_is_degraded(chain):
     """The case worth a word: somebody is paying for an engine that did not
     answer. Silence here is how an expired key goes unnoticed for weeks."""
-    chain("removebg", "local")
+    chain("canva", "local")
     assert images.engine_degraded("local") is True
-    assert images.engine_degraded("removebg") is False
+    assert images.engine_degraded("canva") is False
 
 
 # --- the framed print, which is the loudest half of the complaint ----------
@@ -364,8 +374,8 @@ def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
     print)". It didn't try because the geometric scan returned None, which
     correctly means keep-as-shot. A remote engine can find the frame."""
     img, box = _framed_print()
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(returns=lambda rgb: _cut(rgb.size, box)))
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(returns=lambda rgb: _cut(rgb.size, box)))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -386,12 +396,12 @@ def test_a_print_photographed_at_an_angle_is_still_a_print(chain, no_local,
     box badly -- 0.85 at 5 degrees, 0.74 at 10. Judged that way the fix refuses
     the very photos it exists for, so the rectangle is fitted at the best
     angle instead."""
-    chain("removebg", "local")
+    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 3, 5, 8, 12, 20):
         img, _ = _framed_print()
-        _remote(monkeypatch, removebg=_engine(
+        _remote(monkeypatch, canva=_engine(
             returns=lambda rgb, d=deg: _tilted_cut(rgb.size, d)))
 
         assert images.art_cutout(img) is not None, (
@@ -404,13 +414,13 @@ def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
     earlier revision turned the corners the wrong way and clipped one corner
     off while taking floor at the opposite one -- accepted/rejected looked
     perfect throughout, and only measuring the overlap showed it."""
-    chain("removebg", "local")
+    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 5, 12, 20):
         img, _ = _framed_print()
         matte = _tilted_cut(img.size, deg)
-        _remote(monkeypatch, removebg=_engine(returns=lambda rgb, m=matte: m))
+        _remote(monkeypatch, canva=_engine(returns=lambda rgb, m=matte: m))
 
         out = images.art_cutout(img)
         assert out is not None
@@ -431,7 +441,7 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
     is the only thing asked for here — this path takes the matte's SHAPE and
     then fills it solid itself. Measured with the gap still in it, a matted
     print scores below an ellipse and is refused."""
-    chain("removebg", "local")
+    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
     img, box = _framed_print()
 
@@ -442,7 +452,7 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
             fill=(0, 0, 0, 0))
         return cut
 
-    _remote(monkeypatch, removebg=_engine(returns=_holed))
+    _remote(monkeypatch, canva=_engine(returns=_holed))
 
     out = images.art_cutout(img)
 
@@ -457,9 +467,9 @@ def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
     """Geometry first: it cannot be wrong about what is inside the box it
     returns, so a remote engine is only ever the second opinion."""
     img, box = _framed_print()
-    chain("removebg", "local")
+    chain("canva", "local")
     asked = []
-    _remote(monkeypatch, removebg=_engine(
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, box), log=asked))
     monkeypatch.setattr(artwork, "outline", lambda rgb: (
         ((10, 10), (100, 10), (100, 100), (10, 100)),))
@@ -477,14 +487,14 @@ def test_a_subject_lifted_out_of_a_painting_is_refused(chain, no_local,
     rejected because it is not a rectangle at ANY angle: a round subject scores
     0.785 however it is turned, well under the 0.9 floor."""
     img, _ = _framed_print()
-    chain("removebg", "local")
+    chain("canva", "local")
 
     def _the_baby(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
         ImageDraw.Draw(out).ellipse((500, 350, 760, 610), fill=ITEM + (255,))
         return out
 
-    _remote(monkeypatch, removebg=_engine(returns=_the_baby))
+    _remote(monkeypatch, canva=_engine(returns=_the_baby))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     assert images.art_cutout(img) is None, \
@@ -495,7 +505,7 @@ def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch)
     """The invariant services/artwork exists for, held on the new path too:
     whatever the remote matte said, what ships is a FILLED RECTANGLE."""
     img, box = _framed_print()
-    chain("removebg", "local")
+    chain("canva", "local")
 
     def _holes_in_the_art(rgb):
         """A matte shaped like the frame but with a piece of the artwork
@@ -508,7 +518,7 @@ def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch)
         ImageDraw.Draw(out).ellipse((560, 400, 710, 550), fill=(0, 0, 0, 0))
         return out
 
-    _remote(monkeypatch, removebg=_engine(returns=_holes_in_the_art))
+    _remote(monkeypatch, canva=_engine(returns=_holes_in_the_art))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -526,7 +536,7 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
     edges: a rectangle's corners are opaque, and the ellipse the engine
     actually returned would have left them white."""
     img, box = _framed_print()
-    chain("removebg", "local")
+    chain("canva", "local")
 
     def _rounded(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
@@ -534,7 +544,7 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
                                              fill=ITEM + (255,))
         return out
 
-    _remote(monkeypatch, removebg=_engine(returns=_rounded))
+    _remote(monkeypatch, canva=_engine(returns=_rounded))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -551,9 +561,9 @@ def test_a_paid_engine_is_still_asked_about_a_border_first(chain, no_local,
     with a key configured, the engine that was paid for answers, and the
     local slot is never taken."""
     img, box = _framed_print()
-    chain("removebg", "local")
+    chain("canva", "local")
     asked = []
-    _remote(monkeypatch, removebg=_engine(
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, box), log=asked))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
@@ -565,8 +575,8 @@ def test_the_inference_lock_is_untouched_by_a_remote_run(chain, no_local,
                                                           monkeypatch):
     """A remote engine must work while the single local slot is BUSY: that is
     what turns ~104s serialized into a batch that actually moves."""
-    chain("removebg", "local")
-    _remote(monkeypatch, removebg=_engine(
+    chain("canva", "local")
+    _remote(monkeypatch, canva=_engine(
         returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
 
     held = threading.Lock()
@@ -578,4 +588,4 @@ def test_the_inference_lock_is_untouched_by_a_remote_run(chain, no_local,
         held.release()
 
     assert out is not None, "a remote cutout must not queue behind the model"
-    assert engine == "removebg"
+    assert engine == "canva"

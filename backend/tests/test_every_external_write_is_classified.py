@@ -79,6 +79,12 @@ SAFE_TO_REPEAT = {
         "mints another; nothing of the seller's changes.",
     "backend.etsy_auth._token_request": "same as ebay_auth._token_request.",
     "backend.depop_auth._token_request": "same as ebay_auth._token_request.",
+    "backend.services.cutout_api._exchange":
+        "Canva's refresh grant, on OUR account. Unlike the three above it "
+        "ROTATES: a lost answer may mean Canva spent the refresh token we "
+        "sent and we never saw its replacement. The engine then tries the "
+        "seed from CANVA_REFRESH_TOKEN and, if that too is spent, says in so "
+        "many words to reconnect — no seller state is involved either way.",
     "backend.services.ebay_notify._app_token":
         "application token fetch — no seller state.",
     "backend.services.taxonomy._app_token": "same as ebay_notify._app_token.",
@@ -132,19 +138,30 @@ SAFE_TO_REPEAT = {
         "(listing_sync.push_videos, at publish time) creates a fresh id "
         "rather than re-sending into an uncertain one, which leaves the "
         "first to expire unattached.",
-    "backend.services.cutout_api.removebg_cutout":
-        "a POST that TRANSFORMS: it sends one photo and gets that photo's "
-        "cutout back. Nothing of the seller's is created, edited or "
-        "published, and no listing can name the result — a lost answer means "
-        "no cutout, which the photo pass already handles by keeping the "
-        "photo as shot. The one real cost of a repeat is a second API credit "
-        "on OUR remove.bg account, which is money but not correctness: it "
+    "backend.services.cutout_api._upload":
+        "puts one photo into OUR Canva library as an asset. Nothing of the "
+        "seller's is created, edited or published, and no listing can name "
+        "the result — a lost answer means no cutout, which the photo pass "
+        "already handles by keeping the photo as shot. A repeat is at worst "
+        "a second copy in a library canva_cutout deletes from anyway.",
+    "backend.services.cutout_api._transform":
+        "a POST that TRANSFORMS: background_removal on that asset, answered "
+        "with another asset. The one real cost of a repeat is a second AI "
+        "credit on OUR Canva account, which is money but not correctness: it "
         "cannot produce a duplicate listing, charge the seller twice, or "
-        "leave the item in two states. That is why _post_with_retries retries "
-        "429 and 5xx and deliberately does NOT retry 402 or 403.",
-    "backend.services.cutout_api.leonardo_cutout":
-        "same as removebg_cutout — one photo in, its cutout out, on the "
-        "engine remove.bg migrates to.",
+        "leave the item in two states. That is why _send_with_retries "
+        "retries rate-limit 429s and 5xx and deliberately does NOT retry a "
+        "401, a 403 or a credit-quota 429.",
+    "backend.services.cutout_api._export_png":
+        "two POSTs on OUR account: a design the size of the cutout, and its "
+        "export as a transparent PNG. A lost answer leaves a design Canva "
+        "removes itself after 7 days unedited, and an export nobody "
+        "downloads; neither touches a seller or a listing.",
+    "backend.services.cutout_api._discard":
+        "deletes the two assets a cutout made from OUR library, best effort, "
+        "after the cutout is already in hand. A lost answer is a leftover "
+        "file in that library and nothing else; the call swallows every "
+        "failure because nothing downstream depends on it.",
 }
 
 _VERBS = {"post", "put", "patch", "delete", "request"}

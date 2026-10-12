@@ -314,16 +314,25 @@ curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   ahead of `local` when its key is set, and `local` is always the last entry,
   because it is the only engine that needs no credentials: an app with no keys
   reads `["local"]` and behaves exactly as it did before any of this.
-  `BG_ENGINE` picks the front of that chain (`auto`, `removebg`, `leonardo`,
-  `local`); see `.env.example` for the whole story, including that remove.bg's
-  standalone API shuts down on 2026-12-01 and `leonardo` is its successor.
-  Reading `chain` is how an **expired or mistyped key gets noticed**: without
-  it, the only symptom is sellers' cutouts quietly going back to the slow
-  built-in model, and the studio only says so per-cutout (the `degraded` flag
-  on `/api/image/remove-bg`). The older Pixian / Photoroom / Adobe engines are
-  still gone — they were removed in #246 — so a `PHOTOROOM_API_KEY` or
-  `LIGHTROOM_API_KEY` still set on the app remains a dead credential and can
-  be unset.
+  `BG_ENGINE` picks the front of that chain (`auto`, `canva`, `local`). The
+  remote engine is **Canva's REST API** — Canva owns remove.bg, and its
+  `background_removal` image transformation is where that remover lives now
+  that the standalone remove.bg API shuts down on 2026-12-01. It is OAuth, not
+  an API key: connect the Canva account once with
+  `python3 scripts/canva_authorize.py`, which prints `CANVA_CLIENT_ID`,
+  `CANVA_CLIENT_SECRET` and `CANVA_REFRESH_TOKEN` for `fly secrets`. The
+  account needs Canva Pro (the remover and transparent PNG export are both
+  paid-plan capabilities) and the image-transformation preview API switched on
+  for the app; each cutout spends one of its AI credits. See `.env.example`
+  for the rate limits (notably 75 exports per five minutes) and
+  `backend/services/cutout_api.py` for the four-job round trip a cutout is.
+  Reading `chain` is how a **broken connection gets noticed**: without it, the
+  only symptom is sellers' cutouts quietly going back to the slow built-in
+  model, and the studio only says so per-cutout (the `degraded` flag on
+  `/api/image/remove-bg`). The older remove.bg / Leonardo / Pixian /
+  Photoroom / Adobe engines are gone, so a `REMOVEBG_API_KEY`,
+  `LEONARDO_API_KEY`, `PHOTOROOM_API_KEY` or `LIGHTROOM_API_KEY` still set on
+  the app is a dead credential and can be unset.
 - **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
   cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
   on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
