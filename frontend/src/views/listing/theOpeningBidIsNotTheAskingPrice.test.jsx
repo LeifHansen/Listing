@@ -65,7 +65,7 @@ function stub(sets, over = {}, priceData = MARKET) {
       condition_description: "", purchase_price: "", item_specifics: [],
       accept_offers: false, ...over,
     },
-    completion: { pricing: "todo" },
+    completion: { price: "todo" },
     categoryMeta: { aspects: [], conditions: [], conditionsChecked: true },
     priceData,
     comps: null, compsBusy: false, isLive: false, publishResult: null,

@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
   SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Pencil,
-  ChevronDown,
+  ChevronDown, Copy,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
@@ -346,7 +346,7 @@ function turnStyle(spin, square) {
 // parents already keep stable.
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
-  onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  onDuplicate, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   onQuickEdit, quickEditOpen = false,
   showEbayChip = false,
   layout = "grid", className,
@@ -573,11 +573,30 @@ export const ListingCard = memo(function ListingCard({
     </button>
   );
 
-  const actions = (onDelete || onEnd || onStartOver || onSkip
+  const actions = (onDelete || onEnd || onStartOver || onSkip || onDuplicate
     || (list && rotatable) || quickEditButton) && (
     <>
       {quickEditButton}
       {list && rotateButton}
+      {/* Duplicate: "sell similar". A brand-new draft copied from this one,
+          photos included, with nothing of this listing's life on eBay. On
+          draft and live cards alike -- the second of the same thing turns
+          up whether or not the first has sold. */}
+      {onDuplicate && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDuplicate(item.id); }}
+          aria-label="Duplicate this listing"
+          title="Duplicate — start a new draft with this listing's details and photos"
+          className={cn(
+            "grid place-items-center size-8 rounded-full cursor-pointer",
+            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+            "hover:text-blue hover:border-blue/40 transition-colors",
+          )}
+        >
+          <Copy size={15} aria-hidden />
+        </button>
+      )}
       {/* Skip: set this draft aside. It stays in Drafts, but the queue
           after a publish stops offering it as the next one to work on. */}
       {onSkip && (

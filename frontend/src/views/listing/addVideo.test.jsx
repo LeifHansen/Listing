@@ -1,5 +1,9 @@
 /* The listing's video: one file, no editing, and eBay's wait said out loud.
  *
+ * It is a tile at the end of the photo grid (LISTING_REDESIGN.md, "Photos"),
+ * with a caption row under the grid for what eBay is doing with it -- not a
+ * card of its own. These mount the Photos section, which is where it lives.
+ *
  * eBay allows ONE video per listing and enforces it by IGNORING the extras
  * rather than refusing them — so a card that let a seller add three would
  * show three successful uploads and a listing with one video, and nothing
@@ -20,7 +24,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { useListingForm } from "./useListingForm";
-import { VideoCard } from "./cards";
+import { PhotosCard } from "./cards";
 import { MAX_VIDEOS } from "./blockers";
 import { isVideoFile } from "@/lib/api";
 
@@ -49,10 +53,15 @@ function Probe({ onValue }) {
   const app = useApp();
   const form = useListingForm();
   useEffect(() => { onValue({ app, form }); });
-  // Mounted the way NewListing mounts it, confirm and all — the card hands
+  // Mounted the way NewListing mounts it, confirm and all — the section hands
   // the removal out rather than calling it, so a test that wired it straight
   // to removeVideo would not be testing the screen.
-  return <VideoCard w={form} onRemove={(name) => form.removeVideo(name, async () => true)} />;
+  return (
+    <PhotosCard
+      w={form} onEdit={() => {}} onDelete={() => {}}
+      onRemoveVideo={(name) => form.removeVideo(name, async () => true)}
+    />
+  );
 }
 
 let root;
@@ -89,6 +98,11 @@ afterEach(() => {
 });
 
 const MP4 = () => new File(["x"], "clip.mp4", { type: "video/mp4" });
+
+/** The video tile's own file input — the photo picker in the same grid is
+ *  not it. */
+const videoPicker = () =>
+  host.querySelector('[data-video-tile] input[type=file]');
 
 describe("adding a video", () => {
   it("uploads the file and holds what the server said about it", async () => {
@@ -218,16 +232,18 @@ describe("eBay's one-video limit", () => {
                  url: "/media/s1/video/video_1.mp4" }],
     });
 
-    // With a video already there the card offers no picker at all — there is
-    // nothing to click, which is the clearest way to say "one".
-    expect(host.querySelector("input[type=file]")).toBe(null);
+    // With a video already there the tile offers no picker at all — there is
+    // nothing to click, which is the clearest way to say "one". (The photo
+    // picker beside it is still there; it takes photos.)
+    expect(videoPicker()).toBe(null);
+    expect(host.querySelector("[data-video-tile] video")).toBeTruthy();
     expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 
   it("only offers a picker that asks for MP4", async () => {
     vi.stubGlobal("fetch", vi.fn(() => ok({ videos: [] })));
     await mountEditor();
-    const input = host.querySelector("input[type=file]");
+    const input = videoPicker();
     expect(input.getAttribute("accept")).toContain("video/mp4");
     // Never `multiple`: eBay takes one, and a picker that let a seller select
     // four would be a promise the listing cannot keep.

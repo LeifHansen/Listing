@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, pollJob, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import {
+  api, pollJob, postJson, patchJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS,
+} from "@/lib/api";
+import { changedFields } from "@/lib/fieldDiff";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { once } from "@/lib/utils";
@@ -54,6 +57,11 @@ const EMPTY = {
   marketplaces: {},
 };
 
+// Autosave waits this long after the last keystroke before it sends; a
+// failed send is retried after each of these, in turn, then the last again.
+export const AUTOSAVE_DELAY_MS = 1500;
+export const AUTOSAVE_RETRY_MS = [2000, 5000, 15000];
+
 // Which card each form field lives on, in the same vocabulary eBay's issues
 // use for `target`. Read by `set` to take the refusal ring off a field the
 // seller has just answered.
@@ -106,6 +114,45 @@ function fromListing(l) {
   };
 }
 
+// The form, read back as a backend Listing payload, over `base` (the listing
+// the session was opened on, for every field the form does not hold). Pure,
+// so autosave can put the SAVED listing through the same door and diff like
+// against like: a record from before a field existed opens with the form's
+// default for it, and that default must not read as an edit.
+function payloadOf(form, base) {
+  const num = (v) => parseFloat(v) || 0;
+  return {
+    ...(base || {}),
+    ...form,
+    price: form.price === "" ? null : parseFloat(form.price),
+    purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
+    retail_price: form.retail_price === "" ? null : parseFloat(form.retail_price),
+    sold_price: form.sold_price === "" ? null : parseFloat(form.sold_price),
+    auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
+    quantity: parseInt(form.quantity || "1", 10),
+    package_weight_lb: num(form.package_weight_lb),
+    package_weight_oz: num(form.package_weight_oz),
+    package_length_in: num(form.package_length_in),
+    package_width_in: num(form.package_width_in),
+    package_height_in: num(form.package_height_in),
+    // Blank rows are kept (a specific being typed still needs its row) —
+    // except where the SAME aspect already has an answer elsewhere in the
+    // list. Those are pure leftovers, and a blank row sitting in front of
+    // the answer is what made a filled aspect read as empty.
+    item_specifics: (() => {
+      const rows = (form.item_specifics || [])
+        .map((s) => ({ name: (s.name || "").trim(), value: (s.value || "").trim(),
+                       confidence: s.confidence || "" }))
+        .filter((s) => s.name);
+      const answered = new Set(
+        rows.filter((s) => s.value).map((s) => s.name.toLowerCase()));
+      return rows.filter((s) => s.value || !answered.has(s.name.toLowerCase()));
+    })(),
+    images: form.images || [],
+    currency: form.currency || "USD",
+  };
+}
+
 export function useListingForm() {
   const {
     session, setSession, health, loadListings, invalidateListings,
@@ -123,10 +170,57 @@ export function useListingForm() {
   const [aiBusy, setAiBusy] = useState(null); // string[] of friendly messages, or null
   const [publishResult, setPublishResult] = useState(null);
   const [fixTarget, setFixTarget] = useState(null); // which field group eBay flagged
+  // The publish bar's result panel has a close button; closing it also
+  // takes the refusal text off the sections that quote it (TitleCard,
+  // SpecificsCard), because the seller has said they have read it.
+  const dismissPublishResult = useCallback(() => setPublishResult(null), []);
   const [catSuggestions, setCatSuggestions] = useState(null);
   const [priceData, setPriceData] = useState(null);
   const [categoryMeta, setCategoryMeta] = useState(
     { conditions: [], aspects: [], conditionsChecked: true });
+
+  // ---------- autosave: what the server is known to hold ----------
+  // `savedRef` is the listing as the server last confirmed it, and it is the
+  // one thing autosave diffs against (lib/fieldDiff). There was no such
+  // record before: `session.listing` is what the editor was OPENED on and is
+  // only sometimes updated by the paths that write (refine updates it, the
+  // specifics autofill did not, a full save after "Add photos" did not), so
+  // nothing in the hook could say what the server held NOW. Every path that
+  // writes the listing hands its result to rememberSaved below -- that is
+  // the whole discipline, and the reason autosave can send three keys rather
+  // than the listing.
+  //
+  // Autosave is for DRAFTS. A listing eBay is showing is edited with Update
+  // Live Listing (a save and a revise in one request, the seller watching),
+  // never by a timer: the row would move while eBay's copy did not, and the
+  // server answers 409 to the attempt in any case (main.py _PATCH_LIVE_STAGES).
+  // A sold record is an archive with its own explicit save. Both are gated
+  // out below.
+  //
+  // State, not a ref, because the "is anything unsaved?" question is answered
+  // DURING render (the header's indicator, the Done button's decision) and
+  // React's refs rule keeps refs out of render. The async paths that need the
+  // latest value after an await read the mirror `savedRef`, written in an
+  // effect below.
+  const [saved, setSaved] = useState(session?.listing || null);
+  const savedRef = useRef(saved);
+  useEffect(() => { savedRef.current = saved; });
+  // idle: nothing to say yet. saving: a PATCH in flight. saved: the last
+  // PATCH landed. error: the last PATCH failed and will be retried. off: the
+  // server refused the autosave for this listing (a 409) -- the explicit
+  // buttons still work. ("Unsaved" is not a state: it is derived from the
+  // diff, see pendingChanges.)
+  const [saveState, setSaveState] = useState("idle");
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+  // Only the seller's own edits start the timer. Opening a listing normalises
+  // a few values on the way into the form (a blank row dropped, a number
+  // parsed) and a diff of that against the server would save a listing
+  // nobody touched -- on every open, of every listing.
+  const [touched, setTouched] = useState(false);
+  const saveTimer = useRef(null);
+  const pendingSave = useRef(null);   // the in-flight PATCH, awaited by publish
+  const retryStep = useRef(0);
+  const publishingRef = useRef(false);
 
   // ---------- marketplace targets ----------
   // Which marketplaces the Publish buttons hit — the shared remembered
@@ -179,10 +273,25 @@ export function useListingForm() {
       setCatSuggestions(null);
       setPriceData(null);
       setCategoryMeta({ conditions: [], aspects: [], conditionsChecked: true });
+      // A different listing: what the server holds is what it was opened on,
+      // and nothing has been typed into it yet.
+      setSaved(session?.listing || null);
+      setTouched(false);
+      retryStep.current = 0;
+      if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+      setSaveState("idle");
+      setLastSavedAt(null);
     }
   }, [sessionId, session]);
 
+  // Record the listing as the server now holds it. Called by every path that
+  // writes -- see savedRef above.
+  const rememberSaved = useCallback((listing) => {
+    if (listing) setSaved(listing);
+  }, []);
+
   const set = useCallback((key, value) => {
+    setTouched(true);
     setForm((f) => ({ ...f, [key]: value }));
     // A refusal names a field, and the editor rings that field red until the
     // next publish. So a seller who did exactly what they were told — edit the
@@ -200,39 +309,9 @@ export function useListingForm() {
   }, []);
 
   // Read the form back into a backend Listing payload.
-  const collect = useCallback(() => {
-    const num = (v) => parseFloat(v) || 0;
-    return {
-      ...(session?.listing || {}),
-      ...form,
-      price: form.price === "" ? null : parseFloat(form.price),
-      purchase_price: form.purchase_price === "" ? null : parseFloat(form.purchase_price),
-      retail_price: form.retail_price === "" ? null : parseFloat(form.retail_price),
-      sold_price: form.sold_price === "" ? null : parseFloat(form.sold_price),
-      auction_start_price: form.auction_start_price === "" ? null : parseFloat(form.auction_start_price),
-      quantity: parseInt(form.quantity || "1", 10),
-      package_weight_lb: num(form.package_weight_lb),
-      package_weight_oz: num(form.package_weight_oz),
-      package_length_in: num(form.package_length_in),
-      package_width_in: num(form.package_width_in),
-      package_height_in: num(form.package_height_in),
-      // Blank rows are kept (a specific being typed still needs its row) —
-      // except where the SAME aspect already has an answer elsewhere in the
-      // list. Those are pure leftovers, and a blank row sitting in front of
-      // the answer is what made a filled aspect read as empty.
-      item_specifics: (() => {
-        const rows = form.item_specifics
-          .map((s) => ({ name: s.name.trim(), value: s.value.trim(),
-                         confidence: s.confidence || "" }))
-          .filter((s) => s.name);
-        const answered = new Set(
-          rows.filter((s) => s.value).map((s) => s.name.toLowerCase()));
-        return rows.filter((s) => s.value || !answered.has(s.name.toLowerCase()));
-      })(),
-      images: form.images || [],
-      currency: form.currency || "USD",
-    };
-  }, [form, session]);
+  const collect = useCallback(() => payloadOf(form, session?.listing),
+    [form, session]);
+
 
   // ---------- item specifics (single source of truth) ----------
   // The aspect's ANSWER row — the first one holding a value, not just the
@@ -255,6 +334,7 @@ export function useListingForm() {
 
   // Tick / untick one value of a multi-select aspect (see specifics.js).
   const toggleSpecificValue = useCallback((name, value, on) => {
+    setTouched(true);
     setForm((f) => {
       const specs = toggleValue(f.item_specifics, name, value, on);
       return specs === f.item_specifics ? f : { ...f, item_specifics: specs };
@@ -264,6 +344,7 @@ export function useListingForm() {
   // A seller edit clears the AI confidence flag: the value is now theirs, so
   // neither the ✓ (AI high) nor the ⚠ (review) badge applies anymore.
   const upsertSpecific = useCallback((name, value) => {
+    setTouched(true);
     setForm((f) => {
       const specs = [...f.item_specifics];
       // The same row getSpecificRow shows, so an edit lands on the value the
@@ -343,13 +424,19 @@ export function useListingForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const suggestCategories = useCallback(async () => {
+  // `search` is the seller's own words, when they typed some into the
+  // picker; without it the lookup runs on the listing (brand, title and
+  // the category text it carries). The picker has no numeric-id box any
+  // more (LISTING_REDESIGN.md, "Category"), so a search is how a seller
+  // reaches a category the title alone does not suggest.
+  const suggestCategories = useCallback(async (search) => {
     if (!health.taxonomy_configured) {
-      setCatSuggestions({ error: "Automatic categories need eBay API credentials on the server. You can still enter a category ID manually." });
+      setCatSuggestions({ error: "Automatic categories need eBay API credentials on the server, and they aren't set up yet." });
       return;
     }
     const l = collect();
-    const query = [l.brand, l.title, l.category_suggestion].filter(Boolean).join(" ").trim();
+    const query = (typeof search === "string" && search.trim())
+      || [l.brand, l.title, l.category_suggestion].filter(Boolean).join(" ").trim();
     if (!query) { setCatSuggestions({ error: "Add a title or brand first." }); return; }
     setCatSuggestions({ loading: true });
     try {
@@ -361,6 +448,7 @@ export function useListingForm() {
   }, [collect, health.taxonomy_configured]);
 
   const chooseCategory = useCallback((s) => {
+    setTouched(true);
     setForm((f) => ({
       ...f,
       category_id: s.category_id,
@@ -403,6 +491,10 @@ export function useListingForm() {
       });
       setSession((s) => ({ ...s, listing: updated }));
       setForm(fromListing(updated));
+      // The server saved what it returned (main.py refine), so this is what
+      // it holds -- an autosave diffed against the pre-refine copy would
+      // send the whole rewrite straight back.
+      rememberSaved(updated);
       // The re-seed guard needs no touching here: it is keyed on sessionId,
       // which a refine never changes, so it already matches. (It used to be
       // re-stamped with the captured sessionId at this point, which was a
@@ -418,7 +510,7 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, invalidateListings, toast]);
+  }), [collect, sessionId, setSession, invalidateListings, toast, rememberSaved]);
 
   // ---------- images ----------
   // Cache-bust per PHOTO, not globally: a global counter made one rotate
@@ -641,6 +733,8 @@ export function useListingForm() {
         // shown -- the same trap reorderImages above documents having fixed.
         // The outer catch turns it into "Couldn't add photos: ...".
         await postJson(`/api/save/${sessionId}`, payload);
+        // A full save: the server holds exactly `payload` now.
+        if (now && now.sessionId === sessionId) rememberSaved(payload);
         // ...and which of them the pass turned upright, so a wrong turn is
         // found now rather than on the live listing.
         const turned = turnedUprightMessage(res.optimize_results);
@@ -656,7 +750,7 @@ export function useListingForm() {
       setAddingPhotos(false);
       setAddingStatus("");
     }
-  }, [sessionId, setForm, setSession, invalidateListings, toast]);
+  }, [sessionId, setForm, setSession, invalidateListings, toast, rememberSaved]);
 
   // ---------- the listing's video ----------
   // eBay takes ONE video per listing, MP4, and this is the whole of the
@@ -791,7 +885,23 @@ export function useListingForm() {
   }, [collect, sessionId, toast, chipTargets, isLive]);
 
   // ---------- publish ----------
-  const publish = useMemo(() => once("publish", async (mode) => {
+  // Autosave stands down for the whole publish. A PATCH landing between
+  // publishListing's save and its publish would write the row from the
+  // pre-publish copy (the race Phase 0 closed on the server is the one this
+  // closes on the client), so the timer is cancelled and anything already in
+  // flight is waited for before the publish starts.
+  const beginPublishing = useCallback(async () => {
+    publishingRef.current = true;
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    if (pendingSave.current) await pendingSave.current.catch(() => {});
+  }, []);
+  const endPublishing = useCallback(() => { publishingRef.current = false; }, []);
+
+  // `once` is applied at CALL time, not at render: the body reaches the
+  // autosave refs through beginPublishing/endPublishing, and a closure over
+  // those handed to once() during render is what React's refs rule (rightly)
+  // refuses to see as safe. Same in-flight guard, same key.
+  const publish = useCallback((mode) => once("publish", async () => {
     setFixTarget(null);
     setPublishResult(null);
     const multi = chipTargets && chipTargets.length > 1;
@@ -800,11 +910,15 @@ export function useListingForm() {
          "Uploading photos…", "Crossing the t's…"]
       : ["Saving your draft…"]);
     try {
+      await beginPublishing();
       const listing = collect();
       setSession((s) => ({ ...s, listing }));
       // Same recipe the drafts strip and bulk queue use — see publishListing.
       // The editor is not allowed its own publish path.
       const result = await publishListing(sessionId, listing, chipTargets, mode);
+      // publishListing saves before it publishes, so whatever else happened
+      // the server holds `listing` now.
+      rememberSaved(listing);
       setPublishResult(result);
       // A clean draft save is "done editing" — hand the seller back the screen
       // they opened this listing from, instead of leaving them parked in the
@@ -888,10 +1002,12 @@ export function useListingForm() {
     } catch (e) {
       toast(`Publish error: ${e.message}`, { kind: "error" });
     } finally {
+      endPublishing();
       setAiBusy(null);
     }
-  }), [collect, sessionId, setSession, loadListings, openListings, patchListing,
-      toast, chipTargets, isLive, activeBulk]);
+  })(), [collect, sessionId, setSession, loadListings, openListings, patchListing,
+      toast, chipTargets, isLive, activeBulk, rememberSaved, beginPublishing,
+      endPublishing]);
 
   // End (withdraw) the live listing everywhere it's live. Once it is live
   // nowhere the listing has ended, and the server settles the record: the
@@ -969,6 +1085,7 @@ export function useListingForm() {
     const listing = collect();
     try {
       await postJson(`/api/save/${sessionId}`, listing);
+      rememberSaved(listing);
       // The record keeps its sold status (the server never demotes one) —
       // patch the cached copy so the archive card's totals update at once.
       patchListing(sessionId, { listing });
@@ -977,7 +1094,7 @@ export function useListingForm() {
     } catch (e) {
       toast(`Couldn't save: ${e.message}`, { kind: "error" });
     }
-  }), [collect, sessionId, patchListing, setSession, toast]);
+  }), [collect, sessionId, patchListing, setSession, toast, rememberSaved]);
 
   // Sell another one. The sold listing itself can never go back on eBay, so
   // this mints a NEW draft from its copy, specifics and surviving photos —
@@ -1022,11 +1139,18 @@ export function useListingForm() {
       // read this listing against eBay's aspect list, and the editor's copy
       // going stale is how a listing that was just filled gets offered the
       // very same fill again the moment the seller looks at the dashboard.
-      setForm((f) => ({
-        ...f,
+      const filled = {
         item_specifics: (res.item_specifics || []).map((s) => ({ ...s })),
         ...(res.enriched_at ? { enriched_at: res.enriched_at } : {}),
-      }));
+      };
+      setForm((f) => ({ ...f, ...filled }));
+      // The route saved the listing it was sent, with these specifics on it
+      // -- so the server holds that, and the session's copy should say so
+      // too. It used to update the form alone, which left `session.listing`
+      // describing a listing the server no longer had.
+      const sent = collect();
+      setSession((s) => (s ? { ...s, listing: { ...sent, ...filled } } : s));
+      rememberSaved({ ...sent, ...filled });
       toast(res.added
         ? `Filled ${res.added} item specific${res.added === 1 ? "" : "s"} from your photos.`
         : "Nothing new to add — your item specifics already look complete.",
@@ -1039,7 +1163,8 @@ export function useListingForm() {
     } finally {
       setAiBusy(null);
     }
-  }), [form.category_id, sessionId, collect, setForm, invalidateListings, toast]);
+  }), [form.category_id, sessionId, collect, setForm, setSession, invalidateListings,
+      toast, rememberSaved]);
 
   // Auto-populate item specifics right after a fresh AI identify (session has a
   // confidence score), so listings come SEO-ready with no manual step. Runs
@@ -1079,6 +1204,121 @@ export function useListingForm() {
     autofillSpecifics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryMeta.aspects, sessionId, session]);
+
+  // ---------- autosave ----------
+  // Drafts only (see `saved` above); and never while something else is
+  // writing the listing -- a refine or a specifics fill mid-flight (aiBusy),
+  // photos or a video going up, a publish running. Each of those ends by
+  // handing its result to rememberSaved, and a PATCH racing them would be
+  // diffed against a baseline about to move.
+  const autosaveOn = !!sessionId && !isLive && !isSold;
+  const canSaveNow = autosaveOn && !aiBusy && !addingPhotos && !addingVideo;
+  // What the editor shows that the server does not hold -- the diff, by
+  // field, in the shape the server stores (lib/fieldDiff). Empty until the
+  // seller has typed something.
+  const pendingChanges = useMemo(
+    () => (autosaveOn && touched
+      ? changedFields(collect(), payloadOf(fromListing(saved), saved)) : {}),
+    [autosaveOn, touched, collect, saved]);
+  const dirty = Object.keys(pendingChanges).length > 0;
+
+  // Send what differs, now. Returns once the server has answered (or refused).
+  // Publish and Done await it; the timer below calls it.
+  const flushRef = useRef(null);
+  const flushSave = useCallback(async () => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
+    if (!autosaveOn || !sessionId) return;
+    // One PATCH at a time. One already out is waited for, and then whatever
+    // was typed meanwhile is diffed against the baseline IT moved -- so a
+    // Done pressed mid-flight sends the keystrokes after the flight too,
+    // rather than closing the editor on them.
+    if (pendingSave.current) await pendingSave.current.catch(() => {});
+    const base = savedRef.current;
+    const changes = changedFields(collect(), payloadOf(fromListing(base), base));
+    if (!Object.keys(changes).length) return;
+    const id = sessionId;
+    setSaveState("saving");
+    const run = (async () => {
+      try {
+        const res = await patchJson(`/api/listings/${id}`, changes);
+        // The server answers with the merged listing (main.py patch_listing)
+        // so the baseline is what it holds, not what was sent.
+        const listing = res?.listing || { ...(savedRef.current || {}), ...changes };
+        // Still on this listing? A seller who opened another one mid-flight
+        // must not have its editor told about this one's save.
+        if (seededFor.current === id) {
+          // The mirror is written here as well as by its effect: a flush
+          // waiting on this very PATCH reads it the moment the await
+          // returns, before React has rendered the state change.
+          savedRef.current = listing;
+          setSaved(listing);
+          retryStep.current = 0;
+          setSaveState("saved");
+          setLastSavedAt(Date.now());
+        }
+        // The card in the grid, without a refetch: a refetch per keystroke
+        // re-sorts the drafts under the editor and re-reads the whole store.
+        patchListing(id, { listing });
+      } catch (e) {
+        if (seededFor.current !== id) return;
+        if (e?.status === 409) {
+          // The server's own rule: this listing is eBay's to update, not a
+          // timer's. The gate above should have said so first; if it did
+          // not, stop trying rather than knock every 1.5 seconds.
+          setSaveState("off");
+          return;
+        }
+        // Retried, with a widening gap, and said ONCE: the indicator carries
+        // the state from here, and a toast per failed retry during an outage
+        // is a wall of toasts over the field the seller is typing in.
+        const delay = AUTOSAVE_RETRY_MS[Math.min(retryStep.current, AUTOSAVE_RETRY_MS.length - 1)];
+        if (retryStep.current === 0) {
+          toast(`Couldn't save your changes just now — still trying. ${e.message}`,
+            { kind: "warning" });
+        }
+        retryStep.current += 1;
+        setSaveState("error");
+        saveTimer.current = setTimeout(() => {
+          saveTimer.current = null;
+          flushRef.current?.();
+        }, delay);
+      } finally {
+        pendingSave.current = null;
+      }
+    })();
+    pendingSave.current = run;
+    await run;
+  }, [autosaveOn, sessionId, collect, patchListing, toast]);
+  useEffect(() => { flushRef.current = flushSave; });
+
+  // The debounce. Every edit re-runs this; the cleanup of the previous run
+  // cancels its timer, so the PATCH goes AUTOSAVE_DELAY_MS after the LAST
+  // keystroke rather than after each one. Nothing is armed while a PATCH is
+  // out: when it lands, `saved` moves, pendingChanges is recomputed, and
+  // this runs again for whatever was typed meanwhile.
+  useEffect(() => {
+    if (!canSaveNow || !dirty) return undefined;
+    if (pendingSave.current || publishingRef.current) return undefined;
+    const id = setTimeout(() => {
+      if (saveTimer.current === id) saveTimer.current = null;
+      flushRef.current?.();
+    }, AUTOSAVE_DELAY_MS);
+    saveTimer.current = id;
+    return () => {
+      clearTimeout(id);
+      if (saveTimer.current === id) saveTimer.current = null;
+    };
+  }, [pendingChanges, dirty, canSaveNow]);
+
+  // What the header shows, in one word. "dirty" outranks "saved": a save that
+  // landed a moment ago says nothing about the keystroke since.
+  const saveStatus = !autosaveOn ? "off"
+    : saveState === "saving" ? "saving"
+    : saveState === "error" ? "error"
+    : saveState === "off" ? "off"
+    : dirty ? "dirty"
+    : saveState === "saved" ? "saved"
+    : "idle";
 
   // ---------- what is stopping this listing from reaching eBay ----------
   // The editor's copy of the app-wide blocker list, with the one thing only
@@ -1146,12 +1386,11 @@ export function useListingForm() {
       category: state("category", form.category_id.trim()),
       specifics: state("specifics",
         form.item_specifics.some((s) => s.name.trim())),
-      // Price and condition share the Pricing card; either one blocking
-      // flags it.
-      pricing: (blocked.has("price") || blocked.has("condition"))
-        ? "attention"
-        : (Number(form.price) > 0 || Number(form.auction_start_price) > 0
-          ? "complete" : "todo"),
+      // Price and condition are two sections now (LISTING_REDESIGN.md,
+      // "Condition"), so each answers for itself.
+      price: state("price",
+        Number(form.price) > 0 || Number(form.auction_start_price) > 0),
+      condition: state("condition", (form.condition || "").trim()),
       shipping: state("weight", weightOz(form) > 0),
       // eBay doesn't require a description — we fall back to the title — so
       // an empty one is grey, never a warning, and never counts toward the
@@ -1166,7 +1405,7 @@ export function useListingForm() {
     saveSaleFigures, relist,
     aiBusy,
     marketTargets, toggleMarketTarget, chipTargets,
-    publish, publishResult, runPreflight,
+    publish, publishResult, runPreflight, dismissPublishResult,
     fixTarget, setFixTarget, fixLevel,
     refine,
     autofillSpecifics,
@@ -1179,5 +1418,9 @@ export function useListingForm() {
     videos, addVideo, removeVideo, addingVideo,
     imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
+    // Autosave: the one-word status for the header, when the last save
+    // landed, whether anything on screen is unsaved, and a way to send it
+    // now (Done and the publish path use it).
+    saveStatus, lastSavedAt, dirty, flushSave, autosaveOn,
   };
 }

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { FolderTree, Pencil, X } from "lucide-react";
+import { FolderTree, Pencil } from "lucide-react";
 import { patchJson, postJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
+import { CategorySuggestList } from "./CategorySuggestList";
 
 /* Compact category display + changer for draft cards (the drafts grid, the
    dashboard's recent strip, the listings manager). A wrong AI category pick
@@ -75,48 +76,17 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
     );
   }
 
+  // The list itself is shared with the editor's Category section
+  // (CategorySuggestList), so a category picked on a card looks exactly
+  // like one picked in the editor.
   return (
-    <div className="flex flex-col gap-1.5 rounded-input border border-line bg-bg-sunken p-2">
-      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-faint">
-        <FolderTree size={13} aria-hidden />
-        <span className="min-w-0 truncate">Pick the right category</span>
-        <button type="button" onClick={() => setOpen(false)}
-          aria-label="Close category picker"
-          className="ml-auto shrink-0 grid place-items-center size-6 rounded-full cursor-pointer text-ink-faint hover:text-ink hover:bg-card">
-          <X size={13} aria-hidden />
-        </button>
-      </div>
-      {sugg?.loading && (
-        <p className="text-[13px] text-ink-secondary px-1 py-1">Matching eBay categories…</p>
-      )}
-      {sugg?.error && (
-        <p className="text-[13px] text-ink-secondary px-1 py-1">{sugg.error}</p>
-      )}
-      {sugg?.items && !sugg.items.length && (
-        <p className="text-[13px] text-ink-secondary px-1 py-1">
-          No matches — edit the title in Review &amp; List and try again.
-        </p>
-      )}
-      {sugg?.items?.map((c) => (
-        <button
-          key={c.category_id}
-          type="button"
-          onClick={() => choose(c)}
-          className={cn(
-            "w-full flex items-center justify-between gap-2 text-left px-2.5 py-2 rounded-input border text-[13px]",
-            "transition-colors duration-150 cursor-pointer",
-            String(c.category_id) === id
-              ? "border-blue bg-blue-soft"
-              : "border-line bg-card hover:border-line-strong",
-          )}
-        >
-          <span className="min-w-0 text-ink leading-snug">{c.path || c.category_name}</span>
-          <span className="shrink-0 font-display font-bold text-blue tabular-nums text-[12px]">
-            #{c.category_id}
-          </span>
-        </button>
-      ))}
-    </div>
+    <CategorySuggestList
+      sugg={sugg}
+      currentId={id}
+      onChoose={choose}
+      onClose={() => setOpen(false)}
+      emptyText="No matches — edit the title in Review & List and try again."
+    />
   );
 }
 

@@ -12,12 +12,15 @@
  * eBay offers twenty boxes, with the extra values the AI found showing as
  * unexplained chips. And on every free-text aspect eBay's suggested values —
  * fetched on each lookup — reached nothing at all.
+ *
+ * The control lives in the chip editor now (LISTING_REDESIGN.md, "Details"):
+ * every test here opens the aspect's chip first.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SpecificsCard } from "./cards";
+import { DetailsCard } from "./Details";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,11 +66,13 @@ function stub(aspects, over = {}) {
 let root;
 let host;
 
-async function mount(w) {
+async function mount(w, chip) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => { root.render(<SpecificsCard w={w} />); });
+  await act(async () => { root.render(<DetailsCard w={w} />); });
+  // Tap the chip: the control for the aspect swaps in under the chips.
+  await act(async () => { host.querySelector(`[data-chip="${chip}"]`).click(); });
   return host;
 }
 
@@ -93,7 +98,7 @@ const boxFor = (h, label) => boxes(h)
 describe("a multi-select aspect eBay reports as free text", () => {
   it("gets tick boxes, not one text input", async () => {
     // The defect, stated: cardinality alone decides the shape of the answer.
-    const h = await mount(stub([OPEN_FEATURES]));
+    const h = await mount(stub([OPEN_FEATURES]), "Features");
     expect(boxes(h).map((b) => b.closest("label").textContent.trim()))
       .toEqual(["Breathable", "Pockets", "Lined"]);
   });
@@ -104,7 +109,7 @@ describe("a multi-select aspect eBay reports as free text", () => {
         { name: "Features", value: "Pockets", confidence: "medium" },
         { name: "Features", value: "Lined", confidence: "medium" },
       ],
-    }));
+    }), "Features");
     expect(boxFor(h, "Pockets").checked).toBe(true);
     expect(boxFor(h, "Lined").checked).toBe(true);
     expect(boxFor(h, "Breathable").checked).toBe(false);
@@ -116,13 +121,13 @@ describe("a multi-select aspect eBay reports as free text", () => {
     // removable — instead of vanishing from the card.
     const h = await mount(stub([OPEN_FEATURES], {
       item_specifics: [{ name: "Features", value: "Reflective" }],
-    }));
+    }), "Features");
     expect(boxFor(h, "Reflective")?.checked).toBe(true);
   });
 
   it("offers a box of the seller's own, because the list is only advice", async () => {
     const toggle = vi.fn();
-    const h = await mount(stub([OPEN_FEATURES], { toggleSpecificValue: toggle }));
+    const h = await mount(stub([OPEN_FEATURES], { toggleSpecificValue: toggle }), "Features");
     const own = h.querySelector('input[aria-label="Add a Features value of your own"]');
     expect(own).toBeTruthy();
     expect(h.textContent).toContain("or add your own");
@@ -136,7 +141,7 @@ describe("a multi-select aspect eBay reports as free text", () => {
 
   it("ticks a box through the same toggle a closed list uses", async () => {
     const toggle = vi.fn();
-    const h = await mount(stub([OPEN_FEATURES], { toggleSpecificValue: toggle }));
+    const h = await mount(stub([OPEN_FEATURES], { toggleSpecificValue: toggle }), "Features");
     await act(async () => { boxFor(h, "Lined").click(); });
     expect(toggle).toHaveBeenCalledWith("Features", "Lined", true);
   });
@@ -146,7 +151,7 @@ describe("a multi-select aspect eBay closes", () => {
   it("still gets tick boxes and no add-your-own", async () => {
     // There, an off-list value is one eBay refuses — offering a box for it
     // would invite a publish failure.
-    const h = await mount(stub([CLOSED_STYLE]));
+    const h = await mount(stub([CLOSED_STYLE]), "Style");
     expect(boxes(h).length).toBe(2);
     expect(h.querySelector('input[aria-label="Add a Style value of your own"]'))
       .toBeNull();
@@ -159,7 +164,7 @@ describe("a single-value aspect eBay suggests values for", () => {
   it("keeps its one box and offers the suggestions beside it", async () => {
     // One answer, so no checkboxes — but eBay's wording is still worth
     // offering: a publish can be refused over "Cotton Blend" vs "Cotton blend".
-    const h = await mount(stub([OPEN_MATERIAL]));
+    const h = await mount(stub([OPEN_MATERIAL]), "Material");
     expect(boxes(h).length).toBe(0);
     const list = h.querySelector("datalist");
     expect([...list.querySelectorAll("option")].map((o) => o.value))
@@ -168,7 +173,7 @@ describe("a single-value aspect eBay suggests values for", () => {
   });
 
   it("gives an aspect with no suggestions no empty list to point at", async () => {
-    const h = await mount(stub([aspect("Care Instructions")]));
+    const h = await mount(stub([aspect("Care Instructions")]), "Care Instructions");
     expect(h.querySelector("datalist")).toBeNull();
     expect(h.querySelector("input[list]")).toBeNull();
   });
@@ -177,7 +182,8 @@ describe("a single-value aspect eBay suggests values for", () => {
     // "Country/Region of Manufacture" — spaces and a slash. An id built from
     // it verbatim is not one a list= reference resolves.
     const h = await mount(stub([
-      aspect("Country/Region of Manufacture", { values: ["Japan", "Italy"] })]));
+      aspect("Country/Region of Manufacture", { values: ["Japan", "Italy"] })]),
+      "Country/Region of Manufacture");
     const list = h.querySelector("datalist");
     expect(list.id).toBe("sugg-country-region-of-manufacture");
     expect(h.querySelector(`input[list="${list.id}"]`)).toBeTruthy();

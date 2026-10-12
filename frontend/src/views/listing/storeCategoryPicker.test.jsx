@@ -2,8 +2,10 @@
  *
  * Asked for as: "in addition to ebay category, assign proper store category
  * (if present in user's ebay account)". The server matches one from the draft
- * and sends it at publish; this is the half the seller sees — the picker in
- * the Category card, which has to do three things and one of them is nothing:
+ * and sends it at publish; this is the half the seller sees — the picker
+ * under More options (it is a different question from eBay's category, and
+ * most sellers have no store), which has to do three things and one of them
+ * is nothing:
  *
  *   - offer the store's own shelves, by the path the seller reads in their
  *     store's menu, and write BOTH the id (what eBay is sent) and the name
@@ -21,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppProvider } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
-import { CategoryCard } from "./cards";
+import { MoreOptions } from "./cards";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -52,7 +54,7 @@ function serve(store, { connected = true } = {}) {
 let root;
 let host;
 
-/** The Category card with the slice of the form it reads. */
+/** More options, with the slice of the form it reads. */
 function stub(sets, over = {}) {
   return {
     fixLevel: () => undefined,
@@ -60,7 +62,11 @@ function stub(sets, over = {}) {
     form: {
       title: "A jacket", category_id: "15687",
       category_suggestion: "Clothing > Men > T-Shirts",
-      store_category_id: "", store_category_name: "", ...over,
+      store_category_id: "", store_category_name: "",
+      quantity: 1, subtitle: "", brand: "", retail_price: "", price: "",
+      listing_format: "FIXED_PRICE", currency: "USD",
+      package_length_in: "", package_width_in: "", package_height_in: "",
+      promote: false, ad_rate_percent: 0, ...over,
     },
     completion: { category: "todo" },
     catSuggestions: null,
@@ -78,10 +84,13 @@ async function render(w) {
   root = createRoot(host);
   await act(async () => {
     root.render(
-      <ToastProvider><AppProvider><CategoryCard w={w} /></AppProvider></ToastProvider>,
+      <ToastProvider><AppProvider><MoreOptions w={w} /></AppProvider></ToastProvider>,
     );
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  // More options is shut by default; the shelf is behind it.
+  const fold = host.querySelector('[data-section="more"] button[aria-expanded]');
+  await act(async () => { fold.click(); });
   return host;
 }
 

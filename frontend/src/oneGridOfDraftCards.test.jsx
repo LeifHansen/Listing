@@ -142,11 +142,13 @@ function gridMarkup() {
   return `${wrapper.className}\n${clone.innerHTML}`;
 }
 
-/** Every card's action row, by label — Publish, Review & List, Delete. */
+/** Every card's action row, by label — Duplicate, Publish, Review & List,
+ *  Delete. */
 function cardActions() {
   return [...host.querySelectorAll("button")]
     .map((b) => (b.textContent || b.getAttribute("aria-label") || "").trim())
-    .filter((label) => ["Publish", "Review & List", "Delete this draft"]
+    .filter((label) => ["Duplicate this listing", "Publish", "Review & List",
+                        "Delete this draft"]
       .includes(label));
 }
 
@@ -170,8 +172,8 @@ describe("one grid of draft cards", () => {
     // Every card carries the pair the report's screenshot shows under each
     // tile, so "the same grid" is being compared against something real.
     expect(sellActions).toEqual([
-      "Publish", "Review & List", "Delete this draft",
-      "Publish", "Review & List", "Delete this draft",
+      "Duplicate this listing", "Publish", "Review & List", "Delete this draft",
+      "Duplicate this listing", "Publish", "Review & List", "Delete this draft",
     ]);
 
     await act(async () => { root.unmount(); });
@@ -207,11 +209,12 @@ describe("one grid of draft cards", () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(text()).toContain("Back to batch");         // the editor is up
 
-    // Save Draft.
-    const save = [...host.querySelectorAll("button")]
-      .find((b) => (b.textContent || "").includes("Save Draft"));
-    expect(save).toBeTruthy();
-    await act(async () => { save.click(); });
+    // Done. (It was "Save Draft": a draft saves itself now, and Done sends
+    // whatever the timer has not reached and closes -- see useListingForm.)
+    const done = [...host.querySelectorAll("button")]
+      .find((b) => b.getAttribute("aria-label") === "Done editing");
+    expect(done).toBeTruthy();
+    await act(async () => { done.click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     // Back on the batch screen — not the Sell overview, which announces
