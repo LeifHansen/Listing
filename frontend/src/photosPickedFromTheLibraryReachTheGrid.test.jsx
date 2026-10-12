@@ -101,7 +101,16 @@ async function pick(files) {
 const text = () => host.textContent || "";
 
 describe("photos picked from the library", () => {
-  beforeEach(() => { localStorage.clear(); });
+  beforeEach(() => {
+    localStorage.clear();
+    // The preview URL is a stand-in, as in every other uploader test: jsdom
+    // has no createObjectURL of its own, and the shim vitest's jsdom
+    // environment adds reaches into the Blob's internals (jsdom 30.1 moved
+    // them, and the shim throws). Nothing here reads the URL back.
+    let n = 0;
+    URL.createObjectURL = vi.fn(() => `blob:preview-${n++}`);
+    URL.revokeObjectURL = vi.fn();
+  });
   afterEach(async () => {
     if (root) await act(async () => { root.unmount(); });
     document.body.innerHTML = "";
