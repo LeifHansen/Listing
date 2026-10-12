@@ -51,6 +51,24 @@ class _EbayFailed(RuntimeError):
     5xx; production has seen errorId 35001, eBay's generic internal error)."""
 
 
+class _NoCampaign(RuntimeError):
+    """The account can hold only one campaign, and none of its campaigns can
+    take our ads. The message is what the seller reads."""
+
+
+# eBay's refusal to create a SECOND campaign: errorId 35304, "Another campaign
+# cannot be created at this time, as the user is currently using a feature
+# that only supports one campaign." Sellers who run Promoted Listings through
+# Seller Hub's simplified, single-campaign set-up get it on every create. Our
+# own named campaign can never exist on such an account, so promotion there
+# means adding ads to the one campaign the seller already has.
+_ONE_CAMPAIGN_ERROR_ID = 35304
+_NO_CAMPAIGN_MESSAGE = ("eBay lets this account run only one Promoted "
+                        "Listings campaign, and it has no Promoted Listings "
+                        "Standard campaign this listing can join. Start one "
+                        "in Seller Hub, then turn Promote on again.")
+
+
 # When creating the campaign last failed on eBay's side, per account. Nothing
 # about the seller's listing or account can fix a 5xx, and every promoted
 # publish after one asked again -- a GET and a POST each, a refusal row in the
@@ -107,7 +125,57 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
         raise _ScopeError()
     if r.status_code >= 500:
         raise _EbayFailed(f"campaign create failed ({r.status_code}): {r.text[:200]}")
+    if _is_one_campaign_refusal(r):
+        cid = _sellers_own_campaign(client, base, token, marketplace)
+        if not cid:
+            raise _NoCampaign(_NO_CAMPAIGN_MESSAGE)
+        log.info("promoting into the account's single campaign %s", cid)
+        _CAMPAIGN_CACHE[cache_key] = cid
+        return cid
     raise RuntimeError(f"campaign create failed ({r.status_code}): {r.text[:200]}")
+
+
+def _is_one_campaign_refusal(resp: httpx.Response) -> bool:
+    if resp.status_code != 409:
+        return False
+    try:
+        errors = (resp.json() or {}).get("errors") or []
+    except ValueError:
+        errors = []
+    if any(e.get("errorId") == _ONE_CAMPAIGN_ERROR_ID for e in errors
+           if isinstance(e, dict)):
+        return True
+    return "only supports one c" in resp.text.lower()
+
+
+def _sellers_own_campaign(client: httpx.Client, base: str, token: str,
+                          marketplace: str) -> str:
+    """The campaign a one-campaign account already has, if our ads can go in
+    it: COST_PER_SALE (our ads are bid percentages, which a cost-per-click
+    campaign cannot take) and not ended. A running one wins over a paused or
+    scheduled one. "" when there is none."""
+    r = client.get(f"{base}{_MARKETING}/ad_campaign", headers=_headers(token),
+                   params={"limit": 100})
+    if is_scope_error(r):
+        raise _ScopeError()
+    if r.status_code != 200:
+        return ""
+    usable = []
+    for c in (r.json().get("campaigns") or []):
+        if not isinstance(c, dict) or not c.get("campaignId"):
+            continue
+        model = str((c.get("fundingStrategy") or {}).get("fundingModel") or "")
+        if model and model.upper() != "COST_PER_SALE":
+            continue
+        if c.get("marketplaceId") and c["marketplaceId"] != marketplace:
+            continue
+        status = str(c.get("campaignStatus") or "").upper()
+        if status in ("ENDED", "DELETED"):
+            continue
+        usable.append((0 if status in ("RUNNING", "ENDING_SOON") else 1,
+                       c["campaignId"]))
+    usable.sort()
+    return usable[0][1] if usable else ""
 
 
 def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
@@ -196,6 +264,9 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
         return {"promoted": False, "needs_reconnect": True,
                 "message": "Reconnect your eBay account to grant ad permissions, "
                            "then republish to start the promotion."}
+    except _NoCampaign as exc:
+        log.warning("promote failed (session=%s): %s", session_id, exc)
+        return {"promoted": False, "message": str(exc)}
     except _EbayFailed as exc:
         if len(_CREATE_FAILED) >= 200:
             _CREATE_FAILED.pop(min(_CREATE_FAILED, key=_CREATE_FAILED.get), None)
