@@ -55,14 +55,18 @@ primary_region = 'sjc'
   # ETSY_OWNER_EMAILS. Set 'commercial' the day Etsy grants it. Inert while
   # Etsy is withheld above; left in place for the day it comes back.
   # ETSY_ACCESS_TIER = 'personal'
-  # WHICH ENGINE CUTS A BACKGROUND OUT. Unset here, which means "auto": every
-  # remote engine that has a key, then the free on-server model. No key is set
+  # WHICH ENGINE CUTS A BACKGROUND OUT. Unset here, which means "auto": Canva
+  # when it is connected, then the free on-server model. Nothing is connected
   # on this app today, so the chain is ["local"] and the per-photo cost is
-  # zero -- exactly as it has always been. Setting REMOVEBG_API_KEY (and
-  # LEONARDO_API_KEY, which is where remove.bg's API moves on 2026-12-01) in
-  # `fly secrets` is the whole switch, and /api/ready reports the chain so a
-  # key that stops working does not just show up as worse cutouts. Per-image
-  # cost on those engines is ~$0.10, against one image_ai token per photo.
+  # zero -- exactly as it has always been. Setting CANVA_CLIENT_ID,
+  # CANVA_CLIENT_SECRET and CANVA_REFRESH_TOKEN (from
+  # scripts/canva_authorize.py; see .env.example) in `fly secrets` is the
+  # whole switch, and /api/ready reports the chain so a connection that stops
+  # working does not just show up as worse cutouts. Per-image cost on Canva is
+  # one of the connected account's AI credits, against one image_ai token per
+  # photo. Canva rotates the refresh token on every use and the live one is
+  # kept on the volume (DATA_DIR/.canva_token.json), so keep this at ONE
+  # machine doing cutouts.
   #   BG_ENGINE = 'auto'
   #
   # The on-server model, one pass per photo, the item composited on white.
