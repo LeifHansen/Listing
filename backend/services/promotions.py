@@ -56,6 +56,16 @@ class _NoCampaign(RuntimeError):
     take our ads. The message is what the seller reads."""
 
 
+class _RuleBasedCampaign(RuntimeError):
+    """The campaign our ad was going into is rule-based (eBay's Easy boost or
+    a by-rule Seller Hub campaign): it picks its own listings, and eBay
+    refused the ad with errorId 35064. Carries the campaign's name."""
+
+    def __init__(self, name: str = ""):
+        super().__init__(name)
+        self.name = name
+
+
 # eBay's refusal to create a SECOND campaign: errorId 35304, "Another campaign
 # cannot be created at this time, as the user is currently using a feature
 # that only supports one campaign." Sellers who run Promoted Listings through
@@ -67,6 +77,32 @@ _NO_CAMPAIGN_MESSAGE = ("eBay lets this account run only one Promoted "
                         "Listings campaign, and it has no Promoted Listings "
                         "Standard campaign this listing can join. Start one "
                         "in Seller Hub, then turn Promote on again.")
+
+# The one campaign such an account has is usually RULE-BASED: eBay's Easy
+# boost (one tap in Seller Hub promotes every listing, current and future, at
+# one rate), or a Seller Hub campaign that picks listings by rule. A
+# rule-based campaign chooses its own listings; ads cannot be added to it one
+# listing at a time, and eBay refuses the attempt with errorId 35064, "This
+# operation is only supported for key based campaigns." Production saw it on
+# "Easy boost 09/18/2026 12:40:09". getCampaigns marks such a campaign with a
+# campaignCriterion container (absent on key-based ones), which is checked
+# before any ad is attempted; 35064 at ad time is the backstop.
+_RULE_BASED_ERROR_ID = 35064
+_RULE_BASED_MESSAGE = ("eBay promotes this account's listings through its own "
+                       "campaign, “{name}”, which picks the listings "
+                       "and the ad rate itself (Seller Hub's Easy boost does "
+                       "this), so the app can't add this listing at its own "
+                       "rate. New listings that match it are promoted by it "
+                       "automatically. To set a rate per listing, turn that "
+                       "campaign off in Seller Hub and start a Promoted "
+                       "Listings Standard campaign, then turn Promote on "
+                       "again.")
+# Accounts whose only campaign is rule-based, by cache key, with when that
+# was learned: {key: (time, campaign name)}. Nothing in a publish can change
+# it, so promotion on such an account waits _RULE_BASED_TTL between looks
+# instead of asking eBay (and being refused) on every promoted publish.
+_RULE_BASED: dict[str, tuple[float, str]] = {}
+_RULE_BASED_TTL = 30 * 60
 
 
 # When creating the campaign last failed on eBay's side, per account. Nothing
@@ -91,10 +127,30 @@ _EBAY_FAILED_MESSAGE = ("eBay couldn't set up the promotion just now — the "
 from .ebay import rest_headers as _headers  # noqa: E402
 
 
+def _cache_key(marketplace: str, token: str) -> str:
+    return f"{marketplace}:{token[-12:]}"
+
+
+def _rule_based_message(name: str) -> str:
+    return _RULE_BASED_MESSAGE.format(name=name or "Easy boost")
+
+
+def _remember_rule_based(cache_key: str, name: str) -> None:
+    if len(_RULE_BASED) >= 200:
+        _RULE_BASED.pop(min(_RULE_BASED, key=lambda k: _RULE_BASED[k][0]), None)
+    _RULE_BASED[cache_key] = (time.time(), name)
+    # The id stays usable for nothing; let the next look after the TTL
+    # re-read the account's campaigns instead of trusting it.
+    _CAMPAIGN_CACHE.pop(cache_key, None)
+
+
 def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: str) -> str:
-    cache_key = f"{marketplace}:{token[-12:]}"
+    cache_key = _cache_key(marketplace, token)
     if cache_key in _CAMPAIGN_CACHE:
         return _CAMPAIGN_CACHE[cache_key]
+    known = _RULE_BASED.get(cache_key)
+    if known and time.time() - known[0] < _RULE_BASED_TTL:
+        raise _NoCampaign(_rule_based_message(known[1]))
     # Reuse our campaign if it already exists on this account.
     r = client.get(f"{base}{_MARKETING}/ad_campaign", headers=_headers(token),
                    params={"campaign_name": CAMPAIGN_NAME})
@@ -126,8 +182,11 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
     if r.status_code >= 500:
         raise _EbayFailed(f"campaign create failed ({r.status_code}): {r.text[:200]}")
     if _is_one_campaign_refusal(r):
-        cid = _sellers_own_campaign(client, base, token, marketplace)
+        cid, rule_based_name = _sellers_own_campaign(client, base, token, marketplace)
         if not cid:
+            if rule_based_name is not None:
+                _remember_rule_based(cache_key, rule_based_name)
+                raise _NoCampaign(_rule_based_message(rule_based_name))
             raise _NoCampaign(_NO_CAMPAIGN_MESSAGE)
         log.info("promoting into the account's single campaign %s", cid)
         _CAMPAIGN_CACHE[cache_key] = cid
@@ -149,18 +208,22 @@ def _is_one_campaign_refusal(resp: httpx.Response) -> bool:
 
 
 def _sellers_own_campaign(client: httpx.Client, base: str, token: str,
-                          marketplace: str) -> str:
+                          marketplace: str) -> tuple[str, str | None]:
     """The campaign a one-campaign account already has, if our ads can go in
     it: COST_PER_SALE (our ads are bid percentages, which a cost-per-click
-    campaign cannot take) and not ended. A running one wins over a paused or
-    scheduled one. "" when there is none."""
+    campaign cannot take), key-based (a rule-based one picks its own
+    listings and takes no ads by listing), and not ended. A running one wins
+    over a paused or scheduled one. Returns (campaign id, None); when there
+    is none, ("", name of the rule-based campaign that was the only live
+    candidate) or ("", None) when there was not even that."""
     r = client.get(f"{base}{_MARKETING}/ad_campaign", headers=_headers(token),
                    params={"limit": 100})
     if is_scope_error(r):
         raise _ScopeError()
     if r.status_code != 200:
-        return ""
+        return "", None
     usable = []
+    rule_based: list[tuple[int, str]] = []
     for c in (r.json().get("campaigns") or []):
         if not isinstance(c, dict) or not c.get("campaignId"):
             continue
@@ -172,10 +235,33 @@ def _sellers_own_campaign(client: httpx.Client, base: str, token: str,
         status = str(c.get("campaignStatus") or "").upper()
         if status in ("ENDED", "DELETED"):
             continue
-        usable.append((0 if status in ("RUNNING", "ENDING_SOON") else 1,
-                       c["campaignId"]))
+        rank = 0 if status in ("RUNNING", "ENDING_SOON") else 1
+        if c.get("campaignCriterion"):
+            rule_based.append((rank, str(c.get("campaignName") or "")))
+            continue
+        usable.append((rank, c["campaignId"]))
     usable.sort()
-    return usable[0][1] if usable else ""
+    if usable:
+        return usable[0][1], None
+    rule_based.sort()
+    return "", (rule_based[0][1] if rule_based else None)
+
+
+def _rule_based_refusal(resp: httpx.Response) -> str | None:
+    """The campaign name eBay put in its errorId 35064 refusal, or "" when
+    the refusal names none; None when the response is not that refusal."""
+    try:
+        errors = (resp.json() or {}).get("errors") or []
+    except ValueError:
+        errors = []
+    for e in errors:
+        if not isinstance(e, dict) or e.get("errorId") != _RULE_BASED_ERROR_ID:
+            continue
+        for prm in e.get("parameters") or []:
+            if isinstance(prm, dict) and prm.get("name") == "campaignName":
+                return str(prm.get("value") or "")
+        return ""
+    return None
 
 
 def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
@@ -194,6 +280,9 @@ def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
         return {"ok": True}
     if is_scope_error(r):
         raise _ScopeError()
+    refused = _rule_based_refusal(r)
+    if refused is not None:
+        raise _RuleBasedCampaign(refused)
     # Already advertised (a re-publish or a second promote) → move its bid.
     u = client.post(
         f"{base}{_MARKETING}/ad_campaign/{campaign_id}/bulk_update_ads_bid_by_listing_id",
@@ -217,6 +306,9 @@ def _create_or_update_ad(client: httpx.Client, base: str, token: str,
         return {"ok": True}
     if is_scope_error(r):
         raise _ScopeError()
+    refused = _rule_based_refusal(r)
+    if refused is not None:
+        raise _RuleBasedCampaign(refused)
     # Ad already exists (re-publish) → update its bid to the new rate instead.
     if r.status_code == 409 or "already" in r.text.lower():
         u = client.post(
@@ -267,6 +359,11 @@ def promote_listing(session_id: str, listing: Listing, creds: dict | None) -> di
     except _NoCampaign as exc:
         log.warning("promote failed (session=%s): %s", session_id, exc)
         return {"promoted": False, "message": str(exc)}
+    except _RuleBasedCampaign as exc:
+        _remember_rule_based(_cache_key(marketplace, token), exc.name)
+        log.warning("promote failed (session=%s): campaign %r is rule-based",
+                    session_id, exc.name)
+        return {"promoted": False, "message": _rule_based_message(exc.name)}
     except _EbayFailed as exc:
         if len(_CREATE_FAILED) >= 200:
             _CREATE_FAILED.pop(min(_CREATE_FAILED, key=_CREATE_FAILED.get), None)
