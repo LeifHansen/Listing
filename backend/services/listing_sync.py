@@ -1562,7 +1562,8 @@ def verifier(token: str, image_urls: list[str],
     international_shipping = publish_international_shipping(c)
 
     def verify(candidate: Listing, *, with_policies: bool = True,
-               with_photos: bool = True) -> None:
+               with_photos: bool = True,
+               with_international: bool = True) -> None:
         """Re-put `candidate` to eBay's validator, optionally without the two
         things that are not part of the listing's own content.
 
@@ -1578,7 +1579,7 @@ def verifier(token: str, image_urls: list[str],
             policies=publish_policies(candidate, c) if with_policies else None,
             postal_code=postal, best_offer=best_offer,
             best_offer_terms=best_offer_terms,
-            international_shipping=international_shipping)
+            international_shipping=international_shipping and with_international)
     return verify
 
 
@@ -1723,10 +1724,11 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     # One read for the switch and its limits, so the publish cannot carry
     # Best Offer from one answer and the limits from another.
     best_offer_terms = publish_best_offer_terms(c)
+    policies = publish_policies(listing, c)
     try:
         res = ebay_trading.create_listing(
             token, listing, image_urls,
-            policies=publish_policies(listing, c),
+            policies=policies,
             postal_code=postal, idempotency_key=idempotency_key,
             best_offer=best_offer_terms["enabled"],
             best_offer_terms=best_offer_terms,
@@ -1780,6 +1782,9 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
                  item_id, idempotency_key)
         res = {"published": True, "listing_id": item_id, "already_listed": True,
                "view_url": f"https://www.ebay.com/itm/{item_id}"}
+    # eBay took a listing on these ids: the evidence that clears them when a
+    # later draft in the same batch is refused (ebay_account.probe_block_scope).
+    ebay_account.note_policies_accepted(str(c.get("_uid") or ""), policies)
     # eBay moved the listing to a live category (see create_listing): store
     # what it actually filed, not what we asked for.
     if res.get("category_id"):
