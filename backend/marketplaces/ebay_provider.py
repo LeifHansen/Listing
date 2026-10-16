@@ -1023,7 +1023,8 @@ class EbayProvider:
                 issues = ebay_account.publish_block_issues(
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
-                                                 creds))
+                                                 creds),
+                    policies=listing_sync.publish_policies(listing, creds))
                 # Logged AFTER the classification, and carrying both halves of
                 # it. This line used to record eBay's headline alone, which is
                 # the one part of a bad rejection that is never wrong: the
@@ -1252,7 +1253,8 @@ class EbayProvider:
                 issues = ebay_account.publish_block_issues(
                     exc, creds, listing=listing,
                     verify=listing_sync.verifier(creds["access_token"], urls,
-                                                 creds))
+                                                 creds),
+                    policies=listing_sync.publish_policies(listing, creds))
                 # Logged after the classification, and with where it points
                 # in the template — see the imported revise's log line above
                 # for why. "trading publish failed: %s" was ONE fingerprint

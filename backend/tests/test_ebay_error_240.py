@@ -887,3 +887,80 @@ def test_an_unfinished_payments_setup_decides_every_listing():
     assert any(i.get("every_listing") for i in issues)
     # ...and the placeholder eBay sent alongside it is not marked itself.
     assert not any(i.get("every_listing") for i in issues if i.get("placeholder"))
+
+
+# --- "the policies" vs "this listing under the policies" --------------------
+# Dropping all three policies takes the shipping out of the request with them,
+# so eBay accepting that variant cannot tell broken ids from this item
+# combined with good ones. A batch where the other listings went live on the
+# same ids settles it — and the seller must not be sent to re-pick policies
+# that work everywhere else.
+
+POLICIES = {"fulfillment_policy_id": "F1", "payment_policy_id": "P1",
+            "return_policy_id": "R1"}
+
+
+def _refused_with_policies_unless(*, ok_without_international=False):
+    def verify(candidate, *, with_policies=True, with_photos=True,
+               with_international=True):
+        if not with_policies:
+            return
+        if ok_without_international and not with_international:
+            return
+        raise ebay_trading.TradingError(E240, code="240")
+    return verify
+
+
+def test_policies_eBay_took_elsewhere_are_not_blamed():
+    uid = "u-batch"
+    ebay_account.forget_verified(uid)
+    ebay_account.note_policies_accepted(uid, POLICIES)
+    issues = ebay_account.publish_block_issues(
+        _blocked(), {**CREDS, "_uid": uid}, listing=_FullDraft(),
+        verify=_refused_with_policies_unless(),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV, policies=POLICIES)
+    assert issues[0]["target"] == "shipping"
+    assert "re-pick" not in issues[0]["fix"]
+    assert "other listings" in issues[0]["fix"]
+    assert not issues[0].get("every_listing")
+    # Not an account-wide fact, so not reused for the next draft.
+    assert ebay_account._remembered_scope(uid) == ""
+
+
+def test_international_shipping_is_named_when_it_is_the_difference():
+    uid = "u-intl"
+    ebay_account.forget_verified(uid)
+    ebay_account.note_policies_accepted(uid, POLICIES)
+    issues = ebay_account.publish_block_issues(
+        _blocked(), {**CREDS, "_uid": uid}, listing=_FullDraft(),
+        verify=_refused_with_policies_unless(ok_without_international=True),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV, policies=POLICIES)
+    assert "International Shipping" in issues[0]["title"]
+
+
+def test_policies_seen_on_the_account_are_vouched_for():
+    uid = "u-known"
+    ebay_account.forget_verified(uid)
+    ebay_account.remember_valid_policies(
+        uid, {"fulfillment": {"F1"}, "payment": {"P1"}, "return": {"R1"}})
+    assert ebay_account.policies_vouched_for(uid, POLICIES)
+    assert not ebay_account.policies_vouched_for(
+        uid, {**POLICIES, "return_policy_id": "GONE"})
+
+
+def test_a_publish_on_the_ids_retires_a_cached_policies_verdict():
+    uid = "u-retire"
+    ebay_account.forget_verified(uid)
+    ebay_account._remember_scope(uid, "policies")
+    ebay_account.note_policies_accepted(uid, POLICIES)
+    assert ebay_account._remembered_scope(uid) == ""
+
+
+def test_unvouched_policies_keep_the_policies_verdict():
+    uid = "u-new"
+    ebay_account.forget_verified(uid)
+    issues = ebay_account.publish_block_issues(
+        _blocked(), {**CREDS, "_uid": uid}, listing=_FullDraft(),
+        verify=_refused_with_policies_unless(),
+        payments=OK_PAYMENTS, privileges=HEALTHY_PRIV, policies=POLICIES)
+    assert issues[0]["target"] == "policies"
