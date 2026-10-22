@@ -266,6 +266,7 @@ def forget_verified(uid: Optional[str] = None) -> None:
             _absent.clear()
             _block_scope.clear()
             _valid_policies.clear()
+            _accepted_policies.clear()
         else:
             _verified.pop(uid, None)
             _absent.pop(uid, None)
@@ -279,6 +280,7 @@ def forget_verified(uid: Optional[str] = None) -> None:
             # a valid choice to a foreign default, which is the exact bug the
             # check exists to prevent, inverted.
             _valid_policies.pop(uid, None)
+            _accepted_policies.pop(uid, None)
 
 
 def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
@@ -352,6 +354,7 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
                          verify: Optional[Callable[[Any], None]] = None,
                          payments: Optional[Callable[[str], dict]] = None,
                          privileges: Optional[Callable[[str], Optional[dict]]] = None,
+                         policies: Optional[dict] = None,
                          ) -> list[dict]:
     """Issues for a failed publish, and for eBay error 240 a look at WHY.
 
@@ -452,7 +455,8 @@ def publish_block_issues(exc: Exception, creds: Optional[dict], *,
         # what it would accept — the last question left, and the only one that
         # separates a held account from a listing eBay dislikes the words of.
         scope = probe_block_scope(listing, verify,
-                                  uid=str(creds.get("_uid") or ""))
+                                  uid=str(creds.get("_uid") or ""),
+                                  policies=policies)
         if scope:
             found.append(_scope_issue(scope))
 
@@ -509,8 +513,72 @@ def _remember_scope(uid: str, scope: str, now: Optional[float] = None) -> None:
         _block_scope[uid] = (time.time() if now is None else now, scope)
 
 
+# The business-policy sets eBay has actually TAKEN on a live publish, per
+# account. This is the one fact that settles what the "policies" probe below
+# cannot: dropping all three policies strips the shipping out of the request
+# along with the ids, so eBay accepting that variant says "the policies, OR
+# this listing combined with them" — and a batch where five listings went
+# live on the very same three ids rules out the first half outright. Telling
+# that seller to re-pick their policies sends them to change something that
+# works on every other listing.
+ACCEPTED_POLICIES_TTL = config.env_float("EBAY_ACCEPTED_POLICIES_TTL", 86400.0)
+
+_accepted_policies: dict[str, dict[tuple, float]] = {}
+
+_POLICY_KINDS = ("fulfillment", "payment", "return")
+
+
+def _policy_key(policies: Optional[dict]) -> tuple:
+    p = policies or {}
+    return tuple(str(p.get(f"{k}_policy_id") or "").strip() for k in _POLICY_KINDS)
+
+
+def note_policies_accepted(uid: str, policies: Optional[dict],
+                           now: Optional[float] = None) -> None:
+    """eBay listed something on these policy ids, so the ids are good.
+
+    Also retires a cached "the policies are the cause" verdict for the
+    account: it was a claim about these ids, and eBay just disproved it.
+    """
+    key = _policy_key(policies)
+    if not uid or not any(key):
+        return
+    with _verified_lock:
+        _accepted_policies.setdefault(uid, {})[key] = (
+            time.time() if now is None else now)
+        if _block_scope.get(uid, (0.0, ""))[1] == "policies":
+            _block_scope.pop(uid, None)
+
+
+def policies_vouched_for(uid: str, policies: Optional[dict],
+                         now: Optional[float] = None) -> bool:
+    """Is there evidence these exact ids are fine on their own?
+
+    Either eBay took a listing on them recently, or the last verify pass saw
+    every one of them on the account — which rules out the deleted-policy and
+    foreign-account causes the "policies" verdict sends the seller after.
+    False means unknown, never "they are bad".
+    """
+    key = _policy_key(policies)
+    if not uid or not any(key):
+        return False
+    now = time.time() if now is None else now
+    with _verified_lock:
+        at = _accepted_policies.get(uid, {}).get(key, 0.0)
+    if at and (now - at) < ACCEPTED_POLICIES_TTL:
+        return True
+    for kind, pid in zip(_POLICY_KINDS, key):
+        if not pid:
+            continue
+        known = known_policy_ids(uid, kind, now)
+        if known is None or pid not in known:
+            return False
+    return True
+
+
 def probe_block_scope(listing, verify: Optional[Callable[[Any], None]], *,
-                      uid: str = "") -> Optional[str]:
+                      uid: str = "",
+                      policies: Optional[dict] = None) -> Optional[str]:
     """What a 240 is actually about: "account", "title", "wording", or None.
 
     Two dry runs at most, and only after the account APIs have come up empty:
@@ -528,6 +596,9 @@ def probe_block_scope(listing, verify: Optional[Callable[[Any], None]], *,
     if listing is None or verify is None:
         return None
     remembered = _remembered_scope(uid)
+    if remembered == "policies" and policies_vouched_for(uid, policies):
+        # A verdict about these ids, cached before eBay took them elsewhere.
+        remembered = ""
     if remembered:
         return remembered
     blocked = _refused(verify, plain_wording(listing))
@@ -542,6 +613,14 @@ def probe_block_scope(listing, verify: Optional[Callable[[Any], None]], *,
         # about a listing eBay would take the moment one field changed. So
         # keep asking, one field at a time, before blaming the account.
         field = _probe_payload(listing, verify)
+        if field == "policies" and policies_vouched_for(uid, policies):
+            # The ids are good (eBay took them on another listing, or the
+            # account lists every one), so what eBay refuses is THIS listing
+            # under them. Not an account-wide fact: never cached.
+            field = _probe_with_policies(listing, verify)
+            log.warning("ebay: 240 probe — eBay refuses this listing under "
+                        "policies it accepts elsewhere (%s)", field)
+            return field
         if field:
             _remember_scope(uid, field)
             log.warning("ebay: 240 probe — eBay refuses the listing's %s", field)
@@ -634,6 +713,20 @@ def _probe_payload(listing, verify: Callable[..., None]) -> Optional[str]:
     return None if unanswered else ""
 
 
+def _probe_with_policies(listing, verify: Callable[..., None]) -> str:
+    """Which part of this listing eBay refuses once the (good) policies are on.
+
+    The one listing-side switch the shipping policy reacts to that the probe
+    can flip without leaving a hole for eBay to complain about is eBay
+    International Shipping: drop it and the request is still complete. Anything
+    else — weight, box size, a service the item can't travel by — is reported
+    together, because removing those makes eBay ask for them instead of
+    answering.
+    """
+    refused = _refused(verify, plain_wording(listing), with_international=False)
+    return "international" if refused is False else "policies_listing"
+
+
 def _reworded(listing, title: str, description: str):
     """The same listing with different words — nothing else touched, so the
     probe differs from the real publish in exactly one dimension."""
@@ -679,13 +772,43 @@ def _scope_issue(scope: str) -> dict:
             "title": "eBay is refusing this listing's business policies",
             "fix": ("eBay took this same listing the moment we sent it "
                     "WITHOUT the shipping / payment / return policies, and "
-                    "refused it with them — so the policy ids this app is "
-                    "attaching are the cause, not your account and not the "
-                    "listing. That usually means a policy was deleted or "
-                    "renamed on eBay, or the saved ids belong to an eBay "
-                    "account that was connected before this one. Open "
-                    "Settings → Shipping and Settings → Returns & payment, "
-                    "re-pick each of the three policies, and publish again."),
+                    "refused it with them — so the policies are the cause, "
+                    "not your account. That usually means a policy was "
+                    "deleted or renamed on eBay, or the saved ids belong to "
+                    "an eBay account that was connected before this one. "
+                    "Open Settings → Shipping and Settings → Returns & "
+                    "payment, re-pick each of the three policies, and "
+                    "publish again. (If other listings DO go live on these "
+                    "same policies, they're fine — check this listing's "
+                    "package weight and size on the Shipping card instead.)"),
+        }
+    if scope == "international":
+        return {
+            "target": "shipping", "level": "error",
+            "title": "eBay won't take this listing with International Shipping on",
+            "fix": ("eBay accepted this same listing, on the same business "
+                    "policies, the moment we checked it without eBay "
+                    "International Shipping — and refused it with. Your "
+                    "policies are fine (other listings go live on them); "
+                    "eBay just won't ship this item abroad. Pick a "
+                    "domestic-only shipping policy for this listing on the "
+                    "Shipping card, or turn off International Shipping in "
+                    "Settings → Shipping, and publish again."),
+        }
+    if scope == "policies_listing":
+        return {
+            "target": "shipping", "level": "error",
+            "title": "eBay won't take this listing on its shipping or return policy",
+            "fix": ("eBay accepted this same listing with no business "
+                    "policies attached and refused it with them — but those "
+                    "same policies work on your other listings, so they "
+                    "aren't broken. It's this item combined with them: "
+                    "usually the package weight or box size (calculated "
+                    "postage needs both, and a service in the policy may not "
+                    "carry this package), or a destination eBay won't ship "
+                    "this item to. Check the weight and dimensions on the "
+                    "Shipping card, or pick a different shipping policy for "
+                    "just this listing, and publish again."),
         }
     if scope == "photos":
         return {
