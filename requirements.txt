@@ -1,18 +1,18 @@
-fastapi==0.141.1
+fastapi==0.162.0
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-Pillow==12.3.0
-pillow-heif==1.8.0
-anthropic==1.9.0
-pydantic==2.13.5
-python-dotenv==1.2.3
+Pillow==13.0.0
+pillow-heif==1.8.1
+anthropic==2.3.0
+pydantic==2.14.1
+python-dotenv==1.2.4
 httpx==0.28.1
-SQLAlchemy==2.1.1
+SQLAlchemy==2.1.6
 # Schema migrations. Not on the boot path yet -- the app still calls
 # create_all plus the guarded ALTERs -- but shipped in the image so the
 # cutover is `alembic stamp head` then `alembic upgrade head` on the box
 # rather than a redeploy. See alembic/env.py.
-alembic==1.20.0
+alembic==1.20.1
 psycopg[binary]==3.3.6
 bcrypt==5.0.0
 PyJWT==2.15.1
@@ -22,8 +22,8 @@ PyJWT==2.15.1
 # the same reason numpy is below: pip resolves it today only as an OPTIONAL
 # extra of PyJWT/oauthlib, which nothing here requests, so a clean install had
 # every right not to have it.
-cryptography>=50.0.1
-boto3==1.43.104
+cryptography>=50.0.2
+boto3==1.43.121
 # rembg's own dependency, declared as a range rather than a pin so pip is free
 # to resolve whatever onnxruntime and rembg want. The range has to stay
 # installable on the Python the image runs (3.11, see the Dockerfile): numpy
@@ -31,9 +31,9 @@ boto3==1.43.104
 # TWICE -- made every `pip install -r requirements.txt` fail before the app
 # could boot, in the image build and in the smoke job. The ceiling is what
 # stops the next bump doing it again; lift it together with the base image.
-numpy>=2.3,<2.5
+numpy>=2.5.4,<2.6
 
 # In-house background removal: rembg pulls in onnxruntime + a ~176MB
 # isnet-general-use model (baked into the image at build time, see Dockerfile).
-rembg==2.0.85
-onnxruntime==1.30.0
+rembg==2.0.86
+onnxruntime==1.31.1
