@@ -139,7 +139,7 @@ export function SettingsView() {
 
           <SettingsSection
             id="more" title="More"
-            description="Profile, shipping labels, cross-posting, AI references, appearance and sign-in."
+            description="Profile, cross-posting, AI references, appearance and sign-in."
           >
             <MoreSection openRow={openRow} />
           </SettingsSection>

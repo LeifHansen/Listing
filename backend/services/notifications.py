@@ -48,7 +48,7 @@ def notify_sold(user_id: Optional[str], record_id: str, listing: dict,
             kind="sold",
             title=f"Sold: {title}"[:255],
             body=(f"“{title}” sold{price_part} on eBay. "
-                  "Print a shipping label and get it on its way."),
+                  "Ship it from eBay Seller Hub."),
             listing_id=record_id,
             data={"price": price, "sold_quantity": qty,
                   "ebay_listing_id": str(listing.get("ebay_listing_id") or "")},

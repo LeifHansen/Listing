@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bell, PartyPopper, Truck } from "lucide-react";
+import { Bell, PartyPopper } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 
-// NotificationsBell — the TopBar bell: unread badge, dropdown list, and the
-// "Ship it" jump into the shipping dialog for sold items. Hidden until the
-// user is signed in (notifications are per-account).
+// NotificationsBell — the TopBar bell: unread badge and dropdown list; tapping
+// a notification opens its listing. Hidden until the user is signed in
+// (notifications are per-account).
 export function NotificationsBell() {
   const {
     user, notifications, loadNotifications, markNotificationsRead,
-    openShipping, openListing,
+    openListing,
   } = useApp();
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
@@ -129,18 +129,6 @@ export function NotificationsBell() {
                           title={n.created_at || undefined}>
                           {timeAgo(n.created_at)}
                         </span>
-                        {n.kind === "sold" && (
-                          <Button
-                            variant="soft" size="sm" className="h-7 px-2.5 text-[12px]"
-                            onClick={() => {
-                              markNotificationsRead([n.id]);
-                              setOpen(false);
-                              openShipping(n.listing_id || null);
-                            }}
-                          >
-                            <Truck aria-hidden /> Ship it
-                          </Button>
-                        )}
                       </div>
                     </div>
                     {!n.read && (

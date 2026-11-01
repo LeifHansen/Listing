@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  PlusCircle, Store, LogIn, RefreshCw, Truck, AlertTriangle, Download,
+  PlusCircle, Store, LogIn, RefreshCw, AlertTriangle, Download,
   ArrowRightLeft, RefreshCcw, X,
 } from "lucide-react";
 import { pollJob, postJson } from "@/lib/api";
@@ -128,7 +128,7 @@ export function ListingsView({ search = "" }) {
     rotateListingPhoto, duplicateListing,
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     storeSync, syncStore,
-    listingsTab, setListingsTab, openShipping, listingsLayout, setListingsLayout,
+    listingsTab, setListingsTab, listingsLayout, setListingsLayout,
     listingFilters, clearListingFilters,
     health,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
@@ -617,9 +617,8 @@ export function ListingsView({ search = "" }) {
           "Active" directly above the Active pill. The tab's explanation
           rides the pills instead.
 
-          Wraps, because the toggle plus "Ship orders" plus "Sync with eBay"
-          measured 442px against a 375px viewport and scrolled the page
-          sideways. It wraps to the LEFT and only pulls right once there is a
+          Wraps, because the toggle plus "Export CSV" plus "Sync with eBay"
+          can outgrow a 375px viewport and scroll the page sideways. It wraps to the LEFT and only pulls right once there is a
           row to pull against: right-aligned while wrapping is what stacks
           three buttons down the right edge on a phone, each line starting at
           a different place. */}
@@ -635,11 +634,6 @@ export function ListingsView({ search = "" }) {
           <Button variant="soft" onClick={exportCsv} loading={exporting}
             title="Download every listing on your account — all tabs, with prices, dates and a link to every photo — as a CSV spreadsheet.">
             <Download aria-hidden /> Export CSV
-          </Button>
-        )}
-        {user && ebay.connected && (
-          <Button variant="soft" onClick={() => openShipping()}>
-            <Truck aria-hidden /> Ship orders
           </Button>
         )}
         {user && ebay.connected && (
