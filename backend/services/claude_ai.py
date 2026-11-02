@@ -730,13 +730,27 @@ Rules:
   item (the tab, the patch and the care tag of a single pair of jeans) are
   one item, not three. A seller who shoots look-alikes shoots each one's tag
   right after its overview: the tag belongs to the overview before it, and
-  the next overview starts the next item.
+  the next overview starts the next item ONLY when its tag, patch or mark
+  reads differently from the last one.
+- THE SAME ITEM SHOT AGAIN IS STILL ONE ITEM. Sellers go back to an item for
+  more angles, re-shoot a blurry one, or shoot it upright and then on its
+  side, so a second (or third) overview of the same-looking object is NOT a
+  new item by itself. Matching details are identity evidence that two photos
+  are ONE item: the same handwritten price tag or sticker, the same ribbon,
+  string or stand, the same pattern in the same place, the same chip or wear.
+  Colour is not one of them on anything shiny -- enamel, cloisonne, metal,
+  glass, glaze and lacquer all read gold in one shot and green in the next,
+  so a shift in the light is never a second item.
 - Split when two photos show different physical items (a different
-  garment/object, a clearly different color or print, or different identity
-  marks as above). When nothing tells two look-alikes apart -- no tag, patch
-  or label reads differently -- KEEP THEM TOGETHER: a duplicate listing of
-  one item is a worse mistake than one extra photo on a listing, and the
-  seller can drag a photo out later.
+  garment/object, a clearly different color or print that is not just the
+  light, or different identity marks as above). When nothing tells two
+  look-alikes apart -- no tag, patch or label reads differently -- KEEP THEM
+  TOGETHER: a duplicate listing of one item is a worse mistake than one extra
+  photo on a listing, and the seller can drag a photo out later.
+- Name each group for what the item IS. Never number groups ("#1", "#2",
+  "(2)", "one of three"): a number says nothing about the item, and if you
+  are about to number look-alikes you must first be able to say what tells
+  them apart. If you cannot, they are one item.
 - Order each group's indices with the best overview shot first and leave the
   rest in the order they were uploaded. That order is the seller's own
   sequence through the item, and shuffling it inside a group tells nobody
@@ -752,10 +766,24 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
 - A close-up, back view, tag/label shot, or ONE COMPONENT OF A SET (e.g. a
   single print from a print set, one shoe of a pair) belongs with its set's
   overview group — those are the classic accidental splits.
+- THE SAME ITEM SHOT AGAIN is the other classic split, and the one that
+  reaches eBay as two or three identical listings. Groups whose photos show
+  the SAME-LOOKING object -- the same shape, the same pattern, the same
+  handwritten price tag, sticker, ribbon or stand -- are ONE item photographed
+  more than once, and must be merged, unless you can POINT AT what tells them
+  apart: a tag or patch that reads differently, a different flaw, a plainly
+  different color or print. A shift in the light is not a different color:
+  enamel, cloisonne, metal, glass and glaze read gold in one shot and green
+  in the next. Groups that sit next to each other in the pile and look the
+  same are almost always the seller going back for more angles.
+- The group names are the first pass's guesses and are not evidence. A
+  number in a name ("#1", "#2", "(2)") means only that the first pass
+  numbered them, never that it found two items.
 - Keep genuinely different physical products separate, even from the same
   brand or artist. Two groups whose tags or patches read differently (a
   different size, lot or model number) are two items however alike they
-  look; never merge look-alikes on looks alone.
+  look. The rules below for jeans and for pictures are more specific than
+  this one and win where they differ.
 """ + _experts.rules_for(_Stage.GROUPING) + """
 - Nothing to merge? Return {"merge": []}.
 """
@@ -787,9 +815,12 @@ Return ONLY a JSON object (no markdown fences):
   tag or patch, a different lot, model or serial number, a different care
   label, a different flaw or wear pattern, a clearly different wash or color.
   Quote the tag or patch text where you can read it.
-- Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
-  vs back are NOT evidence of a second item. A close-up of a tag belongs
-  with the overview shots taken around it.
+- Angles, lighting, a hanger vs laid flat, upright vs on its side, a
+  close-up vs an overview, front vs back are NOT evidence of a second item,
+  and neither is a color that shifts with the light on enamel, metal, glass
+  or glaze. A close-up of a tag belongs with the overview shots taken around
+  it. The same handwritten price tag, sticker or ribbon in two photos means
+  they are ONE item.
 """ + _experts.rules_for(_Stage.GROUPING) + """
 - Every photo index appears in exactly one item. One item: return a single
   entry with every index and evidence "".
@@ -969,7 +1000,12 @@ def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
         union = [k for k in range(gi, n) if root(k) == gi]
         combined = sorted(i for k in union for i in groups[k]["indices"])
         first = min(union, key=lambda k: min(groups[k]["indices"], default=n))
-        out.append({"name": groups[first]["name"], "indices": combined})
+        name = groups[first]["name"]
+        # "bell #1" merged with "bell #2" is one bell, not the first of
+        # several -- and the name is what the seller reads it by.
+        if len(union) > 1:
+            name = _unnumbered(name)
+        out.append({"name": name, "indices": combined})
     return out
 
 
@@ -1008,6 +1044,39 @@ def _count_hint(expected: int, found: int) -> str:
     )
 
 
+# A count the first pass tacked onto a name: "#2", "(3)", "#1 of 3", "2 of 3".
+# On 2026-11-01 one cloisonne bell, shot seven times, came out of grouping as
+# "cloisonne bell ... #1", "#2" and "#3", and the merge pass was shown those
+# names beside three near-identical photos. A number in the label reads as
+# the first pass having COUNTED three bells, which is exactly the claim the
+# merge pass exists to check -- so it is checked against the photos alone.
+_NAME_NUMBER = re.compile(
+    r"\s*(?:#\s*\d+(?:\s+of\s+\d+)?"
+    r"|\(\s*#?\s*\d+(?:\s+of\s+\d+)?\s*\)"
+    r"|\b\d+\s+of\s+\d+)\s*$",
+    re.IGNORECASE)
+
+
+def _unnumbered(name: str) -> str:
+    """A group's name without the count the first pass put on the end of it.
+    A name that is nothing but a number is left alone."""
+    name = str(name or "")
+    plain = _NAME_NUMBER.sub("", name).rstrip(" -–—,")
+    return plain or name
+
+
+def _pile_position(indices: list[int]) -> str:
+    """Where a group's photos sit in the pile, in the same numbering the first
+    pass was shown. Groups next to each other that look the same are the
+    seller going back for more angles; the merge pass cannot know they are
+    neighbours unless it is told."""
+    idxs = sorted(indices)
+    if len(idxs) == 1:
+        return f"photo {idxs[0]} of the pile"
+    shown = ", ".join(str(i) for i in idxs[:8])
+    return f"photos {shown}{', …' if len(idxs) > 8 else ''} of the pile"
+
+
 def _verify_groups(client, images: list[bytes], groups: list[dict],
                    expected: int = 0) -> list[dict]:
     """Second-pass duplicate check: show ONE representative photo per group and
@@ -1023,7 +1092,9 @@ def _verify_groups(client, images: list[bytes], groups: list[dict],
     content: list[dict] = []
     for gi, g in enumerate(groups):
         rep = images[g["indices"][0]]
-        content.append({"type": "text", "text": f'Group {gi} — "{g["name"]}":'})
+        content.append({"type": "text", "text": (
+            f'Group {gi} — "{_unnumbered(g["name"])}" '
+            f'({_pile_position(g["indices"])}):')})
         content.append({"type": "image", "source": {
             "type": "base64", "media_type": "image/jpeg",
             "data": base64.standard_b64encode(rep).decode("ascii")}})
