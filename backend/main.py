@@ -9974,6 +9974,21 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
     # changed. Unmarked, this would send eBay an empty revise: the record
     # would show the new price, the seller would be told it worked, and
     # the listing would still be at the old one.
+    #
+    # And the price ALONE. The marks are stored on the record, and a revise
+    # eBay refused leaves its marks in place so the retry carries them —
+    # which is right for the editor, where the seller is looking at that
+    # edit, and was wrong here. Item specifics an earlier "Enrich all" push
+    # had filled and eBay had turned down rode along on every listing's
+    # price drop, were turned down again, and took the price with them:
+    # "Lower 500+ prices" lowered the one listing with nothing else pending
+    # and failed the rest over "The item specific Size Type has an invalid
+    # value." (The revise sets the two specifics refusals it knows aside —
+    # see ebay_trading.revise_listing — and any other sank the whole edit.)
+    # Those edits are not this button's to send. They stay marked, untouched,
+    # for the next save that is about them.
+    pending = [f for f in listing.dirty_fields if f != "price"]
+    listing.clear_dirty()
     listing.mark_dirty("price")
     # Through the provider, so each listing takes whichever revise path it
     # belongs to (Trading for store listings, the Inventory API for the
@@ -9984,8 +9999,52 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
                        base_url=base_url, uid=uid, prev_record=rec),
         creds)
     if not outcome.ok:
+        # A refused revise writes its attempt to the record: the new price,
+        # marked pending, and the stamp above. That is the editor's contract
+        # ("your new price is saved here either way") and not this one's. The
+        # seller never opened this listing, eBay still shows the old price —
+        # and the stamp would take it out of the group for three weeks, so
+        # pressing again once whatever eBay objected to is cleared could not
+        # reach it. Put it back as it was. Not when the outcome is UNKNOWN:
+        # eBay may have taken the price, and the pending mark is what lets a
+        # later revise settle it.
+        if not getattr(outcome, "outcome_unknown", False):
+            _restore_record(rec, uid)
         return {"message": outcome.message or "eBay rejected the new price."}
+    if pending:
+        _keep_marked(rec["id"], pending, uid)
     return {"ok": True, "was": was, "now": new_price}
+
+
+def _restore_record(rec: dict, uid: str) -> None:
+    """Write `rec` back as it was read. Best-effort: a bulk run reports the
+    refusal either way, and one listing's bookkeeping must not sink it."""
+    try:
+        db.upsert_listing(rec["id"], rec.get("listing") or {},
+                          status=rec.get("status") or "published", user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - one listing, not the run
+        log.warning("price drop: couldn't put %s back after a refusal: %s",
+                    rec.get("id"), exc)
+
+
+def _keep_marked(rid: str, fields: list[str], uid: str) -> None:
+    """Re-mark `fields` as pending on the stored record. The revise that just
+    landed cleared every mark it was handed, and it was handed the price
+    alone; these are the edits it was kept from sending."""
+    try:
+        cur = db.get_listing(rid)
+        if not cur:
+            return
+        data = dict(cur.get("listing") or {})
+        marks = sorted(set(data.get("dirty_fields") or ()) | set(fields))
+        if marks == list(data.get("dirty_fields") or ()):
+            return
+        data["dirty_fields"] = marks
+        db.upsert_listing(rid, data, status=cur.get("status") or "published",
+                          user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - one listing, not the run
+        log.warning("price drop: couldn't keep %s's pending edits marked: %s",
+                    rid, exc)
 
 
 @app.post("/api/ebay/lower-prices")
@@ -10082,9 +10141,16 @@ def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
             records, _apply,
             on_each=lambda i, title: jobstore.update(
                 job_id, phase="repricing", current=i, current_title=title[:80]))
-        log.info("lower-all %s: user=%s percent=%s listings=%d changed=%d "
-                 "skipped=%d failed=%d", job_id, uid, percent, len(records),
-                 len(result.changed), len(result.skipped), len(result.failed))
+        # WARNING when eBay refused any of them, with its first reason: at
+        # INFO a run that lowered 1 of 500 never reached the error feed, and
+        # the only record of why was a toast the seller had already lost.
+        log.log(logging.WARNING if result.failed else logging.INFO,
+                "lower-all %s: user=%s percent=%s listings=%d changed=%d "
+                "skipped=%d failed=%d first_refusal=%s", job_id, uid, percent,
+                len(records), len(result.changed), len(result.skipped),
+                len(result.failed),
+                (result.failed[0].get("message") or "")[:200]
+                if result.failed else "-")
         jobstore.update(job_id, done=True, phase="done", current=len(records),
                         result={"percent": percent, "deferred": 0,
                                 **result.as_dict()})
