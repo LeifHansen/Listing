@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BookOpen, Link2, LogOut, Moon, ShieldCheck, Truck, UserRound } from "lucide-react";
+import { BookOpen, Link2, LogOut, Moon, ShieldCheck, UserRound } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -7,22 +7,21 @@ import { Toggle } from "@/components/ui/fields";
 import { useToast } from "@/components/ui/Toaster";
 import { Disclosure } from "./Disclosure";
 import { ProfileCard } from "./ProfileCard";
-import { EasyPostCard } from "./EasyPostCard";
 import { MarketplaceConnections } from "./MarketplaceConnections";
 import { ExpertKnowledge } from "./ExpertKnowledge";
 
 // The rows of the "More" section, by id, so a deep link can open one.
-export const MORE_ROWS = ["profile", "easypost", "marketplaces", "teach-ai",
+export const MORE_ROWS = ["profile", "marketplaces", "teach-ai",
                           "appearance", "account"];
 
 /**
  * Everything a seller touches at setup and rarely after, folded into one
  * row each. Keeping these closed is what lets the eBay essentials above
- * read in a single screen; a deep link (`openSettings("easypost")`) opens
+ * read in a single screen; a deep link (`openSettings("marketplaces")`) opens
  * the row it names.
  */
 export function MoreSection({ openRow }) {
-  const { easypost, marketplaces, user } = useApp();
+  const { marketplaces, user } = useApp();
   const others = (marketplaces || []).filter((m) => m.key !== "ebay");
   const connected = others.filter((m) => m.connected).map((m) => m.label);
   return (
@@ -33,15 +32,6 @@ export function MoreSection({ openRow }) {
         defaultOpen={openRow === "profile"} expand={openRow === "profile"}
       >
         <ProfileCard />
-      </Disclosure>
-      <Disclosure
-        id="easypost" icon={Truck} title="Shipping labels"
-        summary={easypost?.connected
-          ? `EasyPost connected${easypost.test ? " (test mode)" : ""}`
-          : "Buy USPS and UPS labels through your own EasyPost account"}
-        defaultOpen={openRow === "easypost"} expand={openRow === "easypost"}
-      >
-        <EasyPostCard />
       </Disclosure>
       {others.length > 0 && (
         <Disclosure

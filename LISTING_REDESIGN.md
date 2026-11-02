@@ -113,7 +113,7 @@ Kept above the form, unchanged: the `missing_info` banner, `ConflictBanner`,
 3. **Search preview.** New read-only card: first photo, title, condition label, price,
    shipping/offers line from `policiesData` and `prefs.allow_offers`. Needs a shared
    module-level `loadPrefs()` cache (pattern: `loadPolicies` in
-   `ShippingPolicySelect.jsx:37-44`); today only Settings and `ShippingDialog` fetch
+   `ShippingPolicySelect.jsx:37-44`); today only Settings fetches
    `/api/prefs`.
 4. **Title.** Input, counter, `RiskyWordNotes`, inline refusal, as today. Subtitle moves
    to More options; Brand leaves (it is mirrored into the Brand aspect already).

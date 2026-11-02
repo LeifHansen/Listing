@@ -23,11 +23,6 @@ def rest_headers(token: str) -> dict:
     Used by the Marketing API (Promoted Listings), which outlives the
     Inventory publish engine. `Content-Language` is required by eBay's REST
     WRITE calls and harmless on reads.
-
-    services/ebay_orders.py carries its own near-copy of this without the
-    Content-Language header. Left alone deliberately: the Fulfillment API
-    reads it makes don't need it, and quietly changing the headers on the
-    orders path is not this change's business.
     """
     return {
         "Authorization": f"Bearer {token}",
@@ -43,7 +38,7 @@ def is_scope_error(resp) -> bool:
     granted), as opposed to a transient blip worth retrying.
 
     One definition for every Sell API client. There were five, and two had
-    already drifted -- ebay_orders and ebay_messages missed eBay's
+    already drifted -- the orders client and ebay_messages missed eBay's
     `access_denied` body, so the same refusal read as "reconnect" to the
     offers, metrics and promotions code and as an outage to those two."""
     if resp.status_code in (401, 403):

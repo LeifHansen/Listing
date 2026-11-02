@@ -58,11 +58,10 @@ RECORDS_ONLY = ("debug", "info", "warning", "error", "exception", "critical",
                 "note_user")
 
 # Every identifier namespace a route can be scoped by — not just the listing
-# ids P0-01 was about. A bulk job holds a seller's drafts and photos, and a
-# shipment id reaches a label carrying the BUYER's name and address, so those
-# ids need an owner too.
+# ids P0-01 was about. A bulk job holds a seller's drafts and photos, so its
+# id needs an owner too.
 SCOPED_ARGS = {"session_id", "listing_id", "record_id", "sid",
-               "job_id", "shipment_id"}
+               "job_id"}
 
 # Routes that are scoped by one of those names and deliberately do NOT check.
 # Each needs a reason, and the reason is asserted below — an exemption that
@@ -171,7 +170,7 @@ def test_the_scan_found_the_routes_it_is_meant_to_guard():
     assert len(SCOPED) >= 20, f"only found {len(SCOPED)}: {sorted(SCOPED)}"
     for expected in ("save_listing", "patch_listing", "get_listing",
                      "relist_listing", "upload_more", "bulk_status",
-                     "import_status", "easypost_refund"):
+                     "import_status"):
         assert expected in SCOPED, f"{expected} is no longer being scanned"
 
 

@@ -62,11 +62,6 @@ const NO_EBAY = {
   foreign_listings: 0,
   unowned_listings: 0,
 };
-// The seller's own EasyPost account, which is what buys shipping labels.
-// `loaded` separates "not connected" from "not asked yet": the shipping
-// dialog must not offer to connect an account the shell simply hasn't
-// checked on.
-const NO_EASYPOST = { connected: false, test: false, key_hint: "", loaded: false };
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
   conversations: [], unread: 0, sources: [], available: false, reason: "",
@@ -87,9 +82,9 @@ const NO_LISTINGS = {
   loaded: false, loading: false, authed: false, dbConfigured: true, items: [],
 };
 // The seller's saved listing views, before anyone has asked for them.
-// `loaded` is the same distinction `easypost` draws above: "nothing saved" and
-// "not asked yet" look identical in an empty array, and only one of them is a
-// reason to tell a seller they have no saved views.
+// `loaded` separates "nothing saved" from "not asked yet": the two look
+// identical in an empty array, and only one of them is a reason to tell a
+// seller they have no saved views.
 const NO_SAVED_VIEWS = { items: [], loaded: false, saving: false };
 
 // What the eBay callback's ?why= means, in words a seller can act on. The
@@ -430,26 +425,6 @@ export function AppProvider({ children }) {
     return null;
   }, []);
 
-  // The EasyPost connection, loaded beside the eBay status: same keep-previous
-  // rule on failure, because a fetch that fails is not "disconnected", and the
-  // shipping dialog reads this to decide whether to offer rates or a Connect
-  // button.
-  const [easypost, setEasypost] = useState(NO_EASYPOST);
-  const loadEasypostStatus = useCallback(async () => {
-    try {
-      const s = await api("/api/easypost/status");
-      const next = {
-        connected: !!s.connected,
-        test: !!s.test,
-        key_hint: s.key_hint || "",
-        loaded: true,
-      };
-      setEasypost(next);
-      return next;
-    } catch (e) { /* keep previous */ }
-    return null;
-  }, []);
-
   // Publishing is live if EITHER the user connected their eBay account or the
   // server has env-level credentials.
   // A connected seller account is the only thing that can produce a live
@@ -586,7 +561,7 @@ export function AppProvider({ children }) {
   // ---------- notifications (sold alerts) ----------
   // Polled while logged in so "your item sold" reaches the seller without a
   // refresh. The bell in the TopBar renders items + the unread badge; a sold
-  // notification's primary action opens the shipping dialog for that listing.
+  // notification's primary action opens that listing.
   const [notifications, setNotifications] = useState(NO_NOTIFICATIONS);
   const loadNotifications = useCallback(async () => {
     if (!user) { setNotifications(NO_NOTIFICATIONS); return; }
@@ -767,13 +742,6 @@ export function AppProvider({ children }) {
       return false;
     }
   }, [loadMessages]);
-
-  // ---------- shipping dialog (sold → label) ----------
-  // null = closed; { listingId } = one listing's order; {} = all awaiting.
-  const [shipping, setShipping] = useState(null);
-  const openShipping = useCallback(
-    (listingId) => setShipping({ listingId: listingId || null }), []);
-  const closeShipping = useCallback(() => setShipping(null), []);
 
   // ---------- saved listings cache ----------
   // `error` separates a store with nothing in it from a store we could not
@@ -1653,7 +1621,6 @@ export function AppProvider({ children }) {
     setMessageSource("");
     setThreads({});
     setEbay(NO_EBAY);
-    setEasypost(NO_EASYPOST);
     setPoliciesData(null);
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
@@ -1667,7 +1634,6 @@ export function AppProvider({ children }) {
 
     // Dialogs and screens belonging to the session that just ended.
     setTokensOpen(false);
-    setShipping(null);
     setBulkRetry(null);
     setActiveBulk(null);
     clearLocal("bulk");
@@ -1689,8 +1655,7 @@ export function AppProvider({ children }) {
     setAuthOpen(true);
 
     loadEbayStatus();
-    loadEasypostStatus();
-  }, [loadEbayStatus, loadEasypostStatus]);
+  }, [loadEbayStatus]);
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
@@ -1826,9 +1791,8 @@ export function AppProvider({ children }) {
     loadHealth();
     loadAuth();
     loadEbayStatus();
-    loadEasypostStatus();
     loadMarketplaces();
-  }, [loadHealth, loadAuth, loadEbayStatus, loadEasypostStatus, loadMarketplaces]);
+  }, [loadHealth, loadAuth, loadEbayStatus, loadMarketplaces]);
 
   // Refresh the listings cache (and per-user marketplace connections) when
   // auth changes (login/logout).
@@ -1895,7 +1859,6 @@ export function AppProvider({ children }) {
     clearSignedInState,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
-    easypost, loadEasypostStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -1903,7 +1866,6 @@ export function AppProvider({ children }) {
     messages, loadMessages, threads, loadThread, sendMessage,
     activeConversationId, openConversation, openMessages,
     markConversationRead, messageSource, setMessageSource,
-    shipping, openShipping, closeShipping,
     policiesData, setPoliciesData,
     storeCategoriesData, setStoreCategoriesData,
     draftSelection, setDraftSelection,
@@ -1927,7 +1889,6 @@ export function AppProvider({ children }) {
     savedViews, loadSavedViews, saveListingView, deleteListingView,
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
-    easypost, loadEasypostStatus,
     etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
@@ -1936,7 +1897,6 @@ export function AppProvider({ children }) {
     messages, loadMessages, threads, loadThread, sendMessage,
     activeConversationId, openConversation, openMessages,
     markConversationRead, messageSource,
-    shipping, openShipping, closeShipping,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,

@@ -9,7 +9,6 @@ import { AuthDialog } from "@/components/AuthDialog";
 import { BulkBanner } from "@/components/BulkBanner";
 import { TokensDialog } from "@/components/TokensDialog";
 import { AiConsentDialog } from "@/components/AiConsentDialog";
-import { ShippingDialog } from "@/components/ShippingDialog";
 import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ManageView } from "@/views/ManageView";
@@ -150,7 +149,6 @@ function Main() {
       <AuthDialog />
       <TokensDialog />
       <AiConsentDialog />
-      <ShippingDialog />
     </div>
   );
 }
