@@ -2069,6 +2069,21 @@ problem:
   `SERVER_OWNED_FIELDS`, whose rule is that the **stored** value wins: under
   that rule the stamp could never move forward on the one write entitled to
   move it.
+
+  **The revise carries the price and nothing else** (`_lower_one`). A
+  listing's pending edits are stored on it (`dirty_fields`), and a revise eBay
+  refuses keeps its marks so the retry carries them. "Enrich all" marks the
+  specifics it pushes, so wherever eBay had turned those down the price drop
+  sent them again, eBay refused them again, and the price went with them:
+  *"Lower 500+ prices"* lowered the one listing with nothing else pending and
+  failed the rest over *"The item specific Size Type has an invalid value."*
+  The other marks are now left out of the request and **stay marked** for the
+  next save that is about them. A price eBay refuses (a sale that blocks price
+  revisions, say) puts the listing **back as it was**, rather than leaving a
+  price eBay does not show and a stamp that hides it from the group; an
+  unanswered revise keeps the attempt, since eBay may have taken it. A run with
+  any refusal logs at WARNING with the first reason, so it reaches the error
+  feed rather than living only in the toast.
 - **Finish details → "Enrich all"** fills every listing on the list in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft
