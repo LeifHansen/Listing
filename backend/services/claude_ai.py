@@ -219,11 +219,16 @@ def _extract_json(text: str) -> dict:
         # ',' delimiter: line 1 column 3644'. Repair what a person would
         # repair before giving up.
         repaired = _repair_json(text)
-        if repaired == text:
-            raise
         try:
+            if repaired == text:
+                raise exc
             data = json.loads(repaired)
         except json.JSONDecodeError:
+            # The seller is told to try again; the log keeps WHERE it broke,
+            # so the next shape of this can be repaired rather than retried.
+            # The decoder's column number alone names nothing anyone can fix.
+            log.warning("ai: the model's JSON could not be read (%s) near %r",
+                        exc.msg, text[max(0, exc.pos - 80):exc.pos + 80])
             raise exc from None
         log.info("ai: repaired the model's JSON (%s)", exc.msg)
     if not isinstance(data, dict):
@@ -237,38 +242,105 @@ def _extract_json(text: str) -> dict:
 
 
 _CLOSERS = frozenset(",}]:")
+_WS = " \t\r\n"
+# What a JSON value can start with, besides the literals true/false/null.
+_VALUE_START = frozenset('"{[-0123456789')
+_JSON_ESCAPES = frozenset('"\\/bfnrt')
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _skip_ws(text: str, j: int) -> int:
+    while j < len(text) and text[j] in _WS:
+        j += 1
+    return j
+
+
+def _starts_value(text: str, k: int) -> bool:
+    if k >= len(text):
+        return False
+    return (text[k] in _VALUE_START
+            or text.startswith(("true", "false", "null"), k))
+
+
+def _closes_string(text: str, i: int, is_key: bool, container: str) -> bool:
+    """Whether the quote at text[i] ends the string it is in.
+
+    Decided by what has to come next in VALID JSON at this point, not by
+    whether the next character merely looks like punctuation. A key ends only
+    at a colon. A value inside an object ends at a `}`, or at a comma that is
+    followed by the next key's opening quote; inside an array, at a `]`, or
+    at a comma followed by another value. Anything else -- prose, a comma
+    followed by prose -- is a quote inside the text.
+
+    "A comma means it closed" was the rule before, and it is exactly wrong for
+    how measurements are written: `Waist 34", Inseam 32", Rise 11"` put a
+    comma after every inch mark, each one ended the string early, and a pair
+    of Levi's failed to draft every time it was tried.
+    """
+    j = _skip_ws(text, i + 1)
+    if j >= len(text):
+        return True
+    c = text[j]
+    if is_key:
+        return c == ":"
+    if c == ",":
+        k = _skip_ws(text, j + 1)
+        if k >= len(text) or text[k] in "}]":
+            return True                      # a trailing comma; dropped later
+        if container == "{":
+            return text[k] == '"'
+        return _starts_value(text, k)
+    if container == "{":
+        return c == "}"
+    if container == "[":
+        return c == "]"
+    return c in _CLOSERS                     # top level: nothing to go by
 
 
 def _repair_json(text: str) -> str:
     """The most common ways a model breaks its own JSON, undone.
 
     A quote INSIDE a string that was never escaped -- the inch mark in
-    34" x 28", a quoted name in a description -- is told apart from the
-    string's closing quote by what follows it: a real closing quote is
-    followed (after whitespace) by a comma, a colon, a closing bracket or the
-    end; an inner one by prose. A raw newline or tab inside a string is
-    escaped. A trailing comma before a closing bracket is dropped. Everything
-    else is left exactly as it was, and the caller decides.
+    34" x 28" or `Waist 34", Inseam 32"`, a quoted name in a description --
+    is told apart from the string's closing quote by what follows it, read
+    against where in the document the string sits (see _closes_string). An
+    escape JSON does not have -- `Levi\\'s`, which models write out of
+    habit -- is undone: an escaped apostrophe is just the apostrophe, and any
+    other stray backslash is kept as a literal backslash. A raw newline, tab
+    or other control character inside a string is escaped. A trailing comma
+    before a closing bracket is dropped. Everything else is left exactly as
+    it was, and the caller decides.
+
+    Only ever run on text that has ALREADY failed to parse, so none of this
+    can change an answer that was valid to begin with.
     """
     out: list[str] = []
-    in_string = False
-    escaped = False
+    stack: list[str] = []        # the open containers, "{" or "["
+    expect_key = False           # the next string in this object is a key
+    in_string = is_key = False
     n = len(text)
     i = 0
     while i < n:
         ch = text[i]
         if in_string:
-            if escaped:
-                out.append(ch)
-                escaped = False
-            elif ch == "\\":
-                out.append(ch)
-                escaped = True
-            elif ch == '"':
-                j = i + 1
-                while j < n and text[j] in " \t\r\n":
-                    j += 1
-                if j >= n or text[j] in _CLOSERS:
+            if ch == "\\":
+                nxt = text[i + 1] if i + 1 < n else ""
+                hex4 = text[i + 2:i + 6]
+                if nxt and nxt in _JSON_ESCAPES:
+                    out.append(text[i:i + 2])
+                    i += 2
+                elif nxt == "u" and len(hex4) == 4 and set(hex4) <= _HEX:
+                    out.append(text[i:i + 6])
+                    i += 6
+                elif nxt == "'":
+                    out.append("'")
+                    i += 2
+                else:
+                    out.append("\\\\")
+                    i += 1
+                continue
+            if ch == '"':
+                if _closes_string(text, i, is_key, stack[-1] if stack else ""):
                     out.append(ch)
                     in_string = False
                 else:
@@ -279,20 +351,32 @@ def _repair_json(text: str) -> str:
                 out.append("\\t")
             elif ch == "\r":
                 pass
+            elif ch < " ":
+                out.append(f"\\u{ord(ch):04x}")
             else:
                 out.append(ch)
         else:
             if ch == '"':
                 in_string = True
+                is_key = expect_key and bool(stack) and stack[-1] == "{"
+                out.append(ch)
+            elif ch in "{[":
+                stack.append(ch)
+                expect_key = ch == "{"
+                out.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+                expect_key = False
+                out.append(ch)
+            elif ch == ":":
+                expect_key = False
                 out.append(ch)
             elif ch == ",":
-                j = i + 1
-                while j < n and text[j] in " \t\r\n":
-                    j += 1
-                if j < n and text[j] in "}]":
-                    pass                     # trailing comma
-                else:
-                    out.append(ch)
+                k = _skip_ws(text, i + 1)
+                if not (k < n and text[k] in "}]"):
+                    out.append(ch)           # else a trailing comma: dropped
+                expect_key = bool(stack) and stack[-1] == "{"
             else:
                 out.append(ch)
         i += 1
