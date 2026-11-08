@@ -814,6 +814,20 @@ class PendingItemRequest(BaseModel):
     photo: str
 
 
+class PendingMergeRequest(BaseModel):
+    """Two or more items of a batch to fold into one at the guidance step —
+    see POST /api/bulk/notes/{job_id}/merge-items.
+
+    Each entry is the same proof PendingItemRequest carries: a slot and one of
+    that item's own photo URLs, exactly as the paused job published them. A
+    merge rewrites every slot after the first one it touches, so a tap from a
+    tab that has not seen the last change must be refused rather than folding
+    together whichever items slid into those slots.
+    """
+
+    items: list[PendingItemRequest] = Field(default_factory=list)
+
+
 class PublishRequest(BaseModel):
     session_id: SessionId
     listing: Listing
