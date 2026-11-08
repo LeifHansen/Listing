@@ -268,7 +268,10 @@ RETAIL_TAG_RULE = """
 
 
 LISTING_SCHEMA_HEAD = """
-Return ONLY a JSON object (no markdown fences) with this exact shape:
+Return ONLY a JSON object (no markdown fences) with this exact shape. In EVERY
+string -- title, specifics and description alike -- write a size in inches as
+34 in or 34 inches, never with the inch mark (a bare quote ends the string),
+and write an apostrophe plainly (Levi's), never with a backslash before it:
 {
   "title": "string, aim 70-80 chars and never over 80, keyword-rich eBay title — see the title rule below for the order the words go in and what may never appear in one",
   "subtitle": "always the empty string \\"\\" (eBay charges an extra fee for subtitles; the seller adds one manually if they want)",
