@@ -38,8 +38,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
-from . import (auth, config, db, ebay_auth, errors, etsy_auth, marketplaces,
-               objstore, ratelimit, redact, storage)
+from . import (auth, config, db, ebay_auth, ebay_errors, errors, etsy_auth,
+               marketplaces, objstore, ratelimit, redact, storage)
 from .config import log
 from .marketplaces import ebay_provider
 from .marketplaces import mapping_etsy
@@ -10009,10 +10009,36 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
         # later revise settle it.
         if not getattr(outcome, "outcome_unknown", False):
             _restore_record(rec, uid)
+        if _photos_block_revise(outcome):
+            # The listing's own photos, not the price: eBay will not revise
+            # it at all until they are replaced. An errand for the seller,
+            # and reported as one rather than as the button failing.
+            return {"skip": f"{_PHOTOS_TOO_SMALL} Its price is unchanged."}
         return {"message": outcome.message or "eBay rejected the new price."}
     if pending:
         _keep_marked(rec["id"], pending, uid)
     return {"ok": True, "was": was, "now": new_price}
+
+
+# What a bulk run says about a listing eBay will not revise because its photos
+# are below eBay's minimum (see ebay_errors.photos_too_small). eBay checks the
+# photos the listing ALREADY has, even on a revise that sends none, so a price
+# drop on a listing first put up with small photos is refused over something
+# the drop never touched. That used to come back as "2 failed" in red, with
+# eBay's policy sentence, on a run that had worked as designed. Nothing the app
+# can resend clears it. Only new photos can, so it is reported as a skip that
+# is the seller's to act on, in words that say what to do.
+_PHOTOS_TOO_SMALL = (
+    "eBay won't take any change to this listing until its photos are at "
+    f"least {ebay_errors.PHOTO_MIN_SIDE} pixels on the longest side. Open it "
+    "and swap in bigger ones.")
+
+
+def _photos_block_revise(outcome) -> bool:
+    """Did eBay refuse this revise over the listing's photo size?"""
+    texts = [outcome.message or ""] + [
+        str(i.get("ebay_message") or "") for i in (outcome.issues or [])]
+    return any(ebay_errors.photos_too_small(t) for t in texts)
 
 
 def _restore_record(rec: dict, uid: str) -> None:
@@ -10670,6 +10696,11 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
                                base_url=base_url, uid=uid, prev_record=rec),
                 creds)
             if not outcome.ok:
+                if _photos_block_revise(outcome):
+                    # The fill is kept here and stays marked to send. It goes
+                    # to eBay with the save that replaces the photos.
+                    return {"skip": f"{_PHOTOS_TOO_SMALL} The details filled "
+                                    "in here go with that save."}
                 return {"message": outcome.message or "eBay rejected the new details."}
             return {"ok": True, "added": added, "settled": settled, "pushed": True,
                     "filled": filled}

@@ -169,6 +169,31 @@ def sale_locked(text: str) -> bool:
             and any(w in hay for w in _SALE_LOCK_WORDS))
 
 
+# eBay's minimum photo size: 500 pixels on the longest side. Below that eBay
+# refuses the listing in these words: "The resolution for provided picture(s)
+# does not meet eBay's Picture Policy requirements. Please only use pictures
+# that are at least 500 pixels on the longest side."
+PHOTO_MIN_SIDE = 500
+
+
+def photos_too_small(text: str) -> bool:
+    """Is this eBay refusing a listing because its photos are below
+    PHOTO_MIN_SIDE?
+
+    eBay checks this on a REVISE too, against the photos the listing already
+    has on eBay, even when the request sends no photos at all. A listing
+    first put up with small photos (imported from eBay, or listed by another
+    tool) therefore refuses every edit: a price drop, filled-in specifics, a
+    title fix. Nothing the seller sent caused it, and resending won't help.
+    Only replacing the photos clears it.
+
+    Matched on the wording, like sale_locked, because the sentence is what
+    names the cause."""
+    hay = " ".join((text or "").lower().split())
+    return (("picture policy" in hay and "resolution" in hay)
+            or f"{PHOTO_MIN_SIDE} pixels" in hay)
+
+
 def explain(err: dict) -> dict:
     """Map one eBay error to {title, fix, target, ebay_message, error_id}."""
     error_id = str(err.get("errorId", "") or "")
@@ -320,6 +345,17 @@ def explain(err: dict) -> dict:
                     "Selling and clear anything flagged there; if nothing is, "
                     "eBay Customer Service can say which permission is "
                     "missing. Your title is fine.")))
+    elif photos_too_small(hay):
+        # Ahead of the generic photo branch below, whose "re-upload clear
+        # photos" reads as a complaint about quality. eBay is counting
+        # pixels, and the seller needs to know the threshold.
+        issue.update(target="photos",
+                     title="These photos are too small for eBay",
+                     fix=(f"eBay needs every photo to be at least "
+                          f"{PHOTO_MIN_SIDE} pixels on its longest side, and "
+                          "won't accept any change to this listing until the "
+                          "small ones are replaced. Swap in bigger photos, "
+                          "then save again."))
     elif has("item.country", "merchantlocation", "merchant location",
            "inventory location", "ship-from", "ship from", "location key"):
         issue.update(target="location",
