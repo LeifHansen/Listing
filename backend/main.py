@@ -52,10 +52,8 @@ from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      MarketplaceState, PendingItemRequest, PendingPhotoRequest,
                      PublishRequest, RefineRequest, SessionOnlyRequest)
 from .services import (barcodes, bg_removal, bulk_actions, claude_ai,
-                       dirty_fields,
-                       duplicates, easypost, ebay,
+                       dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
-                       ebay_orders,
                        ebay_trading, ebay_video, image_import, images,
                        imagesearch, jobstore,
                        listing_export, listing_merge, listing_prompt,
@@ -9975,6 +9973,21 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
     # changed. Unmarked, this would send eBay an empty revise: the record
     # would show the new price, the seller would be told it worked, and
     # the listing would still be at the old one.
+    #
+    # And the price ALONE. The marks are stored on the record, and a revise
+    # eBay refused leaves its marks in place so the retry carries them —
+    # which is right for the editor, where the seller is looking at that
+    # edit, and was wrong here. Item specifics an earlier "Enrich all" push
+    # had filled and eBay had turned down rode along on every listing's
+    # price drop, were turned down again, and took the price with them:
+    # "Lower 500+ prices" lowered the one listing with nothing else pending
+    # and failed the rest over "The item specific Size Type has an invalid
+    # value." (The revise sets the two specifics refusals it knows aside —
+    # see ebay_trading.revise_listing — and any other sank the whole edit.)
+    # Those edits are not this button's to send. They stay marked, untouched,
+    # for the next save that is about them.
+    pending = [f for f in listing.dirty_fields if f != "price"]
+    listing.clear_dirty()
     listing.mark_dirty("price")
     # Through the provider, so each listing takes whichever revise path it
     # belongs to (Trading for store listings, the Inventory API for the
@@ -9985,8 +9998,52 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
                        base_url=base_url, uid=uid, prev_record=rec),
         creds)
     if not outcome.ok:
+        # A refused revise writes its attempt to the record: the new price,
+        # marked pending, and the stamp above. That is the editor's contract
+        # ("your new price is saved here either way") and not this one's. The
+        # seller never opened this listing, eBay still shows the old price —
+        # and the stamp would take it out of the group for three weeks, so
+        # pressing again once whatever eBay objected to is cleared could not
+        # reach it. Put it back as it was. Not when the outcome is UNKNOWN:
+        # eBay may have taken the price, and the pending mark is what lets a
+        # later revise settle it.
+        if not getattr(outcome, "outcome_unknown", False):
+            _restore_record(rec, uid)
         return {"message": outcome.message or "eBay rejected the new price."}
+    if pending:
+        _keep_marked(rec["id"], pending, uid)
     return {"ok": True, "was": was, "now": new_price}
+
+
+def _restore_record(rec: dict, uid: str) -> None:
+    """Write `rec` back as it was read. Best-effort: a bulk run reports the
+    refusal either way, and one listing's bookkeeping must not sink it."""
+    try:
+        db.upsert_listing(rec["id"], rec.get("listing") or {},
+                          status=rec.get("status") or "published", user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - one listing, not the run
+        log.warning("price drop: couldn't put %s back after a refusal: %s",
+                    rec.get("id"), exc)
+
+
+def _keep_marked(rid: str, fields: list[str], uid: str) -> None:
+    """Re-mark `fields` as pending on the stored record. The revise that just
+    landed cleared every mark it was handed, and it was handed the price
+    alone; these are the edits it was kept from sending."""
+    try:
+        cur = db.get_listing(rid)
+        if not cur:
+            return
+        data = dict(cur.get("listing") or {})
+        marks = sorted(set(data.get("dirty_fields") or ()) | set(fields))
+        if marks == list(data.get("dirty_fields") or ()):
+            return
+        data["dirty_fields"] = marks
+        db.upsert_listing(rid, data, status=cur.get("status") or "published",
+                          user_id=uid)
+    except Exception as exc:  # noqa: BLE001 - one listing, not the run
+        log.warning("price drop: couldn't keep %s's pending edits marked: %s",
+                    rid, exc)
 
 
 @app.post("/api/ebay/lower-prices")
@@ -10083,9 +10140,16 @@ def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
             records, _apply,
             on_each=lambda i, title: jobstore.update(
                 job_id, phase="repricing", current=i, current_title=title[:80]))
-        log.info("lower-all %s: user=%s percent=%s listings=%d changed=%d "
-                 "skipped=%d failed=%d", job_id, uid, percent, len(records),
-                 len(result.changed), len(result.skipped), len(result.failed))
+        # WARNING when eBay refused any of them, with its first reason: at
+        # INFO a run that lowered 1 of 500 never reached the error feed, and
+        # the only record of why was a toast the seller had already lost.
+        log.log(logging.WARNING if result.failed else logging.INFO,
+                "lower-all %s: user=%s percent=%s listings=%d changed=%d "
+                "skipped=%d failed=%d first_refusal=%s", job_id, uid, percent,
+                len(records), len(result.changed), len(result.skipped),
+                len(result.failed),
+                (result.failed[0].get("message") or "")[:200]
+                if result.failed else "-")
         jobstore.update(job_id, done=True, phase="done", current=len(records),
                         result={"percent": percent, "deferred": 0,
                                 **result.as_dict()})
@@ -12536,205 +12600,9 @@ def import_status(job_id: str, request: Request) -> Response:
 app.include_router(inbox_routes.router)
 
 
-
-# --- sold orders + shipping labels ------------------------------------------
-
-def _orders_creds(request: Request) -> dict:
-    creds = deps.ebay_creds_for(request)
-    if not creds:
-        raise HTTPException(400, "Connect eBay first — Settings → Connect eBay.")
-    return creds
-
-
-def _listing_map_by_item_id(uid: str) -> dict:
-    """{ebay item id: (our record id, package fields)} from the user's listing
-    records, so a rate quote can pre-fill the weight the seller already
-    entered and an order can be linked back to its listing."""
-    out = {}
-    # Best effort: this only pre-fills a weight the seller can type, so an
-    # unreadable store costs them a field, not a wrong answer.
-    for rec in db.list_listings_best_effort(limit=LIST_CAP, user_id=uid):
-        listing = rec.get("listing") or {}
-        item_id = str(listing.get("ebay_listing_id") or "")
-        if not item_id:
-            continue
-        pkg = {k: listing.get(f"package_{k}") or 0
-               for k in ("weight_lb", "weight_oz", "length_in", "width_in",
-                         "height_in")}
-        out[item_id] = (rec["id"], pkg if any(pkg.values()) else None)
-    return out
-
-
-def _attach_packages(uid: str, orders: list[dict]) -> list[dict]:
-    """Ride each order with the matching listing's package + our record id."""
-    by_item = _listing_map_by_item_id(uid)
-    for order in orders:
-        for li in order.get("line_items") or []:
-            rid, pkg = by_item.get(li.get("legacy_item_id") or "", (None, None))
-            if pkg and "package" not in order:
-                order["package"] = pkg
-            if rid and "listing_record_id" not in order:
-                order["listing_record_id"] = rid
-    return orders
-
-
-def _attach_labels(uid: str, orders: list[dict]) -> list[dict]:
-    """Ride each order with the labels already bought for it here, so the
-    dialog opens on the label rather than offering to buy a second one."""
-    by_order = db.labels_for_orders(uid, [o.get("order_id") or "" for o in orders])
-    for order in orders:
-        order["labels"] = by_order.get(order.get("order_id") or "", [])
-    return orders
-
-
-@app.get("/api/ebay/orders")
-def ebay_orders_awaiting(request: Request) -> dict:
-    """Orders still waiting to ship, with ship-to addresses, the package
-    weight/dims pre-filled when the matching listing recorded one, and any
-    label already bought here."""
-    creds = _orders_creds(request)
-    try:
-        page = ebay_orders.awaiting_page(creds["access_token"])
-    except ebay_orders.OrdersError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    orders = _attach_labels(creds["_uid"],
-                            _attach_packages(creds["_uid"], page["orders"]))
-    # `total` and `partial` ride along because this is the list a seller reads
-    # to decide what still has to be packed: a page of 50 out of 80 read as
-    # the whole pile leaves thirty orders unshipped, and eBay scores late
-    # dispatch.
-    out = {"orders": orders, "total": page["total"], "partial": page["partial"],
-           "ebay_username": creds.get("ebay_username") or "",
-           "env": config.EBAY_ENV, "recent_total": None}
-    if not page["orders"]:
-        # An empty pile has three different explanations, and "No orders are
-        # waiting to ship" said the same thing for all of them: every order in
-        # the window is already shipped; the connected account isn't the one
-        # that sold (the username says which one this is); or the server is
-        # on eBay's sandbox, which has no real orders at all. One more read
-        # -- eBay's own count of every order in the window -- tells the first
-        # two apart, and the dialog says which it found.
-        try:
-            out["recent_total"] = ebay_orders.orders_total(creds["access_token"])
-        except ebay_orders.OrdersError as exc:
-            # The list is still a valid answer; the count is a courtesy.
-            log.info("orders: couldn't count recent orders for the empty "
-                     "pile: %s", exc)
-        log.info("orders: awaiting pile empty for %s on %s — %s orders in the "
-                 "last 90 days", out["ebay_username"] or creds["_uid"],
-                 config.EBAY_ENV, out["recent_total"])
-    return out
-
-
-@app.get("/api/ebay/orders/for-listing/{listing_id}")
-def ebay_order_for_listing(listing_id: str, request: Request) -> dict:
-    """The awaiting-shipment order for one of OUR listing records (matched by
-    its eBay item id) — how a sold notification jumps straight to shipping.
-    {"order": null} when it's already shipped or not found, with `labels`
-    carrying anything bought here for it, so "Ship it" on a notification for
-    an order that has already gone shows the tracking rather than a shrug."""
-    creds = _orders_creds(request)
-    rec = db.get_listing(listing_id)
-    if not rec or (rec.get("user_id") and rec["user_id"] != creds["_uid"]):
-        raise HTTPException(404, "Listing not found")
-    labels = db.labels_for_listing(creds["_uid"], listing_id)
-    item_id = str((rec.get("listing") or {}).get("ebay_listing_id") or "")
-    if not item_id:
-        return {"order": None, "labels": labels}
-    try:
-        order = ebay_orders.order_for_item(creds["access_token"], item_id)
-    except ebay_orders.OrdersError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    if order:
-        _attach_packages(creds["_uid"], [order])
-        _attach_labels(creds["_uid"], [order])
-    return {"order": order, "labels": labels}
-
-
-@app.post("/api/ebay/mark-shipped")
-def ebay_mark_shipped(request: Request, payload: dict) -> dict:
-    """Attach a tracking number to an order: {order_id, tracking_number,
-    carrier}. Flips the order to shipped on eBay and emails the buyer. The
-    label purchase does this itself; this is the retry for when eBay refused
-    the tracking the first time."""
-    creds = _orders_creds(request)
-    order_id = str(payload.get("order_id") or "").strip()
-    try:
-        res = ebay_orders.mark_shipped(
-            creds["access_token"], order_id,
-            str(payload.get("tracking_number") or "").strip(),
-            str(payload.get("carrier") or "USPS").strip())
-    except ebay_orders.OrdersError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    # Keep the label's badge honest: best effort, the fulfillment is done.
-    db.mark_label_ebay(creds["_uid"], order_id, ok=True)
-    return res
-
-
-# --- EasyPost: the seller's own label account ---------------------------------
-#
-# Labels are bought through the seller's OWN EasyPost account — their API
-# key, pasted once in Settings, their wallet paying for postage. The key lives
-# in marketplace_accounts (encrypted, erased with the account) under this
-# marketplace key; EasyPost is deliberately NOT a registered marketplace, so
-# it never appears as a publish target. There is no app-wide key on purpose.
-
-_EASYPOST = "easypost"
-
-
-def _easypost_status(uid: Optional[str]) -> dict:
-    """What Settings and the shipping dialog need to know. Never the key
-    itself: a four-character hint is enough to recognise it by."""
-    acct = db.get_marketplace_account(uid, _EASYPOST) if uid else None
-    if not acct or not acct.get("refresh_token"):
-        return {"connected": False}
-    settings = acct.get("settings") or {}
-    return {
-        "connected": True,
-        "test": settings.get("mode") == "test",
-        "key_hint": str(settings.get("key_hint") or ""),
-        "carriers": list(settings.get("carriers") or []),
-    }
-
-
-def _easypost_key(request: Request) -> tuple[str, str]:
-    """(uid, api_key). 401 with nobody signed in; 400 until the seller has
-    connected EasyPost, because that account is what pays for the label."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    acct = db.get_marketplace_account(uid, _EASYPOST)
-    key = (acct or {}).get("refresh_token") or ""
-    if not key:
-        raise HTTPException(400, "Connect EasyPost in Settings first — labels "
-                                 "are paid for from your own EasyPost account.")
-    return uid, key
-
-
-def _remember_ship_from(creds: dict, payload: dict) -> dict:
-    """The ship-from address for a quote, remembered in prefs so it is a
-    one-time entry. The caller's own fields win; the remembered address only
-    FILLS GAPS, so an unreadable row costs a re-typed address rather than a
-    refused quote -- and the postal code falls back to the account's."""
-    raw = payload.get("ship_from")
-    ship_from = dict(raw) if isinstance(raw, dict) else {}
-    saved = db.get_prefs_best_effort(creds["_uid"]).get("ship_from") or {}
-    if isinstance(saved, dict):
-        for key, val in saved.items():  # payload wins; saved fills the gaps
-            ship_from.setdefault(key, val)
-    ship_from.setdefault("postal_code", creds.get("ship_from_postal") or "")
-    ship_from.setdefault("country", "US")
-    if isinstance(raw, dict) and raw:
-        # Remembering it is a convenience on the way to the quote the seller
-        # actually asked for; failing to remember must not lose them the
-        # quote. They re-type it next time, which is the old behaviour.
-        try:
-            db.save_prefs(creds["_uid"], {"ship_from": ship_from})
-        except errors.StorageUnavailable as exc:
-            log.info("shipping rates: couldn't remember the ship-from "
-                     "address: %s", exc)
-    return ship_from
-
+# --- background removal: the per-seller switch ------------------------------
+# Registered above the generic /api/{marketplace}/status routes, which would
+# otherwise catch /api/bg-removal/status. See services/bg_removal.
 
 @app.get("/api/bg-removal/status")
 def bg_removal_status(request: Request) -> dict:
@@ -12769,229 +12637,6 @@ def bg_removal_deactivate(request: Request) -> dict:
     if not uid and bg_removal.needs_activation():
         raise HTTPException(401, "Log in first.")
     return bg_removal.deactivate(uid)
-
-
-@app.get("/api/easypost/status")
-def easypost_status(request: Request) -> dict:
-    """Whether this seller has connected EasyPost. 200 {connected: false}
-    when nobody is signed in: the shell asks at boot, before login."""
-    return _easypost_status(deps.uid(request))
-
-
-@app.post("/api/easypost/connect")
-def easypost_connect(request: Request, payload: dict) -> dict:
-    """Store the seller's EasyPost API key — after proving it works with one
-    read, so a mistyped key is refused here rather than at the first label."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    key = str(payload.get("api_key") or "").strip()
-    if not key:
-        raise HTTPException(400, "Paste your EasyPost API key first.")
-    if not easypost.key_looks_valid(key):
-        raise HTTPException(400, "That doesn't look like an EasyPost API key — "
-                                 "they start with EZTK (test) or EZAK "
-                                 "(production).")
-    # A signed-in account trying keys in a loop is testing stolen ones.
-    if not ratelimit.check(f"easypost-connect:{uid}"):
-        raise HTTPException(429, "Too many attempts. Wait a few minutes and "
-                                 "try again.")
-    try:
-        info = easypost.verify_key(key)
-    except easypost.EasyPostError as exc:
-        msg = str(exc)
-        raise HTTPException(400 if "rejected" in msg else 502, msg) from exc
-    mode = "test" if info["test"] else "live"
-    saved = db.save_marketplace_account(
-        uid, _EASYPOST, refresh_token=key,
-        external_username="test key" if info["test"] else "production key",
-        settings={"mode": mode, "key_hint": key[-4:],
-                  "carriers": info.get("carriers") or [],
-                  "connected_at": datetime.now(timezone.utc).isoformat()})
-    if not saved:
-        # Not "connected": a key that was never stored would be reported as
-        # connected, and the first label would then ask for it again.
-        raise HTTPException(503, "Couldn't save the key just now — try again "
-                                 "in a moment.")
-    log.info("easypost: connected for uid=%s (%s)", uid, mode)
-    return _easypost_status(uid)
-
-
-@app.post("/api/easypost/disconnect")
-def easypost_disconnect(request: Request) -> dict:
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
-    if not db.disconnect_marketplace_account(uid, _EASYPOST):
-        raise HTTPException(503, "Couldn't disconnect EasyPost just now — "
-                                 "nothing changed. Try again in a moment.")
-    return {"ok": True}
-
-
-@app.post("/api/easypost/rates")
-def easypost_rates(request: Request, payload: dict) -> dict:
-    """Live EasyPost rates for one order: {order_id, package{weight_lb,
-    weight_oz, length_in, width_in, height_in}, ship_from{...}}. Creates a
-    Shipment on the seller's account (free; nothing is bought) and returns
-    its id with the rates, cheapest first."""
-    _, key = _easypost_key(request)
-    creds = _orders_creds(request)
-    order_id = str(payload.get("order_id") or "").strip()
-    if not order_id:
-        raise HTTPException(400, "No order id given.")
-    ship_from = _remember_ship_from(creds, payload)
-    package = payload.get("package")
-    if not isinstance(package, dict):
-        package = {}
-    try:
-        order = ebay_orders.get_order(creds["access_token"], order_id)
-    except ebay_orders.OrdersError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    try:
-        quote = easypost.create_shipment(key, order, package, ship_from)
-    except easypost.EasyPostError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    quote["test"] = easypost.key_is_test(key)
-    return quote
-
-
-def _settle_label(uid: str, row: dict, bought: dict) -> dict:
-    """Record a purchase against its label row and return the row as the
-    dialog reads it. A row that cannot be updated is still a bought label:
-    the seller is told, and the next open reconciles it."""
-    fields = {
-        "status": "bought",
-        "tracking_number": bought.get("tracking_number") or "",
-        "carrier": bought.get("carrier") or "",
-        "service": bought.get("service") or "",
-        "cost": str(bought.get("cost") or ""),
-        "currency": bought.get("currency") or "USD",
-        "label_url": bought.get("label_url") or "",
-        "tracker_url": bought.get("tracker_url") or "",
-    }
-    if not db.update_shipping_label(uid, row["label_id"], **fields):
-        log.warning("easypost: label %s bought but its row didn't update",
-                    row.get("shipment_id"))
-    return {**row, **fields,
-            "ebay_carrier": easypost.ebay_carrier_code(fields["carrier"])}
-
-
-@app.post("/api/easypost/label")
-def easypost_label(request: Request, payload: dict) -> dict:
-    """Buy the chosen rate: {order_id, shipment_id, rate_id}. Then tell eBay
-    the tracking number (createShippingFulfillment), which flips the order
-    to shipped and emails the buyer.
-
-    Never buys twice for one order: an order that already has a bought label
-    gets that label back, and one whose purchase answer was lost is settled
-    against EasyPost first. A purchase that succeeds but whose tracking eBay
-    refuses is still a purchase -- it comes back with ebay_marked false and
-    the reason, and the dialog offers the retry (/api/ebay/mark-shipped).
-    """
-    uid, key = _easypost_key(request)
-    creds = _orders_creds(request)
-    order_id = str(payload.get("order_id") or "").strip()
-    if not order_id:
-        raise HTTPException(400, "No order id given.")
-    existing = db.labels_for_order(creds["_uid"], order_id)
-    label = next((lb for lb in existing if lb["status"] == "bought"), None)
-    if label:
-        label = {**label,
-                 "ebay_carrier": easypost.ebay_carrier_code(label["carrier"])}
-    pending = next((lb for lb in existing if lb["status"] == "buying"), None)
-    if label is None and pending:
-        # A purchase whose answer never came back. EasyPost knows whether it
-        # took the money; ask before spending any more.
-        try:
-            seen = easypost.retrieve_shipment(key, pending["shipment_id"])
-        except easypost.EasyPostError as exc:
-            raise HTTPException(502, str(exc)) from exc
-        if seen["purchased"]:
-            log.info("easypost: lost purchase answer reconciled for order %s "
-                     "— the label was bought", order_id)
-            label = _settle_label(creds["_uid"], pending, seen)
-        else:
-            db.update_shipping_label(creds["_uid"], pending["label_id"],
-                                     status="abandoned")
-    shipment_id = str(payload.get("shipment_id") or "").strip()
-    rate_id = str(payload.get("rate_id") or "").strip()
-    if label is None and pending and not (shipment_id and rate_id):
-        # The dialog asked only "did that earlier purchase go through?" and
-        # the answer is no. Not an error: it goes back to picking a rate.
-        return {"status": "not_bought", "order_id": order_id}
-    if label is None:
-        if not shipment_id or not rate_id:
-            raise HTTPException(400, "Pick a shipping rate first.")
-        listing_record_id = ""
-        rid = str(payload.get("listing_record_id") or "").strip()
-        if rid:
-            rec = db.get_listing_best_effort(rid)
-            if rec and rec.get("user_id") == creds["_uid"]:
-                listing_record_id = rid
-        # The row goes in BEFORE the money moves: a lost answer then leaves
-        # a row that says "we may have paid for this" (StorageUnavailable
-        # here is a 503 and no purchase, by design).
-        row = db.create_shipping_label(
-            creds["_uid"], order_id=order_id, listing_record_id=listing_record_id,
-            shipment_id=shipment_id, rate_id=rate_id, status="buying")
-        try:
-            bought = easypost.buy_label(key, shipment_id, rate_id)
-        except easypost.UnknownOutcome as exc:
-            seen = None
-            try:
-                seen = easypost.retrieve_shipment(key, shipment_id)
-            except easypost.EasyPostError:
-                pass
-            if not seen or not seen["purchased"]:
-                # The row stays "buying"; the next open settles it.
-                raise HTTPException(502, str(exc)) from exc
-            log.info("easypost: lost purchase answer reconciled for order %s "
-                     "— the label was bought", order_id)
-            bought = seen
-        except easypost.EasyPostError as exc:
-            # A refusal: nothing was bought, and the row must not read as a
-            # purchase in doubt on the next open.
-            db.update_shipping_label(creds["_uid"], row["label_id"],
-                                     status="refused", ebay_error=str(exc)[:500])
-            raise HTTPException(502, str(exc)) from exc
-        label = _settle_label(creds["_uid"], row, bought)
-
-    # Tell eBay. The label is bought either way, so a refusal here is
-    # reported, not raised: raising would hide a label the seller paid for.
-    ebay_marked, ebay_error, unknown = False, "", False
-    if label.get("ebay_marked"):
-        ebay_marked = True
-    else:
-        try:
-            ebay_orders.mark_shipped(
-                creds["access_token"], order_id, label["tracking_number"],
-                label.get("ebay_carrier") or label.get("carrier") or "USPS")
-            ebay_marked = True
-        except ebay_orders.OrdersError as exc:
-            ebay_error, unknown = str(exc), exc.outcome_unknown
-            log.warning("easypost: label bought for order %s but eBay refused "
-                        "the tracking: %s", order_id, exc)
-        db.mark_label_ebay(creds["_uid"], order_id, ok=ebay_marked,
-                           error=ebay_error)
-    return {**label, "ebay_marked": ebay_marked, "ebay_error": ebay_error,
-            "ebay_outcome_unknown": unknown}
-
-
-@app.post("/api/easypost/label/{shipment_id}/refund")
-def easypost_refund(shipment_id: str, request: Request) -> dict:
-    """Ask the carrier to void a label bought here. Scoped by our own record
-    of the purchase: a shipment id that isn't this seller's is a 404 here,
-    never a lookup at EasyPost."""
-    uid, key = _easypost_key(request)
-    label = db.get_shipping_label_by_shipment(deps.uid(request), shipment_id)
-    if not label:
-        raise HTTPException(404, "No label with that id on your account.")
-    try:
-        res = easypost.refund_label(key, shipment_id)
-    except easypost.EasyPostError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    db.update_shipping_label(uid, label["label_id"], status="refund_requested")
-    return {"ok": True, "refund_status": res.get("refund_status") or "submitted"}
 
 
 def _file_etag(st: os.stat_result) -> str:

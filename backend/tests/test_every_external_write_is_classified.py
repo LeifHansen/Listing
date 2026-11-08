@@ -20,9 +20,7 @@ answer.
 
 This checks COVERAGE, not behaviour. What each classification actually
 produces is pinned by the per-client suites (test_unknown_outcome_is_its_own_
-answer, test_label_purchase_outcome, test_a_label_you_may_have_bought_on_
-easypost_is_not_a_label_you_failed_to_buy, test_etsy_unknown_outcome,
-test_depop_unknown_outcome).
+answer, test_etsy_unknown_outcome, test_depop_unknown_outcome).
 """
 from __future__ import annotations
 
@@ -36,13 +34,6 @@ CHANGES_SOMETHING = {
     "backend.services.ebay_trading._call":
         "AddItem/ReviseItem/EndItem — a duplicate live listing. Classified "
         "per call name inside _call; reads and the Verify dry runs are exempt.",
-    "backend.services.easypost.buy_label":
-        "buys postage from the seller's EasyPost wallet — a second charge. "
-        "The route reconciles a lost answer with retrieve_shipment (a read) "
-        "before it says anything to the seller.",
-    "backend.services.ebay_orders.mark_shipped":
-        "files a fulfillment and emails the buyer tracking — a second one is "
-        "its own mess.",
     "backend.services.etsy.create_draft_listing":
         "mints a draft on the seller's Etsy shop — a second one on a retry.",
     "backend.services.etsy.update_listing":
@@ -100,14 +91,6 @@ SAFE_TO_REPEAT = {
     "backend.ebay_auth.opt_in_to_program":
         "opting into a program is idempotent — already opted in is not an "
         "error, and there is nothing to undo.",
-    "backend.services.easypost.create_shipment":
-        "creates a Shipment on the seller's EasyPost account and rates it; "
-        "nothing is bought or reserved until /buy, so a duplicate object "
-        "costs nothing.",
-    "backend.services.easypost.refund_label":
-        "asks the carrier to void a label: money comes back to the seller, "
-        "never goes away, and EasyPost refuses a second request on the same "
-        "shipment rather than filing two.",
     "backend.services.google_ai._generate":
         "a POST that READS: it asks Gemini a question about the seller's "
         "photos. Nothing of theirs exists on Google's side to change, and a "
@@ -206,11 +189,9 @@ def test_the_change_making_clients_all_raise_an_unknown_outcome():
     """Coverage of the CHANGES_SOMETHING side: each client that owns one of
     those call sites must have a condition for it, and it must be
     recognisable without importing that client (see `outcome_unknown`)."""
-    from backend.services import (depop, easypost, ebay_messages, ebay_orders,
-                                  ebay_trading, etsy)
+    from backend.services import depop, ebay_messages, ebay_trading, etsy
 
-    for module in (ebay_trading, ebay_orders, etsy, depop, ebay_messages,
-                   easypost):
+    for module in (ebay_trading, etsy, depop, ebay_messages):
         unknown = getattr(module, "UnknownOutcome", None)
         assert unknown is not None, f"{module.__name__} has no UnknownOutcome"
         assert unknown.outcome_unknown is True

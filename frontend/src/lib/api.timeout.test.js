@@ -83,8 +83,8 @@ describe("a timed-out request", () => {
  * said, for every method: "Network error — the server may be starting up. Try
  * again in a few seconds."
  *
- * On a POST that publishes a listing or buys a shipping label, "try again" is
- * the one instruction that can cost money. The browser cannot tell a request
+ * On a POST that publishes a listing, "try again" is the one instruction that
+ * can cost money. The browser cannot tell a request
  * that never left from one whose reply was lost, so a write has to assume the
  * second — the same asymmetry the Trading client applies on the server side.
  */
@@ -96,7 +96,7 @@ function failFetch() {
 describe("what a dropped connection may tell the seller", () => {
   it("does not tell a write to just try again", async () => {
     failFetch();
-    const err = await api("/api/easypost/label", { method: "POST" })
+    const err = await api("/api/publish", { method: "POST" })
       .then(() => null, (e) => e);
     expect(err).toBeTruthy();
     expect(err.message.toLowerCase()).not.toMatch(/try again in a few seconds/);

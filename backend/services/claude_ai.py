@@ -219,11 +219,16 @@ def _extract_json(text: str) -> dict:
         # ',' delimiter: line 1 column 3644'. Repair what a person would
         # repair before giving up.
         repaired = _repair_json(text)
-        if repaired == text:
-            raise
         try:
+            if repaired == text:
+                raise exc
             data = json.loads(repaired)
         except json.JSONDecodeError:
+            # The seller is told to try again; the log keeps WHERE it broke,
+            # so the next shape of this can be repaired rather than retried.
+            # The decoder's column number alone names nothing anyone can fix.
+            log.warning("ai: the model's JSON could not be read (%s) near %r",
+                        exc.msg, text[max(0, exc.pos - 80):exc.pos + 80])
             raise exc from None
         log.info("ai: repaired the model's JSON (%s)", exc.msg)
     if not isinstance(data, dict):
@@ -237,38 +242,105 @@ def _extract_json(text: str) -> dict:
 
 
 _CLOSERS = frozenset(",}]:")
+_WS = " \t\r\n"
+# What a JSON value can start with, besides the literals true/false/null.
+_VALUE_START = frozenset('"{[-0123456789')
+_JSON_ESCAPES = frozenset('"\\/bfnrt')
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _skip_ws(text: str, j: int) -> int:
+    while j < len(text) and text[j] in _WS:
+        j += 1
+    return j
+
+
+def _starts_value(text: str, k: int) -> bool:
+    if k >= len(text):
+        return False
+    return (text[k] in _VALUE_START
+            or text.startswith(("true", "false", "null"), k))
+
+
+def _closes_string(text: str, i: int, is_key: bool, container: str) -> bool:
+    """Whether the quote at text[i] ends the string it is in.
+
+    Decided by what has to come next in VALID JSON at this point, not by
+    whether the next character merely looks like punctuation. A key ends only
+    at a colon. A value inside an object ends at a `}`, or at a comma that is
+    followed by the next key's opening quote; inside an array, at a `]`, or
+    at a comma followed by another value. Anything else -- prose, a comma
+    followed by prose -- is a quote inside the text.
+
+    "A comma means it closed" was the rule before, and it is exactly wrong for
+    how measurements are written: `Waist 34", Inseam 32", Rise 11"` put a
+    comma after every inch mark, each one ended the string early, and a pair
+    of Levi's failed to draft every time it was tried.
+    """
+    j = _skip_ws(text, i + 1)
+    if j >= len(text):
+        return True
+    c = text[j]
+    if is_key:
+        return c == ":"
+    if c == ",":
+        k = _skip_ws(text, j + 1)
+        if k >= len(text) or text[k] in "}]":
+            return True                      # a trailing comma; dropped later
+        if container == "{":
+            return text[k] == '"'
+        return _starts_value(text, k)
+    if container == "{":
+        return c == "}"
+    if container == "[":
+        return c == "]"
+    return c in _CLOSERS                     # top level: nothing to go by
 
 
 def _repair_json(text: str) -> str:
     """The most common ways a model breaks its own JSON, undone.
 
     A quote INSIDE a string that was never escaped -- the inch mark in
-    34" x 28", a quoted name in a description -- is told apart from the
-    string's closing quote by what follows it: a real closing quote is
-    followed (after whitespace) by a comma, a colon, a closing bracket or the
-    end; an inner one by prose. A raw newline or tab inside a string is
-    escaped. A trailing comma before a closing bracket is dropped. Everything
-    else is left exactly as it was, and the caller decides.
+    34" x 28" or `Waist 34", Inseam 32"`, a quoted name in a description --
+    is told apart from the string's closing quote by what follows it, read
+    against where in the document the string sits (see _closes_string). An
+    escape JSON does not have -- `Levi\\'s`, which models write out of
+    habit -- is undone: an escaped apostrophe is just the apostrophe, and any
+    other stray backslash is kept as a literal backslash. A raw newline, tab
+    or other control character inside a string is escaped. A trailing comma
+    before a closing bracket is dropped. Everything else is left exactly as
+    it was, and the caller decides.
+
+    Only ever run on text that has ALREADY failed to parse, so none of this
+    can change an answer that was valid to begin with.
     """
     out: list[str] = []
-    in_string = False
-    escaped = False
+    stack: list[str] = []        # the open containers, "{" or "["
+    expect_key = False           # the next string in this object is a key
+    in_string = is_key = False
     n = len(text)
     i = 0
     while i < n:
         ch = text[i]
         if in_string:
-            if escaped:
-                out.append(ch)
-                escaped = False
-            elif ch == "\\":
-                out.append(ch)
-                escaped = True
-            elif ch == '"':
-                j = i + 1
-                while j < n and text[j] in " \t\r\n":
-                    j += 1
-                if j >= n or text[j] in _CLOSERS:
+            if ch == "\\":
+                nxt = text[i + 1] if i + 1 < n else ""
+                hex4 = text[i + 2:i + 6]
+                if nxt and nxt in _JSON_ESCAPES:
+                    out.append(text[i:i + 2])
+                    i += 2
+                elif nxt == "u" and len(hex4) == 4 and set(hex4) <= _HEX:
+                    out.append(text[i:i + 6])
+                    i += 6
+                elif nxt == "'":
+                    out.append("'")
+                    i += 2
+                else:
+                    out.append("\\\\")
+                    i += 1
+                continue
+            if ch == '"':
+                if _closes_string(text, i, is_key, stack[-1] if stack else ""):
                     out.append(ch)
                     in_string = False
                 else:
@@ -279,20 +351,32 @@ def _repair_json(text: str) -> str:
                 out.append("\\t")
             elif ch == "\r":
                 pass
+            elif ch < " ":
+                out.append(f"\\u{ord(ch):04x}")
             else:
                 out.append(ch)
         else:
             if ch == '"':
                 in_string = True
+                is_key = expect_key and bool(stack) and stack[-1] == "{"
+                out.append(ch)
+            elif ch in "{[":
+                stack.append(ch)
+                expect_key = ch == "{"
+                out.append(ch)
+            elif ch in "}]":
+                if stack:
+                    stack.pop()
+                expect_key = False
+                out.append(ch)
+            elif ch == ":":
+                expect_key = False
                 out.append(ch)
             elif ch == ",":
-                j = i + 1
-                while j < n and text[j] in " \t\r\n":
-                    j += 1
-                if j < n and text[j] in "}]":
-                    pass                     # trailing comma
-                else:
-                    out.append(ch)
+                k = _skip_ws(text, i + 1)
+                if not (k < n and text[k] in "}]"):
+                    out.append(ch)           # else a trailing comma: dropped
+                expect_key = bool(stack) and stack[-1] == "{"
             else:
                 out.append(ch)
         i += 1
@@ -730,13 +814,27 @@ Rules:
   item (the tab, the patch and the care tag of a single pair of jeans) are
   one item, not three. A seller who shoots look-alikes shoots each one's tag
   right after its overview: the tag belongs to the overview before it, and
-  the next overview starts the next item.
+  the next overview starts the next item ONLY when its tag, patch or mark
+  reads differently from the last one.
+- THE SAME ITEM SHOT AGAIN IS STILL ONE ITEM. Sellers go back to an item for
+  more angles, re-shoot a blurry one, or shoot it upright and then on its
+  side, so a second (or third) overview of the same-looking object is NOT a
+  new item by itself. Matching details are identity evidence that two photos
+  are ONE item: the same handwritten price tag or sticker, the same ribbon,
+  string or stand, the same pattern in the same place, the same chip or wear.
+  Colour is not one of them on anything shiny -- enamel, cloisonne, metal,
+  glass, glaze and lacquer all read gold in one shot and green in the next,
+  so a shift in the light is never a second item.
 - Split when two photos show different physical items (a different
-  garment/object, a clearly different color or print, or different identity
-  marks as above). When nothing tells two look-alikes apart -- no tag, patch
-  or label reads differently -- KEEP THEM TOGETHER: a duplicate listing of
-  one item is a worse mistake than one extra photo on a listing, and the
-  seller can drag a photo out later.
+  garment/object, a clearly different color or print that is not just the
+  light, or different identity marks as above). When nothing tells two
+  look-alikes apart -- no tag, patch or label reads differently -- KEEP THEM
+  TOGETHER: a duplicate listing of one item is a worse mistake than one extra
+  photo on a listing, and the seller can drag a photo out later.
+- Name each group for what the item IS. Never number groups ("#1", "#2",
+  "(2)", "one of three"): a number says nothing about the item, and if you
+  are about to number look-alikes you must first be able to say what tells
+  them apart. If you cannot, they are one item.
 - Order each group's indices with the best overview shot first and leave the
   rest in the order they were uploaded. That order is the seller's own
   sequence through the item, and shuffling it inside a group tells nobody
@@ -752,10 +850,24 @@ Return ONLY a JSON object (no markdown fences): {"merge": [[0, 2]]}
 - A close-up, back view, tag/label shot, or ONE COMPONENT OF A SET (e.g. a
   single print from a print set, one shoe of a pair) belongs with its set's
   overview group — those are the classic accidental splits.
+- THE SAME ITEM SHOT AGAIN is the other classic split, and the one that
+  reaches eBay as two or three identical listings. Groups whose photos show
+  the SAME-LOOKING object -- the same shape, the same pattern, the same
+  handwritten price tag, sticker, ribbon or stand -- are ONE item photographed
+  more than once, and must be merged, unless you can POINT AT what tells them
+  apart: a tag or patch that reads differently, a different flaw, a plainly
+  different color or print. A shift in the light is not a different color:
+  enamel, cloisonne, metal, glass and glaze read gold in one shot and green
+  in the next. Groups that sit next to each other in the pile and look the
+  same are almost always the seller going back for more angles.
+- The group names are the first pass's guesses and are not evidence. A
+  number in a name ("#1", "#2", "(2)") means only that the first pass
+  numbered them, never that it found two items.
 - Keep genuinely different physical products separate, even from the same
   brand or artist. Two groups whose tags or patches read differently (a
   different size, lot or model number) are two items however alike they
-  look; never merge look-alikes on looks alone.
+  look. The rules below for jeans and for pictures are more specific than
+  this one and win where they differ.
 """ + _experts.rules_for(_Stage.GROUPING) + """
 - Nothing to merge? Return {"merge": []}.
 """
@@ -787,9 +899,12 @@ Return ONLY a JSON object (no markdown fences):
   tag or patch, a different lot, model or serial number, a different care
   label, a different flaw or wear pattern, a clearly different wash or color.
   Quote the tag or patch text where you can read it.
-- Angles, lighting, a hanger vs laid flat, a close-up vs an overview, front
-  vs back are NOT evidence of a second item. A close-up of a tag belongs
-  with the overview shots taken around it.
+- Angles, lighting, a hanger vs laid flat, upright vs on its side, a
+  close-up vs an overview, front vs back are NOT evidence of a second item,
+  and neither is a color that shifts with the light on enamel, metal, glass
+  or glaze. A close-up of a tag belongs with the overview shots taken around
+  it. The same handwritten price tag, sticker or ribbon in two photos means
+  they are ONE item.
 """ + _experts.rules_for(_Stage.GROUPING) + """
 - Every photo index appears in exactly one item. One item: return a single
   entry with every index and evidence "".
@@ -969,7 +1084,12 @@ def _apply_group_merges(groups: list[dict], merge_lists) -> list[dict]:
         union = [k for k in range(gi, n) if root(k) == gi]
         combined = sorted(i for k in union for i in groups[k]["indices"])
         first = min(union, key=lambda k: min(groups[k]["indices"], default=n))
-        out.append({"name": groups[first]["name"], "indices": combined})
+        name = groups[first]["name"]
+        # "bell #1" merged with "bell #2" is one bell, not the first of
+        # several -- and the name is what the seller reads it by.
+        if len(union) > 1:
+            name = _unnumbered(name)
+        out.append({"name": name, "indices": combined})
     return out
 
 
@@ -1008,6 +1128,39 @@ def _count_hint(expected: int, found: int) -> str:
     )
 
 
+# A count the first pass tacked onto a name: "#2", "(3)", "#1 of 3", "2 of 3".
+# On 2026-11-01 one cloisonne bell, shot seven times, came out of grouping as
+# "cloisonne bell ... #1", "#2" and "#3", and the merge pass was shown those
+# names beside three near-identical photos. A number in the label reads as
+# the first pass having COUNTED three bells, which is exactly the claim the
+# merge pass exists to check -- so it is checked against the photos alone.
+_NAME_NUMBER = re.compile(
+    r"\s*(?:#\s*\d+(?:\s+of\s+\d+)?"
+    r"|\(\s*#?\s*\d+(?:\s+of\s+\d+)?\s*\)"
+    r"|\b\d+\s+of\s+\d+)\s*$",
+    re.IGNORECASE)
+
+
+def _unnumbered(name: str) -> str:
+    """A group's name without the count the first pass put on the end of it.
+    A name that is nothing but a number is left alone."""
+    name = str(name or "")
+    plain = _NAME_NUMBER.sub("", name).rstrip(" -–—,")
+    return plain or name
+
+
+def _pile_position(indices: list[int]) -> str:
+    """Where a group's photos sit in the pile, in the same numbering the first
+    pass was shown. Groups next to each other that look the same are the
+    seller going back for more angles; the merge pass cannot know they are
+    neighbours unless it is told."""
+    idxs = sorted(indices)
+    if len(idxs) == 1:
+        return f"photo {idxs[0]} of the pile"
+    shown = ", ".join(str(i) for i in idxs[:8])
+    return f"photos {shown}{', …' if len(idxs) > 8 else ''} of the pile"
+
+
 def _verify_groups(client, images: list[bytes], groups: list[dict],
                    expected: int = 0) -> list[dict]:
     """Second-pass duplicate check: show ONE representative photo per group and
@@ -1023,7 +1176,9 @@ def _verify_groups(client, images: list[bytes], groups: list[dict],
     content: list[dict] = []
     for gi, g in enumerate(groups):
         rep = images[g["indices"][0]]
-        content.append({"type": "text", "text": f'Group {gi} — "{g["name"]}":'})
+        content.append({"type": "text", "text": (
+            f'Group {gi} — "{_unnumbered(g["name"])}" '
+            f'({_pile_position(g["indices"])}):')})
         content.append({"type": "image", "source": {
             "type": "base64", "media_type": "image/jpeg",
             "data": base64.standard_b64encode(rep).decode("ascii")}})

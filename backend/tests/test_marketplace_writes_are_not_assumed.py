@@ -174,7 +174,6 @@ def disconnects(monkeypatch, every_marketplace):
 @pytest.mark.parametrize("path,marketplace", [
     ("/api/etsy/disconnect", "etsy"),
     ("/api/ebay/disconnect", "ebay"),
-    ("/api/easypost/disconnect", "easypost"),
 ])
 def test_a_disconnect_that_did_not_land_is_not_reported_as_done(
         disconnects, path, marketplace):
@@ -192,7 +191,6 @@ def test_a_disconnect_that_did_not_land_is_not_reported_as_done(
 @pytest.mark.parametrize("path", [
     "/api/etsy/disconnect",
     "/api/ebay/disconnect",
-    "/api/easypost/disconnect",
 ])
 def test_a_disconnect_that_landed_still_says_so(disconnects, path):
     api, calls = disconnects(landed=True)

@@ -25,7 +25,6 @@ const BASE = {
   "/api/notifications": { notifications: [], unread: 0, checked: true },
   "/api/marketplaces": { marketplaces: [] },
   "/api/tokens": { enabled: false, total: 0, packs: [], costs: {} },
-  "/api/easypost/status": { connected: false },
   "/api/account/summary": { listings: 0, images: 0 },
 };
 
@@ -193,19 +192,19 @@ describe("the Settings page", () => {
     vi.stubGlobal("fetch", vi.fn(server(() => json({ prefs: {} }), [])));
     const scrolled = [];
     Element.prototype.scrollIntoView = function scrollIntoView() { scrolled.push(this.id); };
-    const s = await mount({ section: "easypost" });
+    const s = await mount({ section: "appearance" });
     // The scroll runs on an animation frame after the view change (so it
     // lands after App.jsx's own scroll-to-top). jsdom paces frames on a
     // timer, so wait for the call rather than assume which frame it lands
     // on -- a slow runner made the frame-order assumption flaky.
-    for (let i = 0; i < 40 && !scrolled.includes("settings-easypost"); i++) {
+    for (let i = 0; i < 40 && !scrolled.includes("settings-appearance"); i++) {
       await act(async () => { await new Promise((r) => setTimeout(r, 25)); });
     }
     const row = [...s.host.querySelectorAll("button[aria-expanded]")]
-      .find((b) => (b.textContent || "").includes("Shipping labels"));
+      .find((b) => (b.textContent || "").includes("Appearance"));
     expect(row.getAttribute("aria-expanded")).toBe("true");
-    expect(s.text()).toContain("EasyPost API key");
-    expect(scrolled).toContain("settings-easypost");
+    expect(s.text()).toContain("Dark mode");
+    expect(scrolled).toContain("settings-appearance");
     await act(async () => { s.root.unmount(); });
   });
 });

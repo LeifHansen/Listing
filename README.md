@@ -493,7 +493,7 @@ shipping policy and its handling time, eBay International Shipping),
 **Returns & payment** (the default return and payment policies with their
 terms shown inline, and the three ways to get policies when the account has
 none), **Selling defaults** (Best Offer, Promoted Listings, pricing
-strategy, condition and quantity), then **More** (profile, EasyPost labels,
+strategy, condition and quantity), then **More** (profile,
 cross-posting, Teach the AI, appearance, sign-in) folded into one row each,
 and the **Danger zone**. A sticky jump nav lists the groups, and every "fix
 this in Settings" link elsewhere lands on its section
@@ -1154,14 +1154,6 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `GET`  | `/api/messages/{id}` | One conversation's messages, oldest first |
 | `POST` | `/api/messages/send` | Reply into a conversation |
 | `POST` | `/api/messages/read` | Mark one conversation read |
-| `GET`  | `/api/ebay/orders` | Orders awaiting shipment (Fulfillment API) with ship-to, the listing's package and any label bought here; when empty, eBay's 90-day order count, the connected username and the environment, so the empty state can say which kind of empty it is |
-| `GET`  | `/api/ebay/orders/for-listing/{id}` | The awaiting order for one of our listing records (a sold notification's "Ship it"), plus the labels bought for it once it has shipped |
-| `POST` | `/api/ebay/mark-shipped` | Attach a tracking number to an order (`createShippingFulfillment`) — the retry when eBay refused it at purchase time |
-| `GET`  | `/api/easypost/status` | Whether this seller has connected EasyPost (test mode, last four of the key — never the key) |
-| `POST` | `/api/easypost/connect` · `/disconnect` | Store the seller's own EasyPost API key after proving it works; forget it |
-| `POST` | `/api/easypost/rates` | Live rates for one order's package from the seller's EasyPost account (creates a Shipment; buys nothing) |
-| `POST` | `/api/easypost/label` | Buy the chosen rate, record it, post the tracking to eBay. Never buys twice for one order; settles a lost answer against EasyPost first |
-| `POST` | `/api/easypost/label/{shipment_id}/refund` | Void an unused label (scoped to the seller's own record of it) |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
 | `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
@@ -1437,7 +1429,7 @@ backend/
     metrics.py       views / watchers / offers / bids per listing
     promotions.py    Promoted Listings
     ebay_offers.py   Negotiation API: offers to the buyers already watching
-    ebay_orders.py, easypost.py   sold notifications and shipping labels
+    notifications.py the "your item sold" alerts behind the bell
     ebay_messages.py, messages.py buyer messages and the unified inbox
     errorlog.py      the production error feed (Admin -> Errors, /api/ops)
     tokens.py        the AI-token ledger and Stripe checkout
@@ -2044,6 +2036,21 @@ problem:
   `SERVER_OWNED_FIELDS`, whose rule is that the **stored** value wins: under
   that rule the stamp could never move forward on the one write entitled to
   move it.
+
+  **The revise carries the price and nothing else** (`_lower_one`). A
+  listing's pending edits are stored on it (`dirty_fields`), and a revise eBay
+  refuses keeps its marks so the retry carries them. "Enrich all" marks the
+  specifics it pushes, so wherever eBay had turned those down the price drop
+  sent them again, eBay refused them again, and the price went with them:
+  *"Lower 500+ prices"* lowered the one listing with nothing else pending and
+  failed the rest over *"The item specific Size Type has an invalid value."*
+  The other marks are now left out of the request and **stay marked** for the
+  next save that is about them. A price eBay refuses (a sale that blocks price
+  revisions, say) puts the listing **back as it was**, rather than leaving a
+  price eBay does not show and a stamp that hides it from the group; an
+  unanswered revise keeps the attempt, since eBay may have taken it. A run with
+  any refusal logs at WARNING with the first reason, so it reaches the error
+  feed rather than living only in the toast.
 - **Finish details → "Enrich all"** fills every listing on the list in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft
@@ -2285,73 +2292,24 @@ a month hardcoded in the client.
   **draft**, with its photos. Removing it would destroy a seller's work over a
   mis-press on a card that should not have offered End in the first place.
 
-## Sold notifications & shipping labels
+## Sold notifications
 
 When a sync notices a listing flipped to **sold**, the seller gets an in-app
-notification (the bell in the top bar, polled every minute) with a one-tap
-jump into the shipping dialog. Notifications are deduplicated in the database
-(one per sale, no matter how many sync paths spot it), and backfilling an
-existing store's historical sales stays silent.
+notification (the bell in the top bar, polled every minute); tapping it opens
+the listing. Notifications are deduplicated in the database (one per sale, no
+matter how many sync paths spot it), and backfilling an existing store's
+historical sales stays silent.
 
-The shipping dialog (also reachable via **Ship orders** on the Listings page)
-reads the orders still awaiting shipment through the Fulfillment API — buyer
-address included — pre-fills the package weight/dims from the matching
-listing, and buys the label through **EasyPost**:
-
-- **The seller's own EasyPost account.** Each seller pastes their EasyPost
-  API key once under Settings → More → *Shipping labels*. The key is proved
-  to work with one EasyPost read before it is stored, held Fernet-encrypted in
-  `marketplace_accounts` like every other marketplace credential, erased with
-  the account, and only ever shown back as its last four characters. Postage
-  is billed to that account's wallet. There is deliberately **no app-wide
-  EasyPost key** and no server setting: the operator never pays for a
-  seller's postage.
-- **Rates → buy → print.** `POST /api/easypost/rates` creates a Shipment on
-  the seller's account (free; nothing is bought) and returns the rates
-  cheapest first; `POST /api/easypost/label` buys the chosen one and then
-  posts the tracking number to the eBay order via `createShippingFulfillment`,
-  which flips it to shipped and emails the buyer. The label PDF opens from
-  EasyPost's own URL, which works identically on the web and inside the iOS
-  shell (a same-origin download is exactly what the native webview cannot
-  authenticate). A test key (`EZTK…`) buys free sample labels; a production
-  key (`EZAK…`) buys real postage.
-- **Every purchase is on record** (`shipping_labels`). The row is written
-  *before* the money moves, so a lost answer from EasyPost leaves a row that
-  says "we may have paid for this" and the next open of the order settles it
-  against EasyPost instead of buying again; an order that already has a label
-  opens on that label; and "Ship it" on a notification for an order that has
-  already gone shows the tracking and the PDF rather than a shrug. The same
-  record scopes a shipment id to its owner — a label carries the buyer's name
-  and address, so another seller's id is a 404 here, never a lookup at
-  EasyPost.
-- **eBay refusing the tracking never hides the label.** A purchase that
-  succeeds but whose tracking eBay rejects comes back as the label with
-  `ebay_marked: false` and the reason; the dialog offers **Retry marking
-  shipped** (`POST /api/ebay/mark-shipped`), and says to check the order on
-  eBay first when the refusal was itself a lost answer.
-- **Void** (`POST /api/easypost/label/{shipment_id}/refund`) asks the carrier
-  to refund an unused label. EasyPost answers "submitted" and settles it
-  asynchronously; eBay has no edit-tracking call, so a voided-then-rebought
-  label leaves the old number on the order until it is changed in Seller Hub,
-  and the dialog says so.
-
-**An empty order list explains itself.** "No orders are waiting to ship" used
-to be the whole answer whether every order in eBay's 90-day window was already
-shipped, a different eBay account than the one that sold was connected, or the
-server was on eBay's sandbox (which has no real orders; `EBAY_ENV` defaults to
-`sandbox`). An empty pile now costs one extra read — eBay's own count of every
-order in the window — and the dialog names the account, the count, and shouts
-if the server is on sandbox. A full pile costs nothing extra.
-
-Reading orders and posting tracking needs the `sell.fulfillment` OAuth scope;
-sellers who connected eBay before it was added reconnect once to grant it
-(same as every scope addition).
-
-**Trying it with a test key.** Connect an EasyPost *test* key in Settings,
-open Ship orders, pick an order, Get rates, Buy the cheapest. The PDF is a
-sample and the tracking number is fake, so verify against a sandbox eBay
-order — or, on a real order, void immediately rather than let a fake number
-reach the buyer. Swap in the production key for the first real label.
+**There is no label buying or order shipping in the app.** Sellers ship from
+eBay Seller Hub, where eBay sells its own discounted labels. eBay's API for
+those labels, the [Logistics API](https://developer.ebay.com/api-docs/sell/logistics/overview.html),
+is a Limited Release API open only to partners eBay has whitelisted, so the
+app cannot offer eBay's labels. An earlier version bought labels through each
+seller's own EasyPost account instead; that was removed, along with the
+orders list it read (and with it the `sell.fulfillment` OAuth scope, which
+nothing else used). The `shipping_labels` table is still defined so that rows
+from that version are erased with their seller's account; dropping it is a
+separate operator step.
 
 ## Buyer messages (the unified inbox)
 

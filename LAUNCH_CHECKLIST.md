@@ -331,7 +331,7 @@ Ordered by what it costs a seller.
   runner. 75 more routes can move as they are. The other 51 read something
   tests patch on `main`: `LIST_CAP` pins 11 of them, the drafting chain's
   helpers 10, `_purge_session_images` and `_bulk_set` 7 each, then
-  `_easypost_key`, `_finish_connect` and the expert-knowledge routes' direct
+  `_finish_connect` and the expert-knowledge routes' direct
   `run_in_background` call. Move a shared helper into `routers/deps.py`, and
   an area's own into its router, repointing the patches in the same change,
   the way `_uid` moved (`test_a_patch_on_main_never_silently_misses.py`

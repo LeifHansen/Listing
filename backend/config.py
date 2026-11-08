@@ -508,8 +508,7 @@ EBAY_MEDIA_BASE = ("https://apim.sandbox.ebay.com/commerce/media/v1_beta"
 # Listings, and read the connected seller's identity (so we can show WHICH eBay
 # account is linked). sell.marketing was added later: a seller who connected
 # before it must reconnect once to grant it (their existing refresh token only
-# carries the scopes they originally approved). Same for sell.fulfillment
-# (reading sold orders + posting tracking numbers for the shipping workflow).
+# carries the scopes they originally approved).
 # The commit this image was built from, stamped in by the Dockerfile's
 # GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
 BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
@@ -530,7 +529,6 @@ EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope/sell.account",
     "https://api.ebay.com/oauth/api_scope/sell.marketing",
     "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
 ]
 
