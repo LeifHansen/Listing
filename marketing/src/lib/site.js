@@ -268,7 +268,7 @@ export const features = [
   {
     title: "Photo tools",
     blurb:
-      "Background removal on any photo, powered by Photoroom — a tag close-up is never cut, and a painting is only ever cut to its own border.",
+      "Background removal, auto-clean and smart crop on any photo, with a safety pass that refuses a cutout which ate part of your product.",
     accent: "green",
   },
 ];
@@ -291,7 +291,7 @@ export const tokenCosts = [
   { feature: "Autofill item specifics", tokens: 2, note: "The standalone button. Bundled free inside a full draft." },
   { feature: "Shop Mode shelf scan", tokens: 2, note: "One video's frames, scanned for resale estimates." },
   { feature: "AI refine instruction", tokens: 1, note: "A free-form \"make it…\" edit on a draft you already have." },
-  { feature: "Background removal", tokens: 1, note: "Per photo, powered by Photoroom; refunded when a photo keeps its background." },
+  { feature: "AI photo tool", tokens: 1, note: "Per photo: background removal, auto-clean or smart crop." },
 ];
 
 /** Rounded per-token price, for the pack cards. */
