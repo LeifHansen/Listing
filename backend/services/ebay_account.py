@@ -16,7 +16,7 @@ handlers where nothing could test them:
 
 Deliberately importable without backend.main — same rule as sync_guard: the CI
 `checks` job installs no image/AI stack, so anything that reaches for main
-(and through it Pillow, anthropic, rembg) is a test that cannot run there.
+(and through it Pillow and anthropic) is a test that cannot run there.
 """
 from __future__ import annotations
 

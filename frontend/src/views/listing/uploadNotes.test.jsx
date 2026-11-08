@@ -161,7 +161,9 @@ describe("notes for the AI", () => {
     // Bulk mode: the pile has several items, which is where the hints say how
     // many drafts to expect.
     await act(async () => {
-      host.querySelectorAll('input[type="checkbox"]')[1].click();
+      [...host.querySelectorAll('input[type="checkbox"]')]
+        .find((c) => c.closest("label")?.textContent.includes("Bulk mode"))
+        .click();
     });
     await press("Split 2 photos into listings");
 

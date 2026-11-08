@@ -60,6 +60,9 @@ SHIPPED = {
         "created_at", "data", "id", "status", "title", "updated_at",
         "user_id",
     ),
+    "bg_removal_usage": (
+        "period", "photos", "updated_at", "user_id",
+    ),
     "marketplace_accounts": (
         "external_id", "external_username", "marketplace", "refresh_token",
         "settings", "updated_at", "user_id",

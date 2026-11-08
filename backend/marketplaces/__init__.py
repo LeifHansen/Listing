@@ -1,7 +1,7 @@
 """Marketplace provider registry.
 
 Providers register themselves on import; loading is lazy (the same
-credential-gated-provider idea as config.bg_engine_chain, but for whole
+credential-gated-provider idea as config.photoroom_ready, but for whole
 marketplaces). The registry module itself stays import-light so tests can
 import it under CI's minimal install — the heavy provider modules (httpx,
 sqlalchemy via db) are only pulled in by _ensure_loaded(), which runs at

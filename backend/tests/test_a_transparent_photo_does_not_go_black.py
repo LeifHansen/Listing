@@ -52,12 +52,12 @@ def test_the_cutout_stage_is_handed_an_opaque_photo(tmp_path, monkeypatch):
     between did not, and it is the stage that decides what the matte sees."""
     seen = {}
 
-    def _spy(img, wait=None):
+    def _spy(img):
         seen["mode"] = img.mode
         seen["corner"] = img.convert("RGB").getpixel((2, 2))
-        return None  # "found nothing": the photo is kept as shot
+        return None  # no key: the photo is kept as shot
 
-    monkeypatch.setattr(images, "cutout", _spy)
+    monkeypatch.setattr(images.cutout_api, "photoroom_cutout", _spy)
     images.optimize(_cutout_png(tmp_path), tmp_path / "out", remove_bg=True)
 
     assert seen["mode"] == "RGB"

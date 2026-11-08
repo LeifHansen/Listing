@@ -21,14 +21,12 @@ import time
 
 WINDOW_SECONDS = 900        # 15 minutes
 MAX_ATTEMPTS = 10           # per client, per window, per bucket
-# The photo-studio endpoints run the local rembg/ONNX model, which is
-# serialized process-wide behind a single inference lock — so an unmetered
-# flood there stalls every seller's background removal at once, and (because
-# those handlers occupy threadpool slots) eventually the whole site. They
-# cannot be metered like the other AI features: the border re-check fires
-# automatically after every crop and save, so charging it would bill people
-# for ordinary editing. A generous ceiling instead — far above real editing,
-# far below what it takes to wedge the machine.
+# The photo studio's background removal is a paid Photoroom call on the
+# app's own account, and each one holds a threadpool slot for the length of
+# the round trip — so an unthrottled client could both run up the bill and,
+# with enough slots taken, slow the whole site. The token charge and the
+# monthly count are per seller; this per-IP ceiling is what stops one client
+# hammering it. Generous: far above real editing.
 STUDIO_MAX_CALLS = 120
 # The eBay lookups that need no login: category suggestions, item aspects and
 # price comps. They call eBay with the APPLICATION token, which is why they

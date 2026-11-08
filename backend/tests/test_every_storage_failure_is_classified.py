@@ -190,6 +190,15 @@ WHY_A_BLANK_IS_SAFE = {
         "None means unknown; the Stripe webhook retries, and the ref makes it idempotent",
     "token_reverse_purchase":
         "None means unknown; Stripe redelivers, and the derived ref stops a double debit",
+    "bg_usage":
+        "None means unknown; the Settings card shows 0 used rather than a "
+        "number nobody read, and nothing is refused on it",
+    "bg_reserve":
+        "None means unknown; services/bg_removal fails open (logged), the same "
+        "policy as token_spend, since the cap is a backstop on our own bill",
+    "bg_release":
+        "returns False for a give-back that did not land; the cost is a "
+        "seller's monthly count reading a few photos high until the month turns",
 
     # --- sentinels that already distinguish 'could not ask' ---------------
     "find_users_by_ebay_user_id":

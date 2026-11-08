@@ -5,10 +5,10 @@ orientation. It turns the ITEM upright when it was photographed lying
 sideways or on its head — which EXIF knows nothing about, so a vision model
 is asked; see services/orient for how, and for why the last one was wrong
 about everything that was not a shirt. It takes the background off when the
-seller asked for that: one run of the local model, the matte hardened a
-little, the item composited on white under a soft contact shadow — except on
+seller asked for that: one call to Photoroom (services/cutout_api) for the
+matte, the item composited on white under a soft contact shadow — except on
 a close-up of PART of an item, a tag or a label or a stitch, where there is
-no background to take off and the model, asked anyway, deletes the item and
+no background to take off and a cutout, asked anyway, deletes the item and
 keeps the label. And it sizes the result for eBay — the longest side to
 1600px, never upscaled — saved as a JPEG that carries no metadata, so the GPS
 of the seller's home never rides along to a public listing.
@@ -20,33 +20,30 @@ finishing sharpen, three paid cutout APIs as alternate engines, and a guard
 for every way those could go wrong. Each was reasonable on its own; together
 they made every photo cost a minute and every result a surprise, and the
 seller asked for the photos as shot or cut out, and to do the rest
-themselves in the editor. So: the model's own matte ships, the frame the
+themselves in the editor. So: the engine's own matte ships, the frame the
 seller composed is the frame that ships, and a wrong cutout is one tap of
 Revert. Orientation came back on its own and on its own terms — rebuilt for
 objects, applied only when two different looks agree, never in the way of
 an upload — and a wrong turn is one tap of the rotate button.
 
-One model inference runs at a time (_INFER_LOCK): two at once double peak
-memory and kill a small machine. Callers queue for the slot with a deadline —
-short for a person watching the studio's spinner, long for a photo in a batch
-that has nobody to tell and no retry (see INFER_WAIT_SECONDS).
+There is no background-removal model on this server any more. The in-house
+one (rembg) and every repair pass fitted to its failures are gone; a photo
+Photoroom cannot cut — no key, an account out of images, an outage, nothing
+found — is kept as shot and says why in `bg_error`, so it is never lost and
+never silently left with its background on.
 """
 from __future__ import annotations
 
 import os
 import re
-import threading
-import time
 from pathlib import Path
 from typing import Optional
 
-from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
-                 ImageStat)
+from PIL import Image, ImageFile, ImageFilter, ImageOps
 
-from .. import config
 from ..config import log
 from ..storage import natural_key
-from . import artwork
+from . import artwork, cutout_api
 
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
@@ -77,217 +74,14 @@ CW_TRANSPOSE = {
     270: Image.Transpose.ROTATE_90,
 }
 
-# --- the local model --------------------------------------------------------
-# u2netp (~4MB) runs on a 2GB machine; isnet-general-use (~176MB) has the
-# better edges and is what production selects in fly.toml (it needs the 4GB
-# VM). Both are baked into the image (see Dockerfile).
-_REMBG_MODEL = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
-# The copy handed to the model. Not a speed dial: both models normalize their
-# input to a fixed tensor first (isnet 1024x1024, u2netp 320x320), so a smaller
-# copy is upscaled straight back before any convolution runs. 1024 matches
-# isnet, so its matte is not a downscale that got upscaled.
-_REMBG_MAX_SIDE = int(os.getenv("REMBG_MAX_SIDE", "1024") or "1024")
-# Harden the soft matte so the background is gone rather than faintly there.
-# Alpha below LOW is dropped, above HIGH is kept solid, and the band between is
-# ramped into a soft edge. Erring toward keeping the item: with no border pass
-# to rebuild an edge the thresholds shaved, a wide band costs a faint fringe
-# where a narrow one costs a bite out of a hem.
-_ALPHA_LOW = int(os.getenv("REMBG_ALPHA_LOW", "64") or 64)
-_ALPHA_HIGH = int(os.getenv("REMBG_ALPHA_HIGH", "192") or 192)
+# --- background removal ------------------------------------------------------
 # A matte that keeps less than this share of the frame found no item — a
 # close-up texture, a dark item on a dark table — and shipping it would ship
-# a white square. The photo is kept as shot instead, and says so.
-#
-# It sat at 0.02 and refused a necklace. A thin product covers very little of
-# the frame it is laid out in and is still perfectly obviously an item: run
-# through the real model, a chain on a sweep scores 0.015, a belt 0.052, a
-# bangle 0.065. What "found nothing" actually scores is not near those — an
-# empty backdrop is 0.0000, a close-up of fabric 0.0009, a speck of dust
-# 0.0017. The two populations are an order of magnitude apart and the floor
-# was sitting on the wrong side of the gap; it now sits in the middle of it.
-_MIN_FG_COVERAGE = float(os.getenv("REMBG_MIN_COVERAGE", "0.005") or 0.005)
-
-# --- and whether what it kept is an OBJECT ----------------------------------
-#
-# Coverage above is a floor on HOW MUCH survives, and for a long time it was
-# the only question asked. It cannot see the failure that actually reaches
-# sellers, which is a matte that keeps plenty and keeps the wrong thing.
-#
-# The report that produced these two numbers: five photos of one framed
-# watercolour. The two wide shots came out right. The three close-ups came
-# back as smears of brushwork and a tree floating on white — the frame, the
-# mount and most of the painting deleted. Every one of them passed the
-# coverage floor comfortably, because a fifth of the frame did survive; it
-# was simply a fifth made of the wrong pixels.
-#
-# That is the salient-object model working exactly as built and being pointed
-# at the wrong kind of picture. Handed a photograph OF A PICTURE, it finds the
-# subject the picture depicts — the tree, the boat — rather than the physical
-# thing being sold, and dutifully deletes the artwork around it. Art, prints,
-# posters, book covers, trading cards, patterned fabric and printed packaging
-# are all the same trap, and they are a large share of what resells.
-#
-# So a second question, about SHAPE rather than quantity. One product is one
-# object, and a matte of it is one solid blob:
-#
-#   * the largest connected region must be most of what was kept. Confetti —
-#     a dozen brushstrokes scattered over the frame — fails here.
-#   * what was kept must fill its own bounding box. A tree at one edge and a
-#     boat at the other span nearly the whole photo while covering little of
-#     it; a framed picture, kept properly, fills its box almost entirely.
-#
-# Both are deliberately generous, because the two error directions are not
-# equal: a cutout wrongly refused leaves the seller's photo EXACTLY AS SHOT
-# and says why, while a cutout wrongly shipped destroys it and says nothing.
-# The first costs a feature that was opt-in anyway. The second is what this
-# comment is about.
-_MIN_LARGEST_REGION = float(os.getenv("REMBG_MIN_LARGEST_REGION", "0.6") or 0.6)
-_MIN_BBOX_FILL = float(os.getenv("REMBG_MIN_BBOX_FILL", "0.3") or 0.3)
-# The same question asked of a matte that IS one object, where it is not about
-# scatter — one object cannot be scattered — but about whether the object has
-# any substance at all. See _kept_is_the_product for why the two cannot share
-# a number: at 0.3 a necklace (0.20), a belt (0.12) and a guitar (0.20) are
-# all refused, and what deserves refusing is the wisp the model traces across
-# a close-up of fabric, which fills 0.01 of its box. The floor sits between
-# them, nearer the wisp.
-_MIN_BBOX_FILL_ONE_OBJECT = float(
-    os.getenv("REMBG_MIN_BBOX_FILL_ONE", "0.05") or 0.05)
-
-# --- ...but one PRODUCT is not always one object ----------------------------
-#
-# The rule above says "one product is one object, and a matte of it is one
-# solid blob". That is false for a great deal of what resells, and the way it
-# is false is silent: a seller photographs a PAIR of shoes, two paintings,
-# earrings, a two-piece, a cup and its saucer, an item beside its box — and
-# the largest region is half of what was kept, so the cutout is refused and
-# the photo comes back untouched.
-#
-# Reported as "background removal is not working": two canvases lying on
-# grass. Run through the real isnet model, that photo mattes PERFECTLY — the
-# model keeps both canvases as two clean rectangles and is not fooled by the
-# figures painted on them — and scores coverage 0.47, solidity 1.00, box fill
-# 0.87. It was thrown away on largest-region 0.51 against a floor of 0.60,
-# for no reason except that the seller was selling two things.
-#
-# So it is only the LARGEST-REGION half that gets a second question. The box
-# fill stays a precondition for everything, and it is the clause that keeps
-# #255 intact, exactly as its own comment says: a tree at one edge and a boat
-# at the other span nearly the whole photo while covering little of it, where
-# two canvases side by side fill the box they share. Measured on this file's
-# own fixtures — the traps 0.10, 0.17 and 0.22, a pair of shoes 0.60, the
-# reported canvases 0.87. Nothing about that changes here.
-#
-# What changes is that failing the one-blob test is no longer the end of it.
-# When the box is filled, ask instead: is this A FEW COMPACT OBJECTS?
-#
-#   * the substantial regions must be nearly ALL of what was kept, so a long
-#     tail of confetti disqualifies;
-#   * there must be few of them, because a seller sells a pair or a set, not
-#     a dozen scattered fragments;
-#   * and each must fill its OWN box too, so a pair of ragged pieces cannot
-#     ride in on a tidy arrangement.
-_COMPANION_SHARE = float(os.getenv("REMBG_COMPANION_SHARE", "0.25") or 0.25)
-_MAX_OBJECTS = int(os.getenv("REMBG_MAX_OBJECTS", "4") or 4)
-_OBJECTS_COVER = float(os.getenv("REMBG_OBJECTS_COVER", "0.85") or 0.85)
-# The mask is judged at this size. Shape is a low-frequency question, and the
-# region labelling below is pure Python — at 160px it is a few thousand cells
-# and about a millisecond, against millions of pixels and a visible stall.
-_SHAPE_SIDE = int(os.getenv("REMBG_SHAPE_SIDE", "160") or 160)
-
-# --- and whether it is SOLID rather than see-through -------------------------
-#
-# Both measures above read a BINARISED matte — "the pixels at least half
-# opaque" — and neither can see the one thing the seller actually gets, which
-# is the matte used as an alpha channel. A pixel the model was half sure about
-# is not kept or dropped; it is composited at half strength onto white, and a
-# whole item's worth of those is an item half rubbed out.
-#
-# The report, with a screenshot: a grid of clothing. The maroon shirt came
-# out right. The white oxford and the cream fleece came back as pale smears
-# dissolving into the background — only the collar label, the placket and a
-# printed logo still solid, the fabric around them a ghost.
-#
-# That correlation is the whole diagnosis. The model is confident where there
-# is contrast and unsure where there is not, so a PALE ITEM ON A PALE
-# BACKDROP — a white shirt on white foamboard, exactly what sellers are told
-# to shoot on — comes back with its high-contrast details at 255 and its
-# fabric somewhere in the middle of the range. The shape guards then see the
-# details, which really are one solid blob filling its own box, and pass it.
-# What ships is the item at a third of its opacity over white, i.e. gone.
-#
-# So the third question, asked of the alpha as it will be USED: is the item
-# opaque where it is not an edge? Softness at the boundary is a good matte
-# doing its job — fur, flyaway hair, the anti-aliased rim of anything — so
-# the measure looks at the INTERIOR, the visible region eroded away from the
-# background, and asks what share of it is kept solid. Fur and lace answer
-# well above 0.6 there because their bodies are opaque and only their
-# fringes are not. A ghost answers below 0.15, because its middle is the
-# part that is see-through.
-#
-# A HOLE is not a hedge, and the difference is the whole measure. A pixel the
-# matte set to zero — the weave of a basket, the gap under a shoe's laces, the
-# space inside a mug's handle — is not part of the interior at all and is not
-# counted. A pixel it set to 110 is: the model was unsure, that pixel ships at
-# half strength over white, and enough of them is an item rubbed out. Openwork
-# items are ordinary here (wicker, mesh, crochet, cane, wire) and they are not
-# ghosts.
-#
-# WHAT THIS MEASURES NOW. _fill_interior runs first and makes the interior
-# opaque, so on a hedged matte this reads 1.00 where it used to read 0.10 —
-# the ghost is repaired rather than caught. That is the point: refusing was
-# only ever the best answer available while the alternative was shipping the
-# item at a third of its opacity, and it left the middle case (hedged enough
-# to look wrong, not enough to be refused) shipping damaged with nothing
-# said. This stays as the backstop for a matte the repair could not save —
-# one with no interior to promote — and as the thing that fails loudly if
-# _fill_interior is ever broken or removed.
-#
-# The one case that changed hands rather than being fixed is genuinely sheer
-# fabric — tulle, organza, a chiffon scarf — which mattes half-opaque all
-# over and is indistinguishable from a model that never committed. It used to
-# be kept as shot; it now ships opaque, which is wrong for it. Restore
-# original recovers the photo. The trade is deliberate: pale garments on
-# plain backdrops are what the app tells sellers to shoot, and sheer items
-# are rare.
-#
-# One caution for anyone changing this: unlike _shape_stats, which thresholds
-# its downscaled copy LOW on purpose so a merged cell errs toward connected,
-# this one asks a HIGH question — and a high threshold applied after averaging
-# errs toward REFUSING, which is the direction that silently costs the seller
-# the feature. So the opacity question is asked per pixel, before anything is
-# merged. See _interior_solidity.
-_MIN_INTERIOR_SOLIDITY = float(
-    os.getenv("REMBG_MIN_SOLIDITY", "0.4") or 0.4)
-# What counts as opaque, asked of a PIXEL. _harden already snaps everything
-# from _ALPHA_HIGH up to a flat 255, so a pixel is either 255 or one the model
-# hedged on; the slack is for the rounding a resize leaves behind.
-_SOLID_ALPHA = 250
-# How far in from the background the interior starts, in cells of the
-# _SHAPE_SIDE copy. Two is about 1% of the frame — enough to clear the soft
-# rim of a well-cut matte, small enough to leave an interior on a bracelet.
-_INTERIOR_ERODE = 2
-
-_INFER_LOCK = threading.Lock()
-# How long a caller queues for the one inference slot. A person watching the
-# photo studio's spinner wants a prompt "busy, try again"; a photo in a batch
-# has nobody to tell and gets no retry — giving up would silently save it with
-# its background still on — so it queues for as long as a real batch takes.
-INFER_WAIT_SECONDS = float(os.getenv("REMBG_WAIT_SECONDS", "25") or 25)
-BATCH_INFER_WAIT_SECONDS = float(
-    os.getenv("REMBG_BATCH_WAIT_SECONDS", "300") or 300)
-# One inference past this is reported as pathological. ONNX cannot be
-# interrupted mid-run, so this aborts nothing; it makes a slow model visible.
-INFER_SLOW_SECONDS = float(os.getenv("REMBG_SLOW_SECONDS", "20") or 20)
-
-_rembg_session = None
-_model_ready = False
-_model_load_seconds: float = 0.0
-_last_infer_seconds: float = 0.0
-
-
-class CutoutBusy(RuntimeError):
-    """The inference slot didn't free up in time. Retryable — 503, not 500:
-    nothing is broken, the machine is just full."""
+# a white square. The photo is kept as shot instead, and says so. Set in the
+# gap between a thin product laid out on a sweep (a chain scores ~0.015, a
+# belt ~0.05) and a matte that found nothing (an empty backdrop 0.0000, a
+# speck of dust 0.0017).
+_MIN_FG_COVERAGE = float(os.getenv("BG_MIN_COVERAGE", "0.005") or 0.005)
 
 
 class Stopped(Exception):
@@ -297,106 +91,10 @@ class Stopped(Exception):
 
 
 def engine_state() -> dict:
-    """What the readiness probe needs to know about background removal.
-
-    `chain` is the whole point of reporting this: a key that is missing,
-    mistyped or expired leaves the app quietly serving local cutouts, and the
-    only difference a seller sees is that they got worse. One field on
-    /api/ready turns that into something you can look up.
-    """
-    return {"model": _REMBG_MODEL, "loaded": _model_ready,
-            "busy": _INFER_LOCK.locked(),
-            "chain": config.bg_engine_chain(),
-            "last_inference_seconds": round(_last_infer_seconds, 2),
-            "model_load_seconds": round(_model_load_seconds, 2)}
-
-
-def engine_degraded(engine: str) -> bool:
-    """Did this cutout come from the local model while a paid one was meant to
-    do it?
-
-    That is the one case worth telling somebody about. A deploy with no key
-    configured is not degraded -- local IS its engine -- so this is false
-    there, and the studio stays quiet. A key that is expired, mistyped or out
-    of credits makes it true, which is the difference between "this is how it
-    works" and "somebody needs to look at the account".
-    """
-    chain = config.bg_engine_chain()
-    return engine == "local" and any(name != "local" for name in chain)
-
-
-def _infer_threads() -> int:
-    """Threads onnxruntime may use for one inference: one fewer than the CPUs
-    we can see (REMBG_THREADS overrides). uvicorn still has to answer its
-    health check while a batch runs, and a machine that misses those checks
-    is replaced by the platform, which kills the batch."""
-    forced = int(os.getenv("REMBG_THREADS", "0") or 0)
-    if forced > 0:
-        return forced
-    try:
-        cpus = len(os.sched_getaffinity(0))
-    except AttributeError:  # not Linux
-        cpus = os.cpu_count() or 1
-    return max(1, cpus - 1)
-
-
-def _mask(rgb: Image.Image, wait: Optional[float] = None) -> Image.Image:
-    """The model's subject matte (mode L) at rgb's size.
-
-    `wait` is how long to queue for the inference slot before giving up with
-    CutoutBusy; it defaults to the batch deadline."""
-    global _rembg_session, _model_ready, _model_load_seconds, _last_infer_seconds
-    scale = min(1.0, _REMBG_MAX_SIDE / max(rgb.size))
-    small = (rgb.resize((max(1, round(rgb.width * scale)),
-                         max(1, round(rgb.height * scale))), Image.LANCZOS)
-             if scale < 1 else rgb)
-    if not _INFER_LOCK.acquire(
-            timeout=BATCH_INFER_WAIT_SECONDS if wait is None else wait):
-        raise CutoutBusy(
-            "The background remover is working through another batch. "
-            "Give it a moment and try again.")
-    try:
-        # Imported inside the lock, after the wait: a machine that is already
-        # full answers "busy" without paying to pull in onnxruntime first.
-        loading = time.monotonic()
-        from rembg import new_session, remove
-        if _rembg_session is None:
-            # Set before the session is built: rembg reads this when it
-            # constructs the SessionOptions and never looks again.
-            os.environ.setdefault("OMP_NUM_THREADS", str(_infer_threads()))
-            _rembg_session = new_session(_REMBG_MODEL)
-            _model_ready = True
-            _model_load_seconds = time.monotonic() - loading
-            log.info("bg-removal: model %s ready in %.1fs (%s inference "
-                     "thread(s), %dpx)", _REMBG_MODEL, _model_load_seconds,
-                     os.environ.get("OMP_NUM_THREADS", "auto"), _REMBG_MAX_SIDE)
-        # The clock starts here, not when the lock was taken: the load above
-        # is paid once per process and is not what "inference" means to the
-        # probe or to the slow-inference warning below.
-        started = time.monotonic()
-        try:
-            alpha = remove(small, session=_rembg_session, only_mask=True).convert("L")
-        finally:
-            _last_infer_seconds = time.monotonic() - started
-    finally:
-        _INFER_LOCK.release()
-    if _last_infer_seconds > INFER_SLOW_SECONDS:
-        log.warning("bg-removal: inference took %.1fs (model=%s, %s threads)",
-                    _last_infer_seconds, _REMBG_MODEL,
-                    os.environ.get("OMP_NUM_THREADS", "auto"))
-    if alpha.size != rgb.size:
-        # BILINEAR, not LANCZOS: LANCZOS overshoots at a hard edge and rings a
-        # faint halo of the old background back in.
-        alpha = alpha.resize(rgb.size, Image.BILINEAR)
-    return alpha
-
-
-def _harden(alpha: Image.Image) -> Image.Image:
-    """Drop the faint background, keep the item solid, ramp the band between."""
-    low, high = _ALPHA_LOW, max(_ALPHA_HIGH, _ALPHA_LOW + 1)
-    span = high - low
-    return alpha.point([0 if a <= low else 255 if a >= high
-                        else (a - low) * 255 // span for a in range(256)])
+    """What the readiness probe says about background removal: the engine,
+    whether it has a key, and whether that key only makes watermarked
+    previews. See cutout_api.engine_state."""
+    return cutout_api.engine_state()
 
 
 # The contact shadow. An item composited on pure white with a hard edge reads
@@ -404,8 +102,8 @@ def _harden(alpha: Image.Image) -> Image.Image:
 # as an object sitting on a surface, which is what a catalogue photo looks
 # like. It was dropped with the rest of the old pipeline and asked for back --
 # on its own, because unlike the passes around it, it is neither slow nor a
-# surprise: it is drawn from the silhouette the model already produced, so it
-# costs no inference and cannot change what the item looks like.
+# surprise: it is drawn from the silhouette the engine already produced, so it
+# costs no extra call and cannot change what the item looks like.
 #
 # It is cheap by construction. The shadow is low-frequency -- a blur of ~1.5%
 # of the frame -- so it is rendered on a copy no bigger than _SHADOW_SIDE and
@@ -438,536 +136,13 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
     return shifted
 
 
-def _kept_is_the_product(total: int, regions: list, box_fill: float) -> bool:
-    """Whether what the matte kept looks like the thing being sold.
-
-    One solid blob is the common case and answers yes immediately. Otherwise
-    the pair-or-set question above — a few compact objects, together
-    accounting for nearly everything kept, and each filling its own box.
-    """
-    if not total or not regions:
-        return False
-    one_object = regions[0][0] / total >= _MIN_LARGEST_REGION
-    # Box fill is the SCATTER question, and it is asked where scatter is
-    # possible — which is not everywhere.
-    #
-    # It was asked of every matte, as a precondition on the lot, and what that
-    # refuses is not only scatter: it refuses any product that is THIN. A
-    # necklace laid out in a curve fills 0.20 of the box around it, a belt
-    # laid diagonally 0.12, a guitar 0.20, a bangle 0.29 against a floor of
-    # 0.30 — every one of them a perfect matte of one connected object,
-    # correctly found, and every one of them thrown away with "the matte kept
-    # is not the product". Chains, straps, cables, tools, instruments, hoops
-    # and anything photographed at an angle are all that shape, and they are
-    # a large part of what resells. The seller is told no item was found.
-    #
-    # Which is not what the measure was written for. Read its own case back:
-    # a tree at one edge and a boat at the other span nearly the whole photo
-    # while covering little of it. That is a statement about PIECES lying far
-    # apart, and every fixture in test_the_cutout_does_not_eat_the_artwork
-    # that it exists to refuse — the brushstrokes, the tree and the boat, the
-    # tree and boat and sketch, two fragments in opposite corners — is two or
-    # more pieces. A matte that is one object cannot be spread across the
-    # frame; it can only be long, and long is a shape products come in.
-    #
-    # So the precondition holds exactly where it always did the work: on a
-    # matte that is NOT one object, where it is what keeps the pair-or-set
-    # rule below from letting a painting's pieces through.
-    #
-    # One object still has to be an OBJECT, though, and the floor for that is
-    # a different number rather than no number. Handed a close-up of fabric
-    # the model traces a wisp across the frame — one region holding 99% of
-    # what was kept, filling 0.01 of the box around it, and about half a
-    # percent of the photo. That is the "white square" case this file refuses
-    # on principle, and it is one object by every measure here.
-    if box_fill < (_MIN_BBOX_FILL_ONE_OBJECT if one_object else _MIN_BBOX_FILL):
-        return False
-    if one_object:
-        return True
-    objects = [r for r in regions if r[0] >= regions[0][0] * _COMPANION_SHARE]
-    return (len(objects) <= _MAX_OBJECTS
-            and sum(r[0] for r in objects) / total >= _OBJECTS_COVER
-            and all(fill >= _MIN_BBOX_FILL for _cells, fill in objects))
-
-
-def _kept_shape(kept: Image.Image) -> tuple[int, list[tuple[int, float]], float]:
-    """What a binary mask is made of: (total cells kept, one entry per
-    connected region as (cells, how well it fills ITS OWN bounding box),
-    largest region first, how well the whole lot fills the ONE box around it).
-
-    Every shape question in this file is answered from here, so the labelling
-    below — the only pure-Python loop on the photo path — runs once per photo.
-
-    Per-region box fill is what tells a pair of products from the fragments of
-    one. Two shoes, two canvases, a cup and its saucer are each compact and
-    each fill their own box; a tree and a boat the model found inside a
-    painting do not fill theirs, however tidily they sit in the frame
-    together. Reported rather than reduced to one number, because which
-    question matters depends on how many regions there turn out to be.
-    """
-    w, h = kept.size
-    scale = _SHAPE_SIDE / max(w, h)
-    if scale < 1:
-        # BOX averages the pixels it merges rather than sampling one of them,
-        # and the low threshold then keeps a cell any part of the item touched.
-        # Both err toward CONNECTED, which errs toward letting the cutout
-        # through — the direction that cannot destroy a photo.
-        kept = kept.resize((max(1, round(w * scale)), max(1, round(h * scale))),
-                           Image.BOX).point(lambda v: 255 if v >= 32 else 0)
-    w, h = kept.size
-    px = kept.load()
-    total = 0
-    for y in range(h):
-        for x in range(w):
-            if px[x, y]:
-                total += 1
-    if not total:
-        return 0, [], 0.0
-
-    # Flood fill each unvisited region, 4-connected, with an explicit stack:
-    # a recursive fill blows Python's stack on a mask that is mostly one blob,
-    # which is precisely the healthy case.
-    seen = bytearray(w * h)
-    regions: list[tuple[int, float]] = []
-    for sy in range(h):
-        for sx in range(w):
-            if seen[sy * w + sx] or not px[sx, sy]:
-                continue
-            size = 0
-            lo_x = hi_x = sx
-            lo_y = hi_y = sy
-            stack = [(sx, sy)]
-            seen[sy * w + sx] = 1
-            while stack:
-                x, y = stack.pop()
-                size += 1
-                lo_x, hi_x = min(lo_x, x), max(hi_x, x)
-                lo_y, hi_y = min(lo_y, y), max(hi_y, y)
-                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                    if 0 <= nx < w and 0 <= ny < h and not seen[ny * w + nx] \
-                            and px[nx, ny]:
-                        seen[ny * w + nx] = 1
-                        stack.append((nx, ny))
-            own_box = (hi_x - lo_x + 1) * (hi_y - lo_y + 1)
-            regions.append((size, size / own_box if own_box else 0.0))
-    regions.sort(reverse=True)
-
-    box = kept.getbbox()
-    box_area = (box[2] - box[0]) * (box[3] - box[1]) if box else 0
-    return total, regions, (total / box_area if box_area else 0.0)
-
-
-def _shape_stats(kept: Image.Image) -> tuple[float, float]:
-    """(the largest connected region's share of the kept area, the kept area's
-    share of its own bounding box) — the two summary numbers, for callers and
-    tests that want the shape as a pair rather than as its parts.
-
-    (0.0, 0.0) for an empty mask, so a caller that reaches here without
-    checking coverage still refuses rather than dividing by zero.
-    """
-    total, regions, box_fill = _kept_shape(kept)
-    if not total:
-        return 0.0, 0.0
-    return regions[0][0] / total, box_fill
-
-
-def _fill_interior(alpha: Image.Image) -> Image.Image:
-    """The matte with the item's INTERIOR made opaque.
-
-    This is the repair for the failure _interior_solidity was written to
-    detect. The model is confident where there is contrast and unsure where
-    there is not, so a pale item on a pale backdrop — a white shirt on white
-    foamboard, which is exactly what sellers are told to shoot on — comes back
-    with its collar label and its placket at 255 and the fabric between them
-    somewhere in the middle. _harden ships that middle as PARTIAL ALPHA, and a
-    pixel the model half believed in is composited at half strength over
-    white. An item's worth of those is the item rubbed out: the seller gets a
-    crisp logo floating on a ghost of a shirt.
-
-    Detecting that and refusing the cutout (which is what the solidity floor
-    does) leaves two outcomes and no good one — badly hedged means the photo
-    is kept as shot, moderately hedged means it ships damaged. So: repair it.
-    A pixel inside the item is part of the item whatever the model's
-    confidence, because there is nothing else it could be.
-
-    "Inside" is the same interior _interior_solidity measures, and reusing
-    that definition is what keeps a soft edge soft: cells WHOLLY covered by
-    the item, eroded back from the boundary. A rim cell is only partly
-    covered, so it is not interior and is left exactly as the model drew it.
-    The same is true of the gaps between a fur collar's tufts or a wig's
-    flyaway strands — though a fringe dense enough to cover its cells
-    completely does count as interior and will harden, which is the one place
-    this trades a little softness for a great deal of fabric.
-
-    Only where the model saw the item at all — above _ALPHA_LOW, the same
-    line _harden draws between "background" and "an edge". Below it the model
-    was confident there is nothing, so the hole through a ring, the gap under
-    a mug's handle and the backdrop between a pair of boots all stay holes.
-    Gating on any non-zero alpha instead would promote the faintest haze the
-    model left on the backdrop, which is the very thing _harden exists to
-    delete.
-
-    All C — two point operations, a resize, an erosion and two composites.
-    About ten milliseconds on a 12MP photo, and no extra inference.
-    """
-    w, h = alpha.size
-    # The hole gate, read at FULL resolution: a hole is a few pixels wide at
-    # the scale the seller sees, and asking a downscaled copy would round the
-    # gap under a ring's band away and paint it in.
-    seen = alpha.point(lambda a: 255 if a > _ALPHA_LOW else 0)
-    # The interior, read at _SHAPE_SIDE, because "how far in from the edge is
-    # this" is a low-frequency question — the same copy and the same erosion
-    # _interior_solidity uses to answer it.
-    scale = _SHAPE_SIDE / max(w, h)
-    inner = (seen.resize((max(1, round(w * scale)), max(1, round(h * scale))),
-                         Image.BOX) if scale < 1 else seen)
-    inner = inner.point(lambda v: 255 if v >= 255 else 0)
-    for _ in range(_INTERIOR_ERODE):
-        inner = inner.filter(ImageFilter.MinFilter(3))
-    # Back to full size as a SOFT mask, blurred by about one cell of the copy
-    # it was found on, and deliberately never re-thresholded.
-    #
-    # This is the difference between measuring a matte and painting one. Where
-    # the promoted interior hands back to the ramp left alone, a hard mask
-    # makes that hand-off a single step — and because the step follows the
-    # 160px working grid, it shows up in the finished photo as a stepped
-    # contour running down the inside of the sleeve. Blurred, it is a
-    # gradient. (Finding the interior on a finer grid would smooth it too,
-    # but a finer grid also starts reading the gaps between a fur collar's
-    # tufts as interior and hardens the fringe. The blur costs nothing and
-    # keeps the fringe.)
-    if inner.size != alpha.size:
-        inner = inner.resize(alpha.size, Image.BILINEAR).filter(
-            ImageFilter.GaussianBlur(max(w, h) / _SHAPE_SIDE))
-    return ImageChops.lighter(alpha, ImageChops.multiply(inner, seen))
-
-
-# How far an enclosed region's colour has to sit from the backdrop's before it
-# is read as ITEM the model dropped rather than backdrop showing through, as a
-# plain RGB distance (0-441). Dark navy against a pale studio sweep is 150+;
-# the noise across one seamless backdrop is a handful.
-_HOLE_COLOUR_DIST = float(os.getenv("REMBG_HOLE_COLOUR_DIST", "40") or 40)
-
-# --- ...and when the colour cannot tell them apart --------------------------
-#
-# The colour question above compares two MEAN colours, and there is one case
-# where that is not enough — the case this whole file's shape guards were
-# written for, arriving by a different door.
-#
-# A framed watercolour on a neutral backdrop. The model keeps the frame and
-# deletes everything inside it; the interior is one enclosed region, 61% as
-# large as the entire matte. Averaged, a white mount plus a pale sky plus a
-# green tree comes to (203, 219, 225), which is 27 from the backdrop's
-# (211, 208, 201) — inside _HOLE_COLOUR_DIST, so it is read as the backdrop
-# showing through and thrown away. What ships is an EMPTY PICTURE FRAME on
-# white, and it ships silently: coverage 0.19, solidity 0.95, one region
-# holding 99% of what was kept, box fill 0.54. Every gate in this file passes
-# a ring, because a ring is a perfectly respectable shape.
-#
-# Size alone cannot rescue it — measured on this file's own fixtures, the
-# artwork's hole is 0.61 of the matte while a wreath's is 0.76 and an empty
-# frame's 1.14, and those two are real holes that must stay holes.
-#
-# What separates them is that a backdrop seen through a gap IS the backdrop:
-# the same seamless sweep, the same paper, the same table, and therefore the
-# same flatness. Artwork is not flat, and neither is anything else that gets
-# photographed inside a border — a print, a poster, a book cover, a trading
-# card, a label on a box. So the second question is asked of SPREAD rather
-# than of colour: how varied is this region, against how varied the backdrop
-# is in this same photo. As a ratio, so that a photo shot on grass or a rug
-# answers it on its own terms rather than against a number picked here.
-#
-# The same fixtures: mug handle 0.50, wreath 0.39, empty frame 0.06 — every
-# genuine hole at or below half the backdrop's own spread — against the
-# watercolour's 3.37. The floor sits at 1.5, which is well clear of both.
-_HOLE_FLAT_RATIO = float(os.getenv("REMBG_HOLE_FLAT_RATIO", "1.5") or 1.5)
-# ...and a ratio needs a floor under the thing it divides by, or it says
-# nothing at all. A backdrop drawn as one flat colour has a spread of zero, so
-# ANY region beats any multiple of it — the anti-aliased rim of a ring's hole
-# scored 2.8x and the ring filled in. A photograph's backdrop is never that
-# flat, but a guard that only holds on photographs is not a guard, so the
-# region must also carry enough detail to be a picture in its own right.
-# Measured: every genuine hole 4.4 or below (mug handle 4.4, wreath 3.7, a
-# ring's hole 2.8, an empty frame 0.6), the artwork 31.5.
-_HOLE_DETAIL_FLOOR = float(os.getenv("REMBG_HOLE_DETAIL", "10") or 10)
-# ...asked only of a hole big enough to BE the item's face. A mug's handle is
-# 0.04 of its matte and a basket's weave smaller still; asking this of them
-# would trade a well-understood rule for a statistic taken over a handful of
-# cells. Everything below this share keeps the colour answer it has always
-# had, so openwork stays openwork.
-_HOLE_BIG_SHARE = float(os.getenv("REMBG_HOLE_BIG_SHARE", "0.12") or 0.12)
-
-
-def _mean_rgb(rgb: Image.Image, mask: Image.Image) -> Optional[tuple]:
-    """Mean colour of `rgb` over the non-zero pixels of `mask`, or None when
-    the mask is empty."""
-    if not mask.getbbox():
-        return None
-    stat = ImageStat.Stat(rgb, mask)
-    return tuple(stat.mean[:3])
-
-
-def _apart(a: Optional[tuple], b: Optional[tuple]) -> float:
-    """Plain RGB distance between two mean colours; 0 when either is missing,
-    which reads as "no evidence" everywhere this is used."""
-    if a is None or b is None:
-        return 0.0
-    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
-
-
-def _spread(rgb: Image.Image, mask: Image.Image) -> Optional[float]:
-    """How VARIED `rgb` is over the non-zero pixels of `mask` — the mean of
-    the per-channel standard deviations — or None when the mask is empty.
-
-    A seamless backdrop answers a few units whatever colour it is; anything
-    with a picture on it answers many. See _HOLE_FLAT_RATIO.
-    """
-    if not mask.getbbox():
-        return None
-    return sum(ImageStat.Stat(rgb, mask).stddev[:3]) / 3
-
-
-def _reclaim_enclosed(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
-    """The matte with ENCLOSED regions of nothing given back to the item, when
-    the photo says they were never background.
-
-    The failure this repairs, reported with a screenshot: a Scotch & Soda camp
-    shirt, black across the shoulders with a bright print below. The print
-    survived every cutout. The black did not — several photos came back with
-    the shoulder, a sleeve, or a chunk of the back simply gone, a white hole
-    punched through the middle of the garment.
-
-    Neither guard could see it, and not by accident. `_fill_interior` and
-    `_interior_solidity` both begin at "what the model SAW" — alpha above
-    _ALPHA_LOW — and a region the model set to zero is not seen, so it is not
-    interior, so it is background as far as either is concerned. That is the
-    right reading for the hole through a ring and it is exactly wrong here.
-    Solidity stays high the whole time (the fabric that survived is perfectly
-    opaque), coverage stays high, the shape is one tidy object: every gate
-    passes and the photo ships with a hole in it.
-
-    What separates the two cases is not the matte, which is identical, but the
-    PHOTO underneath — so this is the one repair that has to look at it. A
-    hole through a ring shows the backdrop; a hole in a shirt shows the shirt.
-    So each enclosed region is asked which it resembles, and only a region
-    that is both far from the backdrop AND nearer the item than the backdrop
-    is given back. Both halves matter: the distance alone would fill a gap
-    that happens to fall in shadow, and the comparison alone would fill a
-    genuine hole on a backdrop that merely differs from the item.
-
-    "Enclosed" means not reachable from the frame edge through background,
-    which is what keeps the gap between a pair of boots — real backdrop, open
-    to the edge — out of this entirely, however dark it is.
-
-    Runs on the _SHAPE_SIDE grid like every other shape question here, with
-    the same explicit-stack labelling as _kept_shape, and returns the matte
-    untouched (no allocation, no colour statistics) when nothing is enclosed,
-    which is almost every photo.
-    """
-    w, h = alpha.size
-    scale = _SHAPE_SIDE / max(w, h)
-    size = ((max(1, round(w * scale)), max(1, round(h * scale)))
-            if scale < 1 else (w, h))
-    # Err toward SEEN, the way _kept_shape errs toward connected: a cell the
-    # item merely touches counts as item, so a soft rim never reads as a hole
-    # and the regions below are the frankly-empty ones.
-    small = (alpha.resize(size, Image.BOX) if size != (w, h) else alpha)
-    seen = small.point(lambda v: 255 if v > _ALPHA_LOW else 0)
-    sw, sh = size
-    px = seen.load()
-
-    # Label the EMPTY cells, 4-connected, recording for each region whether it
-    # ever touched the frame edge. Anything that did is backdrop with a way
-    # out; the rest is enclosed by the item.
-    labels = [0] * (sw * sh)
-    regions: list[list] = []          # [cells, touches_edge]
-    for sy in range(sh):
-        for sx in range(sw):
-            if px[sx, sy] or labels[sy * sw + sx]:
-                continue
-            tag = len(regions) + 1
-            cells, edge = 0, False
-            stack = [(sx, sy)]
-            labels[sy * sw + sx] = tag
-            while stack:
-                x, y = stack.pop()
-                cells += 1
-                if x == 0 or y == 0 or x == sw - 1 or y == sh - 1:
-                    edge = True
-                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                    if 0 <= nx < sw and 0 <= ny < sh \
-                            and not labels[ny * sw + nx] and not px[nx, ny]:
-                        labels[ny * sw + nx] = tag
-                        stack.append((nx, ny))
-            regions.append([cells, edge])
-    enclosed = [i + 1 for i, (_, edge) in enumerate(regions) if not edge]
-    if not enclosed:
-        return alpha
-
-    # What the backdrop and the item actually look like, measured on a copy of
-    # the photo at the same grid so every mask below lines up with it.
-    photo = rgb.convert("RGB")
-    photo = photo.resize(size, Image.BOX) if size != (w, h) else photo
-    outside = Image.frombytes(
-        "L", size, bytes(255 if labels[i] and regions[labels[i] - 1][1] else 0
-                         for i in range(sw * sh)))
-    backdrop = _mean_rgb(photo, outside)
-    item = _mean_rgb(photo, seen)
-    if backdrop is None or item is None:
-        # No backdrop to compare against (the item fills the frame) or no item
-        # at all. Either way there is no evidence, and inventing some here
-        # would paint over a photo on a guess.
-        return alpha
-
-    # How varied the backdrop is in THIS photo, and how much of the frame the
-    # matte kept — the two things the big-hole question below is asked
-    # against. Both are measured once, on the same grid as everything else.
-    backdrop_spread = _spread(photo, outside)
-    kept_cells = sum(1 for i in range(sw * sh) if not labels[i])
-
-    give_back = bytearray(sw * sh)
-    face = False
-    for tag in enclosed:
-        patch = Image.frombytes(
-            "L", size, bytes(255 if labels[i] == tag else 0
-                             for i in range(sw * sh)))
-        here = _mean_rgb(photo, patch)
-        # A hole big enough to be the item's own face, carrying more detail
-        # than the backdrop does anywhere in this photo, is not the backdrop
-        # showing through — it is a picture, and the thing it is a picture of
-        # is what the seller is selling. Asked BEFORE the colour tests
-        # because it is the case they cannot answer: a pale artwork inside a
-        # frame averages out to something that reads as a pale backdrop, and
-        # no comparison of means will ever separate those two. See
-        # _HOLE_FLAT_RATIO.
-        cells = regions[tag - 1][0]
-        here_spread = _spread(photo, patch)
-        if (kept_cells and cells >= kept_cells * _HOLE_BIG_SHARE
-                and backdrop_spread is not None and here_spread is not None
-                and here_spread >= _HOLE_DETAIL_FLOOR
-                and here_spread >= backdrop_spread * _HOLE_FLAT_RATIO):
-            log.info("bg-removal: an enclosed region worth %.0f%% of the matte "
-                     "carries %.1fx the backdrop's detail — keeping it as the "
-                     "item's own face, not a hole",
-                     100 * cells / kept_cells,
-                     here_spread / max(backdrop_spread, 0.01))
-            face = True
-            for i in range(sw * sh):
-                if labels[i] == tag:
-                    give_back[i] = 255
-            continue
-        if _apart(here, backdrop) <= _HOLE_COLOUR_DIST:
-            continue                       # looks like the backdrop: a real hole
-        if _apart(here, item) >= _apart(here, backdrop):
-            continue                       # nearer the backdrop than the item
-        for i in range(sw * sh):
-            if labels[i] == tag:
-                give_back[i] = 255
-    if face:
-        # A picture has no edge in the middle of it.
-        #
-        # Giving the region back is not the whole repair, because the band
-        # around it is not empty — it is hedged. On the watercolour the model
-        # answers about 70 across the inside of the mount: over _ALPHA_LOW, so
-        # those cells are "seen" and belong to no enclosed region at all, and
-        # too ragged for _fill_interior's wholly-covered test to promote. What
-        # _harden then makes of a 70 is a 53, and an eighth of the artwork
-        # ships at a fifth of its opacity — the same white smear the region
-        # itself would have been, in a thinner band.
-        #
-        # Once the photo has said this is a picture inside a border, there is
-        # nothing inside that border for a soft alpha to mean. So the whole
-        # silhouette is made solid: every cell that is not background with a
-        # way out to the frame edge, which is the item's outline FILLED.
-        #
-        # Eroded by the same _INTERIOR_ERODE as everywhere else, so this
-        # reaches the inside and never the outer rim. The rim is where soft
-        # alpha is the matte doing its job, and hardening it would trade a
-        # white smear for a jagged edge.
-        outline = Image.frombytes(
-            "L", size, bytes(0 if labels[i] and regions[labels[i] - 1][1] else 255
-                             for i in range(sw * sh)))
-        for _ in range(_INTERIOR_ERODE):
-            outline = outline.filter(ImageFilter.MinFilter(3))
-        inside = outline.load()
-        for y in range(sh):
-            for x in range(sw):
-                if inside[x, y]:
-                    give_back[y * sw + x] = 255
-
-    if not any(give_back):
-        return alpha
-
-    # Back to full size the way _fill_interior hands its interior back: as a
-    # soft mask, blurred by about one cell, never re-thresholded, so the join
-    # is a gradient rather than a stepped contour on the 160px grid.
-    mask = Image.frombytes("L", size, bytes(give_back))
-    if size != (w, h):
-        mask = mask.resize((w, h), Image.BILINEAR).filter(
-            ImageFilter.GaussianBlur(max(w, h) / _SHAPE_SIDE))
-    log.info("bg-removal: gave back %d enclosed region(s) the photo says are "
-             "the item, not the backdrop", sum(1 for _ in enclosed))
-    return ImageChops.lighter(alpha, mask)
-
-
-def _interior_solidity(alpha: Image.Image) -> float:
-    """The share of the item's interior that the matte keeps fully opaque.
-
-    "Interior" is the visible region eroded away from the background by
-    _INTERIOR_ERODE, which is what separates the two kinds of soft matte: a
-    fur collar or an anti-aliased rim is soft only at the boundary and scores
-    near 1.0 once the boundary is taken off, while a matte the model hedged
-    across the whole item is see-through in the middle and scores near 0.
-
-    The share is of PIXELS, and it has to be, which is the one subtle thing
-    here. Shape is a low-frequency question so the interior is found on a
-    _SHAPE_SIDE copy, but "is this opaque" is asked of each full-resolution
-    pixel BEFORE anything is merged. Judged the other way round — threshold
-    the averaged copy — a cell of a 3000px photo is a mean of some 350 pixels
-    and comes out "solid" only if very nearly all of them are, so any real
-    internal detail (a seam, a fold, hardware, an openwork weave, a busy
-    print) drags it under. That is not a measure of opacity, it is a measure
-    of uniformity, and it got stricter the bigger the seller's camera was:
-    the same matte scored 0.33 at 640px, 0.06 at 1600 and 0.00 at 3000, so a
-    newer phone had its cutouts refused where an older one passed. Binarising
-    first makes the answer the same at every size.
-
-    All C — two point operations, two resizes and an erosion.
-
-    1.0 when erosion leaves nothing, which is a chain or a filigree earring
-    rather than a ghost: there is no interior, so this measure has nothing to
-    say and must not be what refuses the photo.
-    """
-    w, h = alpha.size
-    solid = alpha.point(lambda a: 255 if a >= _SOLID_ALPHA else 0)
-    visible = alpha.point(lambda a: 255 if a else 0)
-    scale = _SHAPE_SIDE / max(w, h)
-    if scale < 1:
-        # BOX averages rather than samples, so each cell now carries the SHARE
-        # of its pixels that were solid (or visible) rather than a verdict on
-        # their mean alpha.
-        size = (max(1, round(w * scale)), max(1, round(h * scale)))
-        solid = solid.resize(size, Image.BOX)
-        visible = visible.resize(size, Image.BOX)
-    # Interior: cells that were wholly inside the item, then eroded back from
-    # the boundary. A cell the rim only clips is not fully visible and is not
-    # interior — rims are exactly what this must not measure.
-    inner = visible.point(lambda v: 255 if v >= 255 else 0)
-    for _ in range(_INTERIOR_ERODE):
-        inner = inner.filter(ImageFilter.MinFilter(3))
-    if not inner.histogram()[255]:
-        return 1.0
-    # The mean solid-share over the interior cells: every cell covers the same
-    # number of pixels, so this is the share of interior PIXELS kept opaque.
-    return ImageStat.Stat(solid, inner).mean[0] / 255
-
-
 def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
     """The item on white under a soft contact shadow.
 
-    The last step of every engine, local or remote: whatever produced the
-    matte, what ships is the same composite, so a cutout does not look like a
-    different product depending on which API answered.
+    The last step of every cutout, Photoroom's or the art path's geometry:
+    whatever produced the matte, what ships is the same composite. Photoroom
+    could draw the white and the shadow itself, but only on its Image Editing
+    plan at about five times the price of the matte alone.
     """
     canvas = Image.new("RGB", rgb.size, WHITE)
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
@@ -982,151 +157,66 @@ def _coverage(alpha: Image.Image, size: tuple[int, int]) -> float:
     return sum(kept.histogram()[128:]) / float(size[0] * size[1])
 
 
-def remote_cutout(rgb: Image.Image) -> tuple[Optional[Image.Image], str]:
-    """The first remote engine in the chain that answers, and its name.
+def cutout_with_engine(rgb: Image.Image) -> tuple[Image.Image, str]:
+    """The item on white, cut out by Photoroom, and the engine's name.
 
-    Returns (None, "") when the chain has no remote engine configured -- the
-    default, and the reason a deploy that sets no keys behaves exactly as it
-    did. A configured engine that FAILS raises cutout_api.CutoutApiError with
-    the reason; the caller decides whether to try the next engine or tell the
-    seller.
+    Never None: every way this can fail raises cutout_api.CutoutApiError
+    with a sentence a seller can read — no key configured, a key Photoroom
+    refused, an account out of images, a rate limit that outlasted the
+    retries, or a matte that kept nothing. There is no local model to fall
+    back to, so the caller keeps the photo as shot and passes the sentence
+    on (optimize() into `bg_error`, the studio into its 422).
 
-    A remote engine does NOT take _INFER_LOCK. The lock exists because two
-    concurrent rembg inferences double this machine's peak memory and kill it;
-    a remote call holds no model here and needs no slot. That is most of the
-    speed win -- ~104s serialized becomes a second or three in parallel.
-
-    The matte also skips _reclaim_enclosed / _fill_interior / _harden. All
-    three repair the local model's specific defects, and _harden in particular
-    re-ramps mid values toward zero, so running it over an already-clean alpha
-    eats the very edges that were paid for.
+    The one gate a matte still answers is "found nothing at all", which is
+    engine-independent and cheap to be sure about. The shape and solidity
+    guards that used to stand behind the local model are gone with it: every
+    threshold in them was fitted to that model's output, and they are what
+    refused necklaces, belts, bangles and guitars on flawless mattes.
     """
-    from . import cutout_api
-    chain = config.bg_engine_chain()
-    last: Optional[Exception] = None
-    for name in chain:
-        if name == "local":
-            break
-        engine = cutout_api.ENGINES.get(name)
-        if engine is None:
-            continue
-        try:
-            cut = engine(rgb)
-        except cutout_api.CutoutApiError as exc:
-            # Keep the reason and try the next engine. When this was the last
-            # remote engine the caller re-raises it, so the seller reads "out
-            # of credits" rather than watching the cutout quietly get worse.
-            log.warning("bg-removal: %s failed (%s)", name, exc)
-            last = exc
-            continue
-        if cut is None:  # no credentials for this engine
-            continue
-        # A service answers at the size it was SENT, and jpeg_payload caps that
-        # at BG_API_MAX_SIDE. Today every caller is already inside the cap so
-        # nothing is resized -- but if that ever stops being true, an alpha of
-        # one size against a photo of another understates coverage (refusing a
-        # good cutout) and composites at the wrong size. Cheap to make
-        # impossible rather than to remember.
-        if cut.size != rgb.size:
-            log.info("bg-removal: %s answered at %dx%d for a %dx%d photo — "
-                     "scaling the matte back", name, cut.width, cut.height,
-                     rgb.width, rgb.height)
-            cut = cut.resize(rgb.size, Image.LANCZOS)
-        alpha = cut.split()[3]
-        coverage = _coverage(alpha, rgb.size)
-        # The ONE gate a remote matte still answers. "Found nothing at all" is
-        # engine-independent and cheap to be sure about. The other two --
-        # _interior_solidity and _kept_is_the_product -- are deliberately NOT
-        # applied: every threshold in them was fitted to the local model's
-        # output, and they are what refused necklaces, belts, bangles and
-        # guitars on flawless mattes. Better edges is not a different answer
-        # about whether there is a subject.
-        if coverage < _MIN_FG_COVERAGE:
-            log.info("bg-removal: %s found no item (coverage %.4f)",
-                     name, coverage)
-            last = cutout_api.CutoutApiError(
-                f"{name} found no item in this photo — it was kept as shot.")
-            continue
-        log.info("bg-removal: %s kept %.3f of the frame", name, coverage)
-        return _compose_on_white(cut.convert("RGB"), alpha), name
-    if last is not None and "local" not in chain:
-        raise last
-    if last is not None:
-        log.info("bg-removal: falling back to the local model")
-    return None, ""
-
-
-def cutout_with_engine(rgb: Image.Image, wait: Optional[float] = None,
-                       ) -> tuple[Optional[Image.Image], str]:
-    """The item on white, plus which engine produced it ("" when none did).
-
-    Walks config.bg_engine_chain(): every configured remote engine first, then
-    the local model as the floor. A remote failure falls through to the next
-    entry, so an expired key or an outage degrades to the free local model
-    rather than losing the photo.
-
-    The local leg goes through cutout() rather than inlining it, so patching
-    cutout() still intercepts the whole local path -- which is how this file's
-    tests stand in for a model that CI does not install.
-    """
-    out, engine = remote_cutout(rgb)
-    if out is not None:
-        return out, engine
-    return cutout(rgb, wait=wait), "local"
-
-
-def cutout(rgb: Image.Image, wait: Optional[float] = None) -> Optional[Image.Image]:
-    """The LOCAL model's item on white under a soft contact shadow, or None
-    when it found no item to keep.
-
-    Raises CutoutBusy when the inference slot is taken for longer than
-    `wait`; any other failure raises as itself so a caller can say why.
-
-    This is the in-house engine on its own. Callers that want whatever engine
-    is configured -- and to be told which one answered -- ask
-    cutout_with_engine, which falls back to here.
-    """
-    # Repaired BEFORE it is hardened, and hardened exactly once. _harden maps
-    # the band between LOW and HIGH onto a ramp, so running it over its own
-    # output re-ramps every mid value toward zero and quietly eats the matte.
-    # Three passes, in this order and each exactly once.
-    #
-    # _reclaim_enclosed first, because it is the only one that can see the
-    # failure it repairs: it reads the PHOTO to tell a hole through a ring
-    # from a hole punched in a shirt, and both of the others start from "what
-    # the model saw" and so cannot tell those apart at all.
-    #
-    # Then _fill_interior, then _harden — and _harden last and once, since it
-    # maps the band between LOW and HIGH onto a ramp and running it over its
-    # own output re-ramps every mid value toward zero and quietly eats the
-    # matte.
-    alpha = _harden(_fill_interior(_reclaim_enclosed(rgb, _mask(rgb, wait=wait))))
-    kept = alpha.point(lambda a: 255 if a >= 128 else 0)
-    coverage = (sum(kept.histogram()[128:]) / (rgb.width * rgb.height))
+    cut = cutout_api.photoroom_cutout(rgb)
+    if cut is None:
+        log.warning("bg-removal: asked for a cutout but PHOTOROOM_API_KEY is "
+                    "not set")
+        raise cutout_api.CutoutApiError(cutout_api.UNAVAILABLE)
+    # A service answers at the size it was SENT, and jpeg_payload caps that
+    # at BG_API_MAX_SIDE. Every caller is already inside the cap today, so
+    # nothing is resized -- but an alpha of one size against a photo of
+    # another understates coverage and composites at the wrong size. Cheap to
+    # make impossible rather than to remember.
+    if cut.size != rgb.size:
+        log.info("bg-removal: photoroom answered at %dx%d for a %dx%d photo — "
+                 "scaling the matte back", cut.width, cut.height,
+                 rgb.width, rgb.height)
+        cut = cut.resize(rgb.size, Image.LANCZOS)
+    alpha = cut.split()[3]
+    coverage = _coverage(alpha, rgb.size)
     if coverage < _MIN_FG_COVERAGE:
-        log.info("bg-removal: no item found (coverage %.3f)", coverage)
-        return None
-    # Enough survived. Is it SOLID, or an item rubbed out to a third of
-    # itself? See _MIN_INTERIOR_SOLIDITY. Asked before the shape question
-    # because it is the cheaper of the two, and because the ghost it catches
-    # is a matte whose shape is perfectly respectable.
-    solidity = _interior_solidity(alpha)
-    if solidity < _MIN_INTERIOR_SOLIDITY:
-        log.info("bg-removal: the matte is see-through — only %.2f of the "
-                 "item's interior is opaque (coverage %.3f); keeping the "
-                 "photo as shot", solidity, coverage)
-        return None
-    # And is it the product? One object, or a few — see _COMPANION_SHARE.
-    total, regions, box_fill = _kept_shape(kept)
-    if not _kept_is_the_product(total, regions, box_fill):
-        log.info("bg-removal: what the matte kept is not the product — %d "
-                 "region(s), largest %.2f of what it kept and filling %.2f of "
-                 "its own box, the lot filling %.2f of theirs (coverage "
-                 "%.3f); keeping the photo as shot",
-                 len(regions), (regions[0][0] / total) if total else 0.0,
-                 regions[0][1] if regions else 0.0, box_fill, coverage)
-        return None
-    return _compose_on_white(rgb, alpha)
+        log.info("bg-removal: photoroom found no item (coverage %.4f)",
+                 coverage)
+        raise cutout_api.NothingFound(
+            "Photoroom found no item in this photo — it was kept as shot.")
+    log.info("bg-removal: photoroom kept %.3f of the frame", coverage)
+    return _compose_on_white(cut.convert("RGB"), alpha), "photoroom"
+
+
+def _cutout_or_border(rgb: Image.Image) -> tuple[Image.Image, str]:
+    """Photoroom's cutout, or -- when Photoroom found NOTHING -- the item cut
+    to its own rectangular outline ("border"). A tray, a sign, a plaque, a
+    boxed set: a cutout fixes on the picture printed on its face and keeps
+    nothing it would ship, but the shape of the thing is a rectangle, so the
+    geometry that cuts a framed print answers for it. artwork.outline()
+    answers None for anything that is not a rectangle, so a garment is still
+    kept as shot, with Photoroom's reason.
+
+    Any OTHER failure is re-raised untouched: an outage or an empty Photoroom
+    account is said, never papered over with geometry."""
+    try:
+        return cutout_with_engine(rgb)
+    except cutout_api.NothingFound:
+        rescued = _rectangle_cutout(rgb)
+        if rescued is None:
+            raise
+        return rescued, "border"
 
 
 # What a photo of ART gets instead of a cutout when its outline cannot be
@@ -1157,8 +247,8 @@ def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
 
     Two callers, and they want it for two different reasons. art_cutout asks
     first because a found outline cannot be wrong about what is inside it.
-    And the ordinary cutout path asks LAST, after the model has found nothing
-    it would ship — see optimize() and remove_background_white().
+    And the ordinary cutout path asks LAST, after Photoroom has found nothing
+    -- see _cutout_or_border.
     """
     quads = artwork.outline(rgb)
     if quads is None:
@@ -1168,8 +258,7 @@ def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     return _compose_on_white(rgb, artwork.outline_matte(rgb.size, quads))
 
 
-def art_cutout(rgb: Image.Image,
-               wait: Optional[float] = None) -> Optional[Image.Image]:
+def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     """A PICTURE on white: everything inside its outer border, kept whole.
 
     The separate path for paintings, prints, posters, drawings, photographs
@@ -1202,16 +291,13 @@ def art_cutout(rgb: Image.Image,
     artwork.outline_matte() or artwork.quad(). There is still no code path
     here that can remove a pixel from inside the outline.
 
-    Which model draws that matte is _border_alpha's business, and until this
-    change the answer in production was "none, ever" -- see its note. `wait`
-    is how long that model may queue for the inference slot before giving up
-    with CutoutBusy, and it defaults to the batch deadline, which is where
-    every caller of this is today.
+    That matte is Photoroom's, asked for by _border_alpha, and only when
+    outline() found nothing.
     """
     out = _rectangle_cutout(rgb)
     if out is not None:
         return out
-    alpha, who = _border_alpha(rgb, wait=wait)
+    alpha, who = _border_alpha(rgb)
     if alpha is None:
         return None
     # Four corners rather than a box, because the photo that gets here is the
@@ -1226,88 +312,37 @@ def art_cutout(rgb: Image.Image,
     return _compose_on_white(rgb, artwork.quad(rgb.size, corners))
 
 
-# Whether the LOCAL model may be asked where a picture's border is when the
-# geometric outline could not be found. On by default; ART_LOCAL_BORDER=off puts
-# the second look back to paid engines only. See _border_alpha.
-_ART_LOCAL_BORDER = (os.getenv("ART_LOCAL_BORDER", "on").strip().lower()
-                     not in ("off", "0", "false", "no"))
-
-
-def _border_alpha(rgb: Image.Image, wait: Optional[float] = None,
-                  ) -> tuple[Optional[Image.Image], str]:
-    """A matte to LOCATE a picture's outer edge with, and what produced it --
-    a paid engine's when one is configured, the local model's otherwise.
+def _border_alpha(rgb: Image.Image) -> tuple[Optional[Image.Image], str]:
+    """A matte to LOCATE a picture's outer edge with, and what produced it,
+    or (None, "") when there is none to be had.
 
     Only the outer SHAPE of it is ever used. artwork.quad_from_alpha refuses
     anything that is not a rectangle at some angle, and what the caller ships
-    is artwork.quad() -- a solid convex shape -- so there is still no code
-    path here that can remove a pixel from inside a picture's border. That is
-    the invariant services/artwork exists for and nothing here touches it.
+    is artwork.quad() -- a solid convex shape -- so there is no code path here
+    that can remove a pixel from inside a picture's border. That is the
+    invariant services/artwork exists for and nothing here touches it.
 
-    WHAT CHANGED IS WHO MAY BE ASKED, and it changed because the answer used
-    to be "nobody". This was remote-only, and nothing configures a remote
-    engine: BG_ENGINE is commented out in fly.toml and no key is set, so
-    bg_engine_chain() is ["local"] and this returned None on its first step.
-    The second look at a picture's border -- the whole of it, including the
-    hand-held case it was written for -- was dead code in production.
+    Photoroom is a segmentation model with the same failure on a picture as
+    any other: handed a painting, it lifts the subject out of it. What makes
+    its answer safe here is that the answer is used as GEOMETRY and checked
+    for being a rectangle. A baby lifted out of a painting is not a rectangle
+    at any angle, so it is refused and the photo is kept as shot.
 
-    What a seller saw was the complaint this is being fixed for: the
-    background remover "works great for shirts, horrible for square objects".
-    A shirt is not a picture, so it goes to the model and comes back cut out
-    on white. A framed print, a poster, a map, a tray with a picture on its
-    face -- anything the screen calls art -- goes to the geometric scan
-    instead, and when that scan cannot find an edge (a dark frame on a wood
-    table, a print on paper close to the colour of the floor) the photo is
-    kept exactly as shot. Side by side in one grid that reads as a background
-    remover that works on clothes and not on anything flat, and the real
-    reason was "no paid API key", which is not something anybody could have
-    guessed from the outside.
-
-    A remote engine is the same KIND of thing as the local one: a
-    segmentation model with the same failure on a picture. What makes its
-    answer safe here was never that it was paid for -- it is that the answer
-    is used as GEOMETRY and checked for being a rectangle. A baby lifted out
-    of a painting is not a rectangle at any angle (a round subject scores
-    0.785 against a floor of 0.9), so it is refused whichever model it came
-    from, and the photo is kept as shot exactly as it is today.
-
-    The matte is HARDENED first, and only for the local one. The bounding box
-    the corners are measured from is the box of every non-zero pixel, and the
-    local model leaves a faint haze over the backdrop that a paid engine's
-    clean matte does not have -- unhardened, that haze is what the box would
-    be fitted to. _harden drops everything under _ALPHA_LOW, which is the
-    same line it draws for the shipping matte.
-
-    The cost is one inference, paid only by a picture whose border the scan
-    could not find -- the photo that was otherwise getting nothing at all. A
-    model that is missing or broken is not worth surfacing here: the photo is
-    about to be kept as shot, which is exactly what would have happened
-    without this call. A BUSY slot is different and is raised, so the caller
-    can say "try again" rather than quietly shipping the photo untouched.
+    The cost is one call, paid only by a picture whose border the geometric
+    scan could not find -- the photo that was otherwise getting nothing at
+    all. A failure is not worth surfacing: the photo is about to be kept as
+    shot, which is exactly what would have happened without this call.
     """
-    from . import cutout_api
-    for name in config.bg_engine_chain():
-        if name == "local":
-            break
-        engine = cutout_api.ENGINES.get(name)
-        if engine is None:
-            continue
-        try:
-            cut = engine(rgb)
-        except cutout_api.CutoutApiError as exc:
-            log.info("art border: %s couldn't help (%s)", name, exc)
-            continue
-        if cut is not None:
-            return cut.split()[3], name
-    if not _ART_LOCAL_BORDER:
-        return None, ""
     try:
-        return _harden(_mask(rgb, wait=wait)), "local"
-    except CutoutBusy:
-        raise
-    except Exception as exc:  # noqa: BLE001 - a border nobody can find is not an error
-        log.info("art border: the local model couldn't help (%s)", exc)
+        cut = cutout_api.photoroom_cutout(rgb)
+    except cutout_api.CutoutApiError as exc:
+        log.info("art border: photoroom couldn't help (%s)", exc)
         return None, ""
+    if cut is None:
+        return None, ""
+    if cut.size != rgb.size:
+        cut = cut.resize(rgb.size, Image.LANCZOS)
+    return cut.split()[3], "photoroom"
 
 
 def _flatten(img: Image.Image) -> Image.Image:
@@ -1315,7 +350,7 @@ def _flatten(img: Image.Image) -> Image.Image:
 
     A bare `.convert("RGB")` paints transparent pixels BLACK, so a PNG that
     arrived already cut out (an iPhone "lift subject" shot, another tool's
-    export) would reach the model, and the listing, as an item on a black
+    export) would reach the engine, and the listing, as an item on a black
     field."""
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
@@ -1449,12 +484,9 @@ def as_shot(path: Path) -> Path:
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
              rotate: int = 0, detail: bool = False, art: bool = False) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
-    Returns what was done. A cutout that finds nothing keeps the photo as shot
-    and says so in `bg_error`, so the caller can give the charge back — after
-    one last question, which is whether the thing in the photo is simply a
-    RECTANGLE. A tray, a sign, a boxed set: the model drops those or keeps
-    only the picture printed on their face, and the geometry that cuts a
-    framed print cuts them too. `bg_engine` says "border" when it did.
+    Returns what was done. A cutout that cannot be had — no key, an account
+    out of images, an outage, nothing found — keeps the photo as shot and
+    says why in `bg_error`, so the caller can give the charge back.
 
     `rotate` is clockwise degrees (0/90/180/270): the ITEM's turn, decided by
     services/orient and applied right after the camera's EXIF — before the
@@ -1470,18 +502,24 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     terms. The cutout is not run on one. Every pixel in the frame is the
     item, so there is no background to take off, and a salient-object model
     asked anyway answers the only question it knows: it keeps the label and
-    deletes the garment behind it. The three guards below cannot catch that —
+    deletes the garment behind it. Nothing reading the matte can catch that —
     the matte of a torn-out label is one opaque region that fills its own box,
     which is what a GOOD cutout looks like — so the photo has to be spared
-    before the model is asked, not after. See orient._details.
+    before the engine is asked, not after. See orient._details.
+
+    A flat RECTANGULAR thing Photoroom found nothing in -- a tray, a sign, a
+    boxed set, whose printed face is what a cutout fixes on -- is cut to its
+    own scanned outline instead (`bg_engine` "border"). Only for "found
+    nothing": an outage or an account problem is said, not papered over with
+    geometry, or a pile would come back with its trays cut and its shirts not.
 
     `art` says the item in this photo IS A PICTURE — a painting, print,
     poster, drawing or photograph — decided by that same pass. It takes the
     art path (art_cutout), which keeps everything inside the picture's outer
-    border and never asks the model which part of a painting is interesting.
-    Same reason as `detail`, one step further: on a picture the model's answer
-    is not merely useless, it is confidently wrong in a way no guard reading
-    the matte can see. See orient._art and services/artwork."""
+    border and never asks the engine which part of a painting is interesting.
+    Same reason as `detail`, one step further: on a picture the engine's
+    answer is not merely useless, it is confidently wrong in a way no guard
+    reading the matte can see. See orient._art and services/artwork."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
@@ -1494,39 +532,28 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         bg_error = DETAIL_KEPT_AS_SHOT
     elif remove_bg:
         try:
-            # A picture never reaches the model. Its border decides the
-            # matte, or nothing happens at all — art_cutout returning None
-            # means "keep as shot", never "try the model", because the model
-            # is what cuts the baby out of the painting. A remote engine may
-            # help FIND that border (see art_cutout); it never supplies the
-            # matte for a picture.
+            # A picture never reaches the engine as a cutout. Its border
+            # decides the matte, or nothing happens at all — art_cutout
+            # returning None means "keep as shot", never "cut it out anyway",
+            # because a cutout is what lifts the baby out of the painting.
+            # Photoroom may help FIND that border (see art_cutout); it never
+            # supplies the matte for a picture.
             if art:
                 out, bg_engine = art_cutout(img), "art"
-            else:
-                out, bg_engine = cutout_with_engine(img)
                 if out is None:
-                    # The model kept nothing this file would ship, and for a
-                    # FLAT RECTANGULAR THING that is the likeliest outcome
-                    # there is: a tray, a sign, a plaque, a boxed set, a
-                    # record sleeve. The model finds the picture PRINTED on
-                    # its face and drops the object around it, and what
-                    # survives is a rectangle that fails coverage or fails to
-                    # look like a product. The screen did not call any of
-                    # these art, and it is right not to -- a tray with a map
-                    # on it is a tray -- but the shape of the thing is the
-                    # same, so the same geometry answers it. Asked only after
-                    # the model has declined, so no photo that gets a cutout
-                    # today changes, and artwork.outline() answers None for
-                    # anything that is not a rectangle, so a garment or a
-                    # close-up is still kept as shot.
-                    rescued = _rectangle_cutout(img)
-                    if rescued is not None:
-                        out, bg_engine = rescued, "border"
-            if out is None and art:
-                bg_error = ART_NO_BORDER_KEPT_AS_SHOT
+                    bg_error = ART_NO_BORDER_KEPT_AS_SHOT
+            else:
+                out, bg_engine = _cutout_or_border(img)
+        except cutout_api.CutoutApiError as exc:
+            # Already a sentence for the seller: "unavailable right now",
+            # "busy, try again in a minute", "found no item".
+            log.info("bg-removal: keeping %s as shot (%s)", src.name, exc)
+            out, bg_error = None, str(exc)
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
-            log.warning("bg-removal: keeping %s as shot (%s)", src.name, exc)
-            out, bg_error = None, f"Background removal failed: {exc}"
+            log.warning("bg-removal: keeping %s as shot (%s)",
+                        src.name, type(exc).__name__)
+            out, bg_error = None, ("Background removal failed — the photo "
+                                   "was kept as shot.")
         if out is not None:
             # Hold on to what the camera saw before the cutout replaces it.
             # This is the only moment it exists in the right form — upright,
@@ -1561,9 +588,10 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     if turn:
         out["rotated"] = turn
     if bg_removed:
-        # Which engine actually ran, not which one was configured: a
-        # silently-degraded cutout is the thing this field exists to expose.
-        out["bg_engine"] = bg_engine or "local"
+        # Which path actually cut it: "photoroom"; "art" for a picture cut to
+        # its own border; "border" for a flat rectangular item Photoroom
+        # found nothing in.
+        out["bg_engine"] = bg_engine
     if bg_error:
         out["bg_error"] = bg_error
     return out
@@ -1656,9 +684,9 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
                    progress=None, done_already: int = 0,
                    grand_total: int = 0, should_stop=None) -> list[dict]:
     """(src, dst) jobs in order; a failed photo yields {"file", "error"}
-    instead of raising. Serial on purpose: inference is single-flight, and
-    what is left around it — a decode, a composite, an encode — is not worth
-    a thread pool's memory.
+    instead of raising. Serial: a decode, one Photoroom call, a composite and
+    an encode per photo, and a batch is already one of several running in
+    the bulk worker pool.
 
     `done_already`/`grand_total` describe work this call is NOT doing — the
     photos a resumed batch found already finished — so `progress` keeps
@@ -1709,10 +737,9 @@ def _screen_for(sources: list[Path], should_stop=None) -> tuple[
     looks a photo up.
 
     NOTE what the empty answer means for art: a picture the screen never got
-    to see goes to the model, and the model cuts the baby out of the painting.
-    That is not a new risk — it is precisely today's behaviour, and the shape
-    guards in cutout() are what stand behind it — but it is the reason this
-    answer is worth having a whole pass for rather than a heuristic here.
+    to see is cut out like any other photo, and a cutout lifts the subject
+    out of the painting. That is the reason this answer is worth having a
+    whole pass for rather than a heuristic here.
 
     Imported here, not at module scope: orient reaches the Anthropic SDK, and
     everything else in this file is Pillow. Keeping the AI dependency inside
@@ -1729,78 +756,20 @@ def _screen_for(sources: list[Path], should_stop=None) -> tuple[
         return {}, frozenset(), frozenset()
 
 
-def warm() -> None:
-    """Pre-load the model on a tiny image, from a startup thread, so the first
-    real photo does not pay for importing onnxruntime and reading a 176MB
-    file (/api/ready reports that cost as model_load_seconds)."""
-    try:
-        tile = Image.new("RGB", (64, 64), (235, 235, 235))
-        tile.paste(Image.new("RGB", (30, 30), (200, 100, 50)), (17, 17))
-        _mask(tile)
-        log.info("images: background-removal model warmed")
-    except Exception as exc:  # noqa: BLE001 - warmup is best-effort
-        log.warning("images: warmup failed (will lazy-load on first use): %s", exc)
-
-
 # --- the photo studio --------------------------------------------------------
 
 def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     """The studio's "Remove background": the item on white, and the name of
-    the engine that did it. Raises ValueError when nothing found an item to
-    keep, so the editor can tell the seller instead of silently doing
-    nothing, and CutoutBusy when the slot is taken (the editor's wait is the
-    short one: a person is watching).
+    the engine that did it. Raises cutout_api.CutoutApiError — a ValueError,
+    so the route answers 422 with the sentence — when Photoroom could not
+    cut it, so the editor can tell the seller why instead of silently doing
+    nothing.
 
-    The geometric border is the same last resort it is in the photo pass, and
-    the studio is where it matters most: this is the button a seller presses
-    AFTER a batch left a photo as shot, so answering "couldn't separate this
-    photo" a second time is the end of the road for that listing. The message
-    below already named a photo OF A PICTURE as a likely cause; now something
-    is actually done about it.
-    """
-    rgb = _flatten(img)
-    out, engine = cutout_with_engine(rgb, wait=INFER_WAIT_SECONDS)
-    if out is None:
-        out, engine = _rectangle_cutout(rgb), "border"
-    if out is None:
-        raise ValueError(
-            "Couldn't separate this photo from its background — it's likely "
-            "a close-up, a dark item on a dark surface, or a photo OF a "
-            "picture rather than of an object. Try cropping in tighter, "
-            "shooting against a contrasting surface, or painting the "
-            "background out with the white brush.")
-    return out, engine
-
-
-def _subject(img: Image.Image) -> tuple[Image.Image, Image.Image]:
-    rgb = _flatten(img)
-    return rgb, _harden(_mask(rgb, wait=INFER_WAIT_SECONDS))
-
-
-def auto_clean(img: Image.Image) -> Image.Image:
-    """Whiten everything outside the item. The mask is grown a little and
-    feathered so the edge stays soft and nothing of the item is eaten."""
-    rgb, mask = _subject(img)
-    mask = mask.point(lambda a: 255 if a >= 96 else 0)
-    mask = mask.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(2))
-    return Image.composite(rgb, Image.new("RGB", rgb.size, WHITE), mask)
-
-
-def smart_crop(img: Image.Image, margin: float = 0.05) -> Optional[Image.Image]:
-    """Crop to the item plus a margin. None when there is no confident item
-    or the frame is already tight, so the caller can say "nothing to crop"
-    instead of degrading the photo."""
-    rgb, mask = _subject(img)
-    bbox = mask.point(lambda a: 255 if a >= 128 else 0).getbbox()
-    if not bbox:
-        return None
-    left, top, right, bottom = bbox
-    mx, my = int((right - left) * margin), int((bottom - top) * margin)
-    box = (max(0, left - mx), max(0, top - my),
-           min(rgb.width, right + mx), min(rgb.height, bottom + my))
-    if (box[2] - box[0]) * (box[3] - box[1]) > 0.92 * rgb.width * rgb.height:
-        return None  # already tight — don't churn the photo for a <8% trim
-    return rgb.crop(box)
+    The rectangle rescue is the same as the photo pass's, and the studio is
+    where it matters most: this is the button a seller presses AFTER a batch
+    left a photo as shot, so a second refusal is the end of the road for that
+    listing."""
+    return _cutout_or_border(_flatten(img))
 
 
 # --- copies for the AI ---------------------------------------------------------

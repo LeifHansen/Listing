@@ -51,7 +51,8 @@ from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
                      MarketplaceState, PendingItemRequest, PendingPhotoRequest,
                      PublishRequest, RefineRequest, SessionOnlyRequest)
-from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
+from .services import (barcodes, bg_removal, bulk_actions, claude_ai,
+                       dirty_fields,
                        duplicates, easypost, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
                        ebay_orders,
@@ -481,7 +482,7 @@ async def _cache_headers(request: Request, call_next):
     elif path.startswith("/media/"):
         # "no-cache" is NOT "don't cache" — it is "cache it, but ask before
         # you use it". A photo is MUTABLE at a stable URL: rotate, crop,
-        # auto-clean and background removal all rewrite the same file in
+        # the brushes and background removal all rewrite the same file in
         # place. This used to be max-age=3600, which was only safe as long as
         # the URL changed whenever the bytes did — and it doesn't. The
         # editor's cache-buster is a per-mount counter that starts at 0 again
@@ -805,12 +806,10 @@ def _db_status_loop() -> None:
 
 
 def _warm_models() -> None:
-    """Startup daemons (don't block uvicorn binding the port): warm the in-house
-    background-removal model, resolve the R2 bucket check so /api/ready tells
-    the truth from the first request, keep the db-status cache warm so the
-    readiness read never blocks on Postgres, and keep the volume from filling
-    up."""
-    threading.Thread(target=images.warm, daemon=True).start()
+    """Startup daemons (don't block uvicorn binding the port): resolve the R2
+    bucket check so /api/ready tells the truth from the first request, keep
+    the db-status cache warm so the readiness read never blocks on Postgres,
+    and keep the volume from filling up."""
     threading.Thread(target=objstore.probe, daemon=True).start()
     threading.Thread(target=_db_status_loop, daemon=True).start()
     threading.Thread(target=_reclaim_loop, daemon=True).start()
@@ -5332,6 +5331,47 @@ MAX_UPLOAD_BYTES = 60 * 1024 * 1024  # per file
 MAX_BULK_BATCH_BYTES = 400 * 1024 * 1024
 
 
+def _cutout_refused(exc: "bg_removal.Refused") -> HTTPException:
+    return HTTPException(exc.status, str(exc))
+
+
+def _start_cutouts(request: Request, photos: int):
+    """Everything a request that asks for `photos` cutouts has to clear, in
+    order: the seller has switched background removal on and has the room
+    in this month's allowance (services/bg_removal), and then the token
+    charge. Returns (reservation, spend) for _refund_cutouts. Raises the
+    HTTPException that says which one stopped it, with nothing left counted
+    or charged."""
+    try:
+        held = bg_removal.reserve(deps.uid(request), photos)
+    except bg_removal.Refused as exc:
+        raise _cutout_refused(exc) from exc
+    try:
+        spent = deps.charge_ai(request, "image_ai", units=photos)
+    except Exception:
+        held.release()
+        raise
+    return held, spent
+
+
+def _refund_cutouts(spent: Optional[dict], held,
+                    photos: Optional[int] = None) -> None:
+    """Give back what `photos` cutouts that never happened were charged --
+    the tokens and the month's count together -- or all of it when `photos`
+    is None. "Only pay for AI that worked", applied to both."""
+    if photos is None:
+        tokens.refund(spent)
+        if held is not None:
+            held.release()
+        return
+    if photos <= 0:
+        return
+    if spent:
+        tokens.refund(spent, units=photos * tokens.COSTS.get("image_ai", 1))
+    if held is not None:
+        held.release(photos)
+
+
 @app.post("/api/upload")
 async def upload(
     request: Request,
@@ -5366,10 +5406,13 @@ async def upload(
     if run_pipeline and not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
-    # Uploading + optimizing stays free; the AI background removal toggle is
-    # metered per photo. Charged before any disk work so a broke/logged-out
-    # caller gets a clean 402/401 instead of a half-done upload.
-    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
+    # Uploading + optimizing stays free; background removal is switched on
+    # per seller and metered per photo. Cleared before any disk work so a
+    # seller who hasn't switched it on, is out of this month's allowance, or
+    # is broke/logged out gets a clean 409/429/402/401 instead of a half-done
+    # upload.
+    held, spent = (await run_in_threadpool(_start_cutouts, request, len(files))
+                   if strip_bg else (None, None))
 
     session_id = storage.new_session_id()
     orig = storage.original_dir(session_id)
@@ -5379,7 +5422,7 @@ async def upload(
         for i, f in enumerate(files):
             data = await f.read()
             if len(data) > MAX_UPLOAD_BYTES:
-                await run_in_threadpool(tokens.refund, spent)
+                await run_in_threadpool(_refund_cutouts, spent, held)
                 raise HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
@@ -5394,7 +5437,7 @@ async def upload(
         # Disk full / write failure — same friendly answer as the bulk path,
         # not a raw 500; drop the partial session rather than leaving an orphan.
         # No cutout ever ran, so the background-removal charge goes back too.
-        await run_in_threadpool(tokens.refund, spent)
+        await run_in_threadpool(_refund_cutouts, spent, held)
         await run_in_threadpool(storage.purge_session, session_id)
         log.error("upload: disk write failed (%s)", exc)
         raise HTTPException(
@@ -5410,7 +5453,7 @@ async def upload(
         try:
             identify_spent = await run_in_threadpool(deps.charge_ai, request, "identify")
         except HTTPException:
-            await run_in_threadpool(tokens.refund, spent)
+            await run_in_threadpool(_refund_cutouts, spent, held)
             await run_in_threadpool(storage.purge_session, session_id)
             raise
         job_id = storage.new_session_id()
@@ -5434,7 +5477,8 @@ async def upload(
         }, uid=uid)
         threading.Thread(
             target=_run_pipeline_job,
-            args=(job_id, session_id, uid, strip_bg, spent, identify_spent),
+            args=(job_id, session_id, uid, strip_bg, spent, identify_spent,
+                  held),
             daemon=True,
         ).start()
         log.info("pipeline job %s: started (session=%s, photos=%d)",
@@ -5447,18 +5491,18 @@ async def upload(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
     optimized = storage.list_optimized(session_id)
     if not optimized:
-        await run_in_threadpool(tokens.refund, spent)
+        await run_in_threadpool(_refund_cutouts, spent, held)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
         raise HTTPException(
             400,
             "Could not process the uploaded image(s)"
             + (f": {errs}" if errs else ". Unsupported or corrupt file format."),
         )
-    # Photos whose cutout failed (the model found no item, or fell over) kept their
-    # background — give those tokens back.
+    # Photos whose cutout failed (Photoroom found no item, or couldn't be
+    # reached) kept their background — give those back.
     bg_failed = sum(1 for r in opt_results if r.get("bg_error") or r.get("error"))
-    if spent and bg_failed:
-        await run_in_threadpool(tokens.refund, spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+    if strip_bg and bg_failed:
+        await run_in_threadpool(_refund_cutouts, spent, held, bg_failed)
     # Mirror the optimized images to R2, but don't make the user wait for it:
     # the photos are already on the volume and /media serves the local copy,
     # so nothing on screen or on the way to eBay needs the bucket to have them
@@ -5525,7 +5569,8 @@ async def upload_more(
     strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
-    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai", units=len(files)) if strip_bg else None
+    held, spent = (await run_in_threadpool(_start_cutouts, request, len(files))
+                   if strip_bg else (None, None))
 
     start = max((storage.image_index(n) for n in existing), default=-1) + 1
 
@@ -5535,7 +5580,7 @@ async def upload_more(
     for j, f in enumerate(files):
         data = await f.read()
         if len(data) > MAX_UPLOAD_BYTES:
-            await run_in_threadpool(tokens.refund, spent)
+            await run_in_threadpool(_refund_cutouts, spent, held)
             raise HTTPException(
                 400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
         idx = start + j
@@ -5544,7 +5589,7 @@ async def upload_more(
         try:
             await run_in_threadpool(src.write_bytes, data)
         except OSError as exc:
-            await run_in_threadpool(tokens.refund, spent)
+            await run_in_threadpool(_refund_cutouts, spent, held)
             raise HTTPException(
                 507, "The server is out of storage space — try again shortly.") from exc
         staged.append((idx, src))
@@ -5562,7 +5607,7 @@ async def upload_more(
     }, uid=uid)
     threading.Thread(
         target=_run_upload_more_job,
-        args=(job_id, session_id, staged, strip_bg, spent),
+        args=(job_id, session_id, staged, strip_bg, spent, held),
         daemon=True,
     ).start()
     return {"job_id": job_id, "running": True, "total": len(staged)}
@@ -5570,7 +5615,7 @@ async def upload_more(
 
 def _run_upload_more_job(job_id: str, session_id: str,
                          staged: list[tuple[int, Path]], strip_bg: bool,
-                         spent: Optional[dict]) -> None:
+                         spent: Optional[dict], held=None) -> None:
     """Background worker for "Add photos": the optimize/cutout pass with
     live per-photo progress, then the R2 push. The result is what the
     synchronous route used to answer with."""
@@ -5584,7 +5629,7 @@ def _run_upload_more_job(job_id: str, session_id: str,
             progress=lambda done, total: _bulk_set(
                 job_id, current=done, total_photos=total, beat=time.time()))
     except OSError as exc:
-        tokens.refund(spent)
+        _refund_cutouts(spent, held)
         if getattr(exc, "errno", None) == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
             log.warning("upload-more %s hit a full volume; reclaimed %.1f MB",
@@ -5594,7 +5639,7 @@ def _run_upload_more_job(job_id: str, session_id: str,
             "The server ran out of photo storage — try again shortly."))
         return
     except Exception as exc:  # noqa: BLE001 - the job must always answer
-        tokens.refund(spent)
+        _refund_cutouts(spent, held)
         reference = deps.support_reference()
         log.warning("upload-more %s: optimize failed [%s]: %s",
                     job_id, reference, exc)
@@ -5602,8 +5647,9 @@ def _run_upload_more_job(job_id: str, session_id: str,
                   error=_try_again("process those photos", reference))
         return
     new_names: list[str] = []
-    # Photos whose cutout failed (the model found no item, or fell over) kept their
-    # background, so they owe nothing — counted the same way /api/upload does.
+    # Photos whose cutout failed (Photoroom found no item, or couldn't be
+    # reached) kept their background, so they owe nothing — counted the same
+    # way /api/upload does.
     bg_failed = 0
     for (idx, src), res in zip(staged, results):
         if res.get("error"):  # skip a bad file, keep the rest
@@ -5615,12 +5661,12 @@ def _run_upload_more_job(job_id: str, session_id: str,
         if res.get("bg_error"):
             bg_failed += 1
     if not new_names:
-        tokens.refund(spent)
+        _refund_cutouts(spent, held)
         _bulk_set(job_id, done=True, phase="failed",
                   error="Could not process the uploaded image(s).")
         return
-    if spent and bg_failed:
-        tokens.refund(spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+    if strip_bg and bg_failed:
+        _refund_cutouts(spent, held, bg_failed)
     deps.in_background(objstore.upload_optimized, session_id, opt_dir, new_names,
                        what="R2 push (upload-more)")
     log.info("upload-more: session=%s added=%d", session_id, len(new_names))
@@ -5805,20 +5851,18 @@ async def image_restore_original(
 
 
 # ---------------------------------------------------------------------------
-# Photo studio: AI-assisted clean-up + smart crop for the in-browser editor.
-# All three endpoints accept an optional `file` (the editor's current canvas,
-# including unsaved brush strokes); without it they read the saved photo.
-# Nothing here writes to disk — the editor previews the result and saves via
-# /api/edit-image, so every AI action stays reviewable and cancellable.
+# Photo studio: background removal for the in-browser editor. It accepts an
+# optional `file` (the editor's current canvas, including unsaved brush
+# strokes); without it it reads the saved photo. Nothing here writes to disk —
+# the editor previews the result and saves via /api/edit-image, so every AI
+# action stays reviewable and cancellable.
 # ---------------------------------------------------------------------------
 
 def _studio_guard(request: Request) -> None:
-    """Shared entry check for the four photo-studio endpoints. They run the
-    local rembg model, which is serialized behind one process-wide inference
-    lock, so an unthrottled caller stalls every seller's photo work at once.
-    They deliberately are NOT token-metered — the border re-check fires
-    automatically after every crop and save, so charging it would bill people
-    for ordinary editing — which makes a rate ceiling the only brake."""
+    """Entry check for the photo-studio endpoint. Every call is a paid
+    Photoroom request on the app's account, and the token charge and the
+    monthly count both key on a seller, so a per-IP ceiling is what stops one
+    client hammering it."""
     ip = deps.client_ip(request)
     if not ratelimit.check(f"studio:{ip}", max_attempts=ratelimit.STUDIO_MAX_CALLS):
         log.warning("studio: rate limited %s", ip)
@@ -5937,32 +5981,6 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     return {"ok": True, "version": int(path.stat().st_mtime * 1000)}
 
 
-@app.post("/api/image/auto-clean")
-async def image_auto_clean(
-    request: Request,
-    session_id: str = Form(""),
-    name: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-) -> dict:
-    """AI clean-up: re-detect the subject and whiten everything outside it.
-    Returns the cleaned image for the editor to preview (not saved yet)."""
-    _studio_guard(request)
-    data = await file.read() if file else None
-    if data and len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "Image too large")
-
-    def _run() -> dict:
-        img = _studio_load(request, session_id, name, data)
-        return {"ok": True, "image": _data_url(images.auto_clean(img))}
-
-    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
-    try:
-        return await run_in_threadpool(_run)
-    except Exception:
-        await run_in_threadpool(tokens.refund, spent)
-        raise
-
-
 @app.post("/api/image/remove-bg")
 async def image_remove_bg(
     request: Request,
@@ -5970,9 +5988,9 @@ async def image_remove_bg(
     name: str = Form(""),
     file: Optional[UploadFile] = File(None),
 ) -> dict:
-    """Full background removal composited onto pure white, on the in-house
-    model. Returns the processed image for the editor to preview (not
-    saved)."""
+    """Full background removal composited onto pure white, by Photoroom.
+    Returns the processed image for the editor to preview (not saved). Only
+    for a seller who has switched background removal on (409 otherwise)."""
     _studio_guard(request)
     data = await file.read() if file else None
     if data and len(data) > MAX_UPLOAD_BYTES:
@@ -5981,65 +5999,19 @@ async def image_remove_bg(
     def _run() -> dict:
         img = _studio_load(request, session_id, name, data)
         out, engine = images.remove_background_white(img)
-        # engine = which remover actually ran — the editor names it so a
-        # misconfigured key can't hide behind a silently-degraded result.
-        # degraded says that happened: a paid engine was configured and the
-        # local model answered anyway, which is the only case worth a word to
-        # the seller (see images.engine_degraded).
-        return {"ok": True, "image": _data_url(out), "engine": engine,
-                "degraded": images.engine_degraded(engine)}
+        return {"ok": True, "image": _data_url(out), "engine": engine}
 
-    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
+    held, spent = await run_in_threadpool(_start_cutouts, request, 1)
     try:
         return await run_in_threadpool(_run)
-    except images.CutoutBusy as exc:
-        # 503, not 500 and not 422: nothing is wrong with the photo or the
-        # server, the one inference slot was occupied. Retry-After makes that
-        # machine-readable instead of leaving the client to guess.
-        await run_in_threadpool(tokens.refund, spent)
-        raise HTTPException(503, str(exc),
-                            headers={"Retry-After": "20"}) from exc
     except ValueError as exc:
-        # The model found nothing to keep — the message says what to try.
-        await run_in_threadpool(tokens.refund, spent)
+        # Photoroom couldn't cut it (found nothing, out of images, busy) —
+        # the message says which.
+        await run_in_threadpool(_refund_cutouts, spent, held)
         raise HTTPException(422, str(exc)) from exc
     except Exception:
-        await run_in_threadpool(tokens.refund, spent)
+        await run_in_threadpool(_refund_cutouts, spent, held)
         raise
-
-
-@app.post("/api/image/smart-crop")
-async def image_smart_crop(
-    request: Request,
-    session_id: str = Form(""),
-    name: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-) -> dict:
-    """Crop to the detected subject with a clean margin, padded to a square.
-    Returns the cropped image for preview, or applied=False if the frame is
-    already tight (so the UI can say so instead of degrading the photo)."""
-    _studio_guard(request)
-    data = await file.read() if file else None
-    if data and len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(400, "Image too large")
-
-    def _run() -> dict:
-        img = _studio_load(request, session_id, name, data)
-        cropped = images.smart_crop(img)
-        if cropped is None:
-            return {"ok": True, "applied": False,
-                    "message": "Already nicely framed — no crop needed."}
-        return {"ok": True, "applied": True, "image": _data_url(cropped)}
-
-    spent = await run_in_threadpool(deps.charge_ai, request, "image_ai")
-    try:
-        res = await run_in_threadpool(_run)
-    except Exception:
-        await run_in_threadpool(tokens.refund, spent)
-        raise
-    if not res.get("applied"):  # nothing changed — don't charge for a no-op
-        await run_in_threadpool(tokens.refund, spent)
-    return res
 
 
 @app.post("/api/identify/{session_id}")
@@ -7327,9 +7299,9 @@ async def add_listing_video(session_id: str, request: Request,
     """Attach a video to a listing. One file, no editing.
 
     The file is streamed to disk a megabyte at a time rather than read whole:
-    150MB awaited into a bytes object, on the 4GB box that is also holding a
-    176MB cutout model and three bulk workers, is an OOM waiting for the day
-    two sellers upload at once.
+    150MB awaited into a bytes object, on a small box that is also running
+    three bulk workers, is an OOM waiting for the day two sellers upload at
+    once.
     """
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
     rec, data = await run_in_threadpool(_listing_record_for, session_id)
@@ -7935,9 +7907,9 @@ def _adopt_job_mirrors() -> None:
 #
 # Three, not more, and the ceiling is this machine rather than any API: each
 # worker holds a listing's photos as base64 for its vision calls and crops the
-# full-size originals for the tag close-ups, on a 4GB box that is already
-# holding a 176MB cutout model (fly.toml). The chain is mostly network wait,
-# but the crops and the encoding are real work on two shared CPUs.
+# full-size originals for the tag close-ups, on a small box (fly.toml). The
+# chain is mostly network wait, but the crops and the encoding are real work
+# on two shared CPUs.
 #
 # BULK_DRAFT_WORKERS=1 is the off switch, and it is exactly the old behaviour:
 # one item in flight, drafted in group order.
@@ -8320,6 +8292,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
     bg_spent = None
     bg_charged = 0
     bg_refunded = 0
+    # And the month's count of cutouts (services/bg_removal), reserved and
+    # given back on the same terms as the tokens. It remembers what it has
+    # given back itself, so it needs no running total here.
+    bg_held = None
     n_photos = 0
     delivered = False
     # Stopped at the guidance step rather than finished. It guards the staging
@@ -8348,15 +8324,26 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             _bulk_set(job_id, total_items=len(groups), total_photos=len(names),
                       _names=names, _groups=groups)
         else:
-            # Bulk background removal is metered per photo, charged before the
-            # engines run. Not enough tokens -> photos are kept as-is (with a
-            # visible reason) rather than failing the whole batch.
-            if strip_bg and billing and not resumed:
+            # Bulk background removal is switched on per seller, counted
+            # against the month's allowance and metered per photo, all before
+            # the engine runs. Any of those saying no -> photos are kept as-is
+            # (with a visible reason) rather than failing the whole batch.
+            if strip_bg and not resumed:
                 n_photos = sum(1 for p in storage.original_dir(staging_id).iterdir()
                                if p.is_file())
+                try:
+                    bg_held = bg_removal.reserve(uid, n_photos)
+                except bg_removal.Refused as exc:
+                    strip_bg = False
+                    _bulk_set(job_id, bg_error=(
+                        f"{exc} The photos were kept as shot."))
+            if strip_bg and billing and not resumed:
                 bg_spent = tokens.spend(uid, "image_ai", units=n_photos)
                 if bg_spent is not None and not bg_spent.get("ok"):
                     strip_bg = False
+                    if bg_held is not None:
+                        bg_held.release()
+                        bg_held = None
                     _bulk_set(job_id, bg_error=(
                         "Not enough tokens for background removal — photos were "
                         "kept as shot. " + tokens.insufficient_message(bg_spent)))
@@ -8394,6 +8381,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             # not even fail visibly.
             unprocessed = max(0, n_photos - len(opt_results))
             owed_now = (len(bg_failed) + unprocessed) * tokens.COSTS.get("image_ai", 1)
+            if bg_held is not None:
+                bg_held.release(len(bg_failed) + unprocessed)
             if bg_failed:
                 reason = next((r["bg_error"] for r in bg_failed if r.get("bg_error")), None)
                 _bulk_set(job_id, bg_failed=len(bg_failed),
@@ -8529,6 +8518,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 tokens.refund(bg_spent, units=owed)
                 log.info("bulk %s: refunded %d unused background-removal token(s)",
                          job_id, owed)
+        if bg_held is not None and not delivered:
+            bg_held.release()
         # Staging photos were only needed to optimize + split into per-item
         # sessions; drop them so the volume doesn't grow with every batch.
         # Not at the guidance step, though: the pile is what the continuation
@@ -8562,6 +8553,15 @@ async def bulk_upload(
             401, "Log in to use AI features — your token balance is per account.")
     if not files:
         raise HTTPException(400, "No files uploaded")
+    # Same reason for background removal: the worker counts the cutouts
+    # against the month's allowance, but whether this seller may have any at
+    # all is answered here, while there is still a request to say no on.
+    if str(remove_bg).lower() in ("true", "1", "yes", "on"):
+        try:
+            await run_in_threadpool(
+                bg_removal.check, await run_in_threadpool(deps.uid, request))
+        except bg_removal.Refused as exc:
+            raise _cutout_refused(exc) from exc
     if len(files) > MAX_BULK_FILES:
         raise HTTPException(
             400, f"Too many photos ({len(files)}) — bulk mode takes up to "
@@ -9212,7 +9212,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
 
 def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
                       strip_bg: bool, bg_spent: Optional[dict],
-                      identify_spent: Optional[dict]) -> None:
+                      identify_spent: Optional[dict], bg_held=None) -> None:
     """Background worker for the single-listing upload pipeline: optimize the
     photos (with live per-photo progress) and then run the identify chain, as
     ONE job the client polls. The upload endpoint returns the moment the
@@ -9227,19 +9227,20 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
                 job_id, current=done, total_photos=total, beat=time.time()))
         optimized = storage.list_optimized(session_id)
         if not optimized:
-            tokens.refund(bg_spent)
+            _refund_cutouts(bg_spent, bg_held)
             tokens.refund(identify_spent)
             errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
             _bulk_set(job_id, done=True, error=(
                 "Could not process the uploaded image(s)"
                 + (f": {errs}" if errs else ". Unsupported or corrupt file format.")))
             return
-        # Photos whose cutout failed (the model found no item, or fell over) kept their
-        # background — give those tokens back, exactly as /api/upload does.
+        # Photos whose cutout failed (Photoroom found no item, or couldn't be
+        # reached) kept their background — give those back, exactly as
+        # /api/upload does.
         bg_failed = sum(1 for r in opt_results
                         if r.get("bg_error") or r.get("error"))
-        if bg_spent and bg_failed:
-            tokens.refund(bg_spent, units=bg_failed * tokens.COSTS.get("image_ai", 1))
+        if strip_bg and bg_failed:
+            _refund_cutouts(bg_spent, bg_held, bg_failed)
         # The upload summary the old synchronous response carried (per-photo
         # results for the rotation/bg toasts, the photo list) rides on the job.
         _bulk_set(job_id, upload={"optimized": optimized,
@@ -9247,7 +9248,7 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
         deps.in_background(objstore.upload_optimized, session_id, opt_dir,
                            optimized, what="R2 push (pipeline)")
     except OSError as exc:
-        tokens.refund(bg_spent)
+        _refund_cutouts(bg_spent, bg_held)
         tokens.refund(identify_spent)
         if getattr(exc, "errno", None) == errno.ENOSPC:
             freed = reclaim_space(aggressive=True)
@@ -9258,7 +9259,7 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
             "The server ran out of photo storage — try again shortly."))
         return
     except Exception as exc:  # noqa: BLE001 - job-level failure must surface
-        tokens.refund(bg_spent)
+        _refund_cutouts(bg_spent, bg_held)
         tokens.refund(identify_spent)
         reference = deps.support_reference()
         log.warning("pipeline %s: optimize failed [%s]: %s",
@@ -12733,6 +12734,41 @@ def _remember_ship_from(creds: dict, payload: dict) -> dict:
             log.info("shipping rates: couldn't remember the ship-from "
                      "address: %s", exc)
     return ship_from
+
+
+@app.get("/api/bg-removal/status")
+def bg_removal_status(request: Request) -> dict:
+    """Whether background removal is available, switched on for this seller,
+    and how much of this month's allowance is used. Answers anonymous callers
+    too (switched off): the shell asks at boot, before login. Registered
+    above the generic /api/{marketplace}/status, which would catch it."""
+    return bg_removal.status(deps.uid(request))
+
+
+@app.post("/api/bg-removal/activate")
+def bg_removal_activate(request: Request) -> dict:
+    """Switch background removal on for this seller. The Settings card only
+    calls this after the seller has confirmed that the photos they choose
+    will be sent to Photoroom — this route is where that consent is
+    recorded."""
+    uid = deps.uid(request)
+    if not uid and bg_removal.needs_activation():
+        raise HTTPException(401, "Log in first.")
+    if uid and not ratelimit.check(f"bg-removal-activate:{uid}"):
+        raise HTTPException(429, "Too many attempts. Wait a few minutes and "
+                                 "try again.")
+    try:
+        return bg_removal.activate(uid)
+    except bg_removal.Refused as exc:
+        raise _cutout_refused(exc) from exc
+
+
+@app.post("/api/bg-removal/deactivate")
+def bg_removal_deactivate(request: Request) -> dict:
+    uid = deps.uid(request)
+    if not uid and bg_removal.needs_activation():
+        raise HTTPException(401, "Log in first.")
+    return bg_removal.deactivate(uid)
 
 
 @app.get("/api/easypost/status")

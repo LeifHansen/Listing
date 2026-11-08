@@ -98,7 +98,13 @@ def test_the_request_hands_back_a_job_and_the_job_hands_back_the_photos(client):
     assert body["total_photos"] == 2 and body["current"] == 2
 
 
-def test_the_background_choice_reaches_the_job(client):
+def test_the_background_choice_reaches_the_job(client, monkeypatch):
+    # Background removal needs a key; with no database configured there are
+    # no accounts, so no per-seller switch to flip (services/bg_removal).
+    # Said outright rather than assumed: another suite's fixture can leave a
+    # DATABASE_URL behind in config.
+    monkeypatch.setattr(main.config, "PHOTOROOM_API_KEY", "live-key")
+    monkeypatch.setattr(main.db, "enabled", lambda: False)
     start = _add(client, n=1, remove_bg="true")
     _finish(client, start["job_id"])
     assert client.seen["remove_bg"] is True

@@ -27,18 +27,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake the background-removal models into the image so there's no slow/fragile
-# download at request time. u2netp (~4MB) is the safe fallback that runs even
-# on a 2GB machine; isnet-general-use (~176MB) is the quality model production
-# selects via REMBG_MODEL in fly.toml (needs the 4GB VM).
-RUN python -c "from rembg import new_session; new_session('u2netp'); new_session('isnet-general-use')"
-
 # Which commit this image was built from. Deploys report success on the
 # workflow side while the running code is something else -- a poisoned builder
 # cache did exactly that here before (see the builder-destroy in git history) --
 # and there was no way to ask the app what it was running. /api/health reports
 # this, so "is production current?" is one field instead of an investigation.
-# Last, so it never invalidates the model bake above.
+# After the dependency install, so a new commit never invalidates that layer.
 ARG GIT_SHA=""
 ENV BUILD_SHA=$GIT_SHA
 

@@ -55,7 +55,7 @@ _DEFAULT_COSTS = {
     "specifics": 2,
     # Shop Mode shelf scan (one video's frames).
     "shelf_scan": 2,
-    # AI photo tools, per photo: background removal / auto-clean / smart crop.
+    # Background removal, per photo (Photoroom, on the app's account).
     "image_ai": 1,
 }
 

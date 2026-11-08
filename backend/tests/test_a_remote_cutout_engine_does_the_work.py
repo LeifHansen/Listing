@@ -1,43 +1,33 @@
-"""A remote engine does the cutting, and the local model is the floor.
+"""Photoroom does the cutting, and there is nothing behind it.
 
 The complaint this answers: background removal "either fails miserably, or
 doesn't try". Both halves were real and they had different causes. The matte
 came from the on-server model and then had to clear three gates fitted to that
 model's failures -- which is what refused necklaces, belts, bangles and
 guitars on mattes that were fine -- and one inference took about 104 seconds.
-So a paid engine supplies the matte instead, and the gates it has to answer
-shrink to the one that is engine-independent: did anything survive at all.
+The on-server model is gone. Photoroom supplies the matte, and the gates it
+has to answer shrink to the one that is engine-independent: did anything
+survive at all.
 
 What is pinned here:
 
-  * the chain is walked in order, and "local" is always its floor, so an app
-    with no key configured behaves exactly as it did and spends nothing;
-  * a remote success never touches the local model or its inference lock --
-    the lock exists to stop two rembg runs doubling peak RAM, and a remote
-    call holds no model here;
-  * a remote failure falls THROUGH to the local model rather than losing the
-    photo;
-  * the engine that actually ran is reported, because a key that is expired
-    or mistyped otherwise shows up only as cutouts quietly getting worse;
-  * and a framed print, which today gets no cutout at all when its border
-    cannot be scanned, gets one -- at whatever angle it was photographed at,
-    and always as a SOLID shape, so the thing services/artwork exists to
-    prevent stays impossible.
+  * a cutout is Photoroom's matte composited on white under our shadow, and
+    the engine that ran is named;
+  * a matte is not refused for its shape -- only for keeping nothing;
+  * a failure is RAISED with its reason, never swallowed: with no local model
+    to fall back to, the reason is the only thing the seller gets, and the
+    photo pass turns it into the photo's `bg_error`;
+  * and a framed print, which gets no cutout at all when its border cannot be
+    scanned, gets one -- at whatever angle it was photographed at, and always
+    as a SOLID shape, so the thing services/artwork exists to prevent stays
+    impossible. Photoroom may say WHERE the picture is; it never says what to
+    keep inside it.
 
-A paid engine is no longer the only model allowed to LOCATE that border --
-the local one may too, which is what makes the second look work on a deploy
-with no key, and is pinned in test_a_square_object_is_a_product_too.py. What
-is pinned here is that a configured engine still goes first and that the
-matte, whoever drew it, never becomes the matte that ships.
-
-No httpx here on purpose. The engines are stubbed at the cutout_api boundary,
-because the `cutout` CI job installs Pillow and pytest and nothing else, and
-fails on a SKIP. What talks to the wire is tested in
-test_a_cutout_api_failure_is_explained.py, which runs in the full job.
+No httpx here on purpose. Photoroom is stubbed at cutout_api.photoroom_cutout,
+because the `cutout` CI job runs on Pillow and fails on a SKIP. What talks to
+the wire is tested in test_a_cutout_api_failure_is_explained.py.
 """
 from __future__ import annotations
-
-import threading
 
 import pytest
 
@@ -45,7 +35,6 @@ pytest.importorskip("PIL")
 
 from PIL import Image, ImageDraw, ImageFilter  # noqa: E402
 
-from backend import config  # noqa: E402
 from backend.services import artwork, cutout_api, images  # noqa: E402
 
 BACKDROP = (238, 236, 232)
@@ -62,7 +51,7 @@ def _photo(size=(1200, 900)) -> Image.Image:
 
 
 def _cut(size, box) -> Image.Image:
-    """What a remote engine returns: RGBA, opaque only inside `box`."""
+    """What Photoroom returns: RGBA, opaque only inside `box`."""
     out = Image.new("RGBA", size, (0, 0, 0, 0))
     out.paste(Image.new("RGBA", (box[2] - box[0], box[3] - box[1]),
                         ITEM + (255,)), (box[0], box[1]))
@@ -70,7 +59,7 @@ def _cut(size, box) -> Image.Image:
 
 
 def _engine(returns=None, raises=None, log=None):
-    """A stand-in remote engine. Records every photo it was asked about."""
+    """A stand-in Photoroom. Records every photo it was asked about."""
     def _run(rgb):
         if log is not None:
             log.append(rgb.size)
@@ -81,108 +70,22 @@ def _engine(returns=None, raises=None, log=None):
 
 
 @pytest.fixture()
-def no_local(monkeypatch):
-    """Make the local model fail loudly, so anything that reaches it shows."""
-    def _boom(rgb, wait=None):
-        raise AssertionError("the local model was asked and should not have been")
-    monkeypatch.setattr(images, "_mask", _boom)
-
-
-@pytest.fixture()
-def chain(monkeypatch):
-    """Choose the engine chain without touching the environment."""
-    def _set(*names):
-        monkeypatch.setattr(config, "bg_engine_chain", lambda: list(names))
+def photoroom(monkeypatch):
+    """Install a stand-in Photoroom: photoroom(returns=..., raises=..., log=...)."""
+    def _set(returns=None, raises=None, log=None):
+        monkeypatch.setattr(cutout_api, "photoroom_cutout",
+                            _engine(returns=returns, raises=raises, log=log))
     return _set
 
 
-def _remote(monkeypatch, **engines):
-    """Install stand-in remote engines under cutout_api.ENGINES."""
-    monkeypatch.setattr(cutout_api, "ENGINES", dict(engines))
+# --- a cutout ---------------------------------------------------------------
 
+def test_a_cutout_is_composited_on_white(photoroom):
+    photoroom(returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)))
 
-# --- the chain -------------------------------------------------------------
+    out, engine = images.cutout_with_engine(_photo())
 
-def _canva(monkeypatch, configured: bool) -> None:
-    """All three Canva credentials present, or none of them."""
-    value = "k" if configured else ""
-    for name in ("CANVA_CLIENT_ID", "CANVA_CLIENT_SECRET",
-                 "CANVA_REFRESH_TOKEN"):
-        monkeypatch.setattr(config, name, value)
-
-
-def test_with_no_key_the_chain_is_the_local_model_alone(monkeypatch):
-    """The guarantee that lets this ship: configure nothing, change nothing."""
-    monkeypatch.setattr(config, "BG_ENGINE", "auto")
-    _canva(monkeypatch, configured=False)
-    assert config.bg_engine_chain() == ["local"]
-
-
-def test_a_configured_engine_goes_in_front_of_the_local_model(monkeypatch):
-    monkeypatch.setattr(config, "BG_ENGINE", "auto")
-    _canva(monkeypatch, configured=True)
-    assert config.bg_engine_chain() == ["canva", "local"]
-
-
-def test_a_partly_configured_engine_is_not_configured(monkeypatch):
-    """Canva's connection is three secrets, not one; two of them cannot cut a
-    background, and an engine that tries anyway fails every photo."""
-    monkeypatch.setattr(config, "BG_ENGINE", "auto")
-    _canva(monkeypatch, configured=True)
-    monkeypatch.setattr(config, "CANVA_REFRESH_TOKEN", "")
-    assert config.bg_engine_chain() == ["local"]
-
-
-def test_naming_an_engine_without_its_key_falls_back_to_what_is_configured(
-        monkeypatch):
-    """BG_ENGINE is a request, not a promise: a key that isn't there cannot
-    strip a background, and failing every photo instead is worse."""
-    monkeypatch.setattr(config, "BG_ENGINE", "canva")
-    _canva(monkeypatch, configured=False)
-    assert config.bg_engine_chain() == ["local"]
-
-
-def test_local_can_be_demanded_outright(monkeypatch):
-    monkeypatch.setattr(config, "BG_ENGINE", "local")
-    _canva(monkeypatch, configured=True)
-    assert config.bg_engine_chain() == ["local"]
-
-
-def test_the_chain_always_ends_at_local(monkeypatch):
-    """Whatever else is true, there is always something that can answer."""
-    for engine in ("auto", "canva", "local", "nonsense"):
-        monkeypatch.setattr(config, "BG_ENGINE", engine)
-        for configured in (False, True):
-            _canva(monkeypatch, configured=configured)
-            assert config.bg_engine_chain()[-1] == "local"
-
-
-# --- a remote engine does the work -----------------------------------------
-
-def test_a_remote_cutout_never_wakes_the_local_model(chain, no_local,
-                                                     monkeypatch):
-    """The whole point of the latency win: no inference, so no lock either."""
-    chain("canva", "local")
-    asked = []
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)), log=asked))
-
-    img = _photo()
-    out, engine = images.cutout_with_engine(img)
-
-    assert out is not None
-    assert engine == "canva"
-    assert asked == [img.size], "the remote engine got the photo"
-    assert not images._INFER_LOCK.locked()
-
-
-def test_a_remote_cutout_is_composited_on_white(chain, no_local, monkeypatch):
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
-
-    out, _ = images.cutout_with_engine(_photo())
-
+    assert engine == "photoroom"
     assert out.mode == "RGB"
     # A corner is backdrop in the source and white in the cutout.
     assert out.getpixel((5, 5)) == images.WHITE
@@ -191,144 +94,87 @@ def test_a_remote_cutout_is_composited_on_white(chain, no_local, monkeypatch):
 
 
 def test_a_matte_that_comes_back_a_different_size_is_scaled_to_the_photo(
-        chain, no_local, monkeypatch):
+        photoroom):
     """A service answers at the size it was sent, and the upload is capped. An
     alpha of one size against a photo of another understates coverage -- which
     would refuse a perfectly good cutout -- and composites at the wrong size."""
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut((600, 450), (200, 150, 400, 300))))
+    photoroom(returns=lambda rgb: _cut((600, 450), (200, 150, 400, 300)))
 
     img = _photo((1200, 900))
     out, engine = images.cutout_with_engine(img)
 
-    assert out is not None, "a half-size matte must not read as an empty one"
     assert out.size == img.size
-    assert engine == "canva"
+    assert engine == "photoroom"
 
 
-def test_a_remote_matte_is_not_put_through_the_local_models_gates(
-        chain, no_local, monkeypatch):
-    """A thin chain -- a necklace -- is what the shape gate refused on a
-    flawless matte. A remote matte answers coverage and nothing else."""
-    chain("canva", "local")
-
+def test_a_matte_is_not_refused_for_its_shape(photoroom):
+    """A thin chain -- a necklace -- is what the local model's shape gate
+    refused on a flawless matte. A matte answers coverage and nothing else."""
     def _chain_matte(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(out)
         w, h = rgb.size
         # A 6px-wide loop: one object, filling almost none of its own box.
-        draw.ellipse((w // 3, h // 4, 2 * w // 3, 3 * h // 4),
-                     outline=ITEM + (255,), width=6)
+        ImageDraw.Draw(out).ellipse((w // 3, h // 4, 2 * w // 3, 3 * h // 4),
+                                    outline=ITEM + (255,), width=6)
         return out
 
-    _remote(monkeypatch, canva=_engine(returns=_chain_matte))
+    photoroom(returns=_chain_matte)
 
     out, engine = images.cutout_with_engine(_photo())
 
-    assert out is not None, "a remote matte must not be refused for its shape"
-    assert engine == "canva"
+    assert out is not None and engine == "photoroom"
 
 
-def test_a_remote_engine_that_keeps_nothing_is_still_refused(chain,
-                                                             monkeypatch):
-    """The one gate that survives. An empty matte is an empty matte whoever
-    produced it, and shipping it would erase the item — so it is refused and
-    the local model gets its turn instead."""
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: Image.new("RGBA", rgb.size, (0, 0, 0, 0))))
-    # The local model finds nothing either, so the photo is kept as shot.
-    monkeypatch.setattr(images, "_mask",
-                        lambda rgb, wait=None: Image.new("L", rgb.size, 0))
+def test_a_matte_that_keeps_nothing_is_refused_with_a_reason(photoroom):
+    """The one gate that survives. An empty matte would erase the item, so it
+    is refused -- and said, since there is nothing to fall back to."""
+    photoroom(returns=lambda rgb: Image.new("RGBA", rgb.size, (0, 0, 0, 0)))
 
-    out, engine = images.cutout_with_engine(_photo())
-
-    assert out is None, "an empty remote matte must never ship"
-    assert engine == "local"
-
-
-# --- failures fall through, they do not lose the photo ---------------------
-
-def test_a_failed_remote_engine_falls_through_to_the_next_one(chain, no_local,
-                                                              monkeypatch):
-    chain("canva", "other", "local")
-    tried = []
-    _remote(
-        monkeypatch,
-        canva=_engine(raises=cutout_api.CanvaError("has used up its AI credits"),
-                         log=tried),
-        other=_engine(returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)),
-                         log=tried))
-
-    out, engine = images.cutout_with_engine(_photo())
-
-    assert engine == "other", "the second engine answered"
-    assert out is not None
-    assert len(tried) == 2, "both were asked, in order"
-
-
-def test_a_failed_remote_engine_falls_back_to_the_local_model(chain,
-                                                              monkeypatch):
-    """An expired key must not cost the seller their photo."""
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        raises=cutout_api.CanvaError("Reconnect the Canva account")))
-    monkeypatch.setattr(
-        images, "_mask",
-        lambda rgb, wait=None: rgb.convert("L").point(
-            lambda v: 255 if v < 128 else 0))
-
-    out, engine = images.cutout_with_engine(_photo())
-
-    assert out is not None, "the local model picked it up"
-    assert engine == "local"
-
-
-def test_with_no_local_floor_the_reason_reaches_the_seller(chain, monkeypatch):
-    """When local is not in the chain there is nothing to fall back to, so the
-    real cause has to be raised rather than swallowed -- "out of AI credits" is
-    something somebody can act on."""
-    chain("canva")
-    _remote(monkeypatch, canva=_engine(
-        raises=cutout_api.CanvaError(
-            "The Canva account has used up its AI credits")))
-
-    with pytest.raises(cutout_api.CutoutApiError, match="AI credits"):
+    with pytest.raises(cutout_api.CutoutApiError, match="found no item"):
         images.cutout_with_engine(_photo())
 
 
-def test_the_studio_reports_which_engine_answered(chain, no_local, monkeypatch):
-    """remove_background_white's second return value is what the editor shows;
-    hardcoding "local" is how a misconfigured key hides."""
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
+# --- failures say why, they do not lose the photo ---------------------------
 
-    _, engine = images.remove_background_white(_photo())
+def test_a_failure_reaches_the_seller_as_itself(photoroom):
+    """Nothing to fall back to, so the real cause is raised rather than
+    swallowed -- "busy, try again in a minute" is something a seller can act
+    on; a photo quietly kept as shot is not."""
+    photoroom(raises=cutout_api.PhotoroomError("Background removal is busy"))
 
-    assert engine == "canva"
-
-
-def test_the_readiness_probe_names_the_chain(chain):
-    """One field to answer "is the paid engine actually being used?"."""
-    chain("canva", "local")
-    assert images.engine_state()["chain"] == ["canva", "local"]
+    with pytest.raises(cutout_api.CutoutApiError, match="busy"):
+        images.cutout_with_engine(_photo())
 
 
-def test_a_deploy_with_no_paid_engine_is_not_degraded(chain):
-    """local IS the engine there, so the studio must not imply anything is
-    wrong — saying it on every cutout would be pure noise."""
-    chain("local")
-    assert images.engine_degraded("local") is False
+def test_no_key_is_said_rather_than_silently_skipped(photoroom):
+    photoroom(returns=None)
+
+    with pytest.raises(cutout_api.CutoutApiError) as err:
+        images.cutout_with_engine(_photo())
+    assert str(err.value) == cutout_api.UNAVAILABLE
 
 
-def test_falling_back_to_local_with_a_key_configured_is_degraded(chain):
-    """The case worth a word: somebody is paying for an engine that did not
-    answer. Silence here is how an expired key goes unnoticed for weeks."""
-    chain("canva", "local")
-    assert images.engine_degraded("local") is True
-    assert images.engine_degraded("canva") is False
+def test_the_photo_pass_keeps_the_photo_and_carries_the_reason(
+        photoroom, tmp_path):
+    photoroom(raises=cutout_api.PhotoroomError("Background removal is busy"))
+    src = tmp_path / "src.jpg"
+    _photo().save(src, "JPEG", quality=92)
+
+    out = images.optimize(src, tmp_path / "out", remove_bg=True)
+
+    assert out["background_removed"] is False
+    assert out["bg_error"] == "Background removal is busy"
+    assert (tmp_path / "out.jpg").is_file()
+
+
+def test_the_studio_reports_which_engine_answered(photoroom):
+    photoroom(returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600)))
+    _out, engine = images.remove_background_white(_photo())
+    assert engine == "photoroom"
+
+
+def test_the_readiness_probe_names_the_engine():
+    assert images.engine_state()["engine"] == "photoroom"
 
 
 # --- the framed print, which is the loudest half of the complaint ----------
@@ -369,13 +215,12 @@ def _points_inside(kept, step=40, inset=12):
 
 
 def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
-        chain, no_local, monkeypatch):
+        photoroom, monkeypatch):
     """The reported bug: "doesn't try for simple objects (rectangular framed
     print)". It didn't try because the geometric scan returned None, which
     correctly means keep-as-shot. A remote engine can find the frame."""
     img, box = _framed_print()
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(returns=lambda rgb: _cut(rgb.size, box)))
+    photoroom(returns=lambda rgb: _cut(rgb.size, box))
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -387,7 +232,7 @@ def test_a_framed_print_gets_a_cutout_when_the_border_cannot_be_scanned(
         img.getpixel(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
 
 
-def test_a_print_photographed_at_an_angle_is_still_a_print(chain, no_local,
+def test_a_print_photographed_at_an_angle_is_still_a_print(photoroom,
                                                            monkeypatch):
     """The photos this was actually reported on: prints laid on a wooden floor
     and shot hand-held, 39 of them in one batch, every one kept as shot.
@@ -396,31 +241,29 @@ def test_a_print_photographed_at_an_angle_is_still_a_print(chain, no_local,
     box badly -- 0.85 at 5 degrees, 0.74 at 10. Judged that way the fix refuses
     the very photos it exists for, so the rectangle is fitted at the best
     angle instead."""
-    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 3, 5, 8, 12, 20):
         img, _ = _framed_print()
-        _remote(monkeypatch, canva=_engine(
-            returns=lambda rgb, d=deg: _tilted_cut(rgb.size, d)))
+        photoroom(
+            returns=lambda rgb, d=deg: _tilted_cut(rgb.size, d))
 
         assert images.art_cutout(img) is not None, (
             f"a print at {deg} degrees is still a print")
 
 
-def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
+def test_an_angled_print_keeps_every_pixel_of_itself(photoroom,
                                                      monkeypatch):
     """The invariant, on the angled path: the quad must COVER the print. An
     earlier revision turned the corners the wrong way and clipped one corner
     off while taking floor at the opposite one -- accepted/rejected looked
     perfect throughout, and only measuring the overlap showed it."""
-    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     for deg in (0, 5, 12, 20):
         img, _ = _framed_print()
         matte = _tilted_cut(img.size, deg)
-        _remote(monkeypatch, canva=_engine(returns=lambda rgb, m=matte: m))
+        photoroom(returns=lambda rgb, m=matte: m)
 
         out = images.art_cutout(img)
         assert out is not None
@@ -431,7 +274,7 @@ def test_an_angled_print_keeps_every_pixel_of_itself(chain, no_local,
                 f"at {deg} degrees the pixel {xy} inside the print was altered")
 
 
-def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
+def test_a_matte_with_the_mount_dropped_out_is_still_a_print(photoroom,
                                                              monkeypatch):
     """The same hole the geometric scan meets, arriving from a paid engine
     instead: it lets go of a white mount, a pale sky or the glare off the
@@ -441,7 +284,6 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
     is the only thing asked for here — this path takes the matte's SHAPE and
     then fills it solid itself. Measured with the gap still in it, a matted
     print scores below an ellipse and is refused."""
-    chain("canva", "local")
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
     img, box = _framed_print()
 
@@ -452,7 +294,7 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
             fill=(0, 0, 0, 0))
         return cut
 
-    _remote(monkeypatch, canva=_engine(returns=_holed))
+    photoroom(returns=_holed)
 
     out = images.art_cutout(img)
 
@@ -463,14 +305,13 @@ def test_a_matte_with_the_mount_dropped_out_is_still_a_print(chain, no_local,
     assert out.getpixel((5, 5)) == images.WHITE
 
 
-def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
+def test_the_scanned_border_still_wins(photoroom, monkeypatch):
     """Geometry first: it cannot be wrong about what is inside the box it
     returns, so a remote engine is only ever the second opinion."""
     img, box = _framed_print()
-    chain("canva", "local")
     asked = []
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, box), log=asked))
+    photoroom(
+        returns=lambda rgb: _cut(rgb.size, box), log=asked)
     monkeypatch.setattr(artwork, "outline", lambda rgb: (
         ((10, 10), (100, 10), (100, 100), (10, 100)),))
 
@@ -479,7 +320,7 @@ def test_the_scanned_border_still_wins(chain, no_local, monkeypatch):
     assert asked == [], "no remote call when the scan already answered"
 
 
-def test_a_subject_lifted_out_of_a_painting_is_refused(chain, no_local,
+def test_a_subject_lifted_out_of_a_painting_is_refused(photoroom,
                                                        monkeypatch):
     """The baby out of the basket. A remote engine handed a photo OF a picture
     answers the only question it knows -- which part of this is the subject --
@@ -487,25 +328,23 @@ def test_a_subject_lifted_out_of_a_painting_is_refused(chain, no_local,
     rejected because it is not a rectangle at ANY angle: a round subject scores
     0.785 however it is turned, well under the 0.9 floor."""
     img, _ = _framed_print()
-    chain("canva", "local")
 
     def _the_baby(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
         ImageDraw.Draw(out).ellipse((500, 350, 760, 610), fill=ITEM + (255,))
         return out
 
-    _remote(monkeypatch, canva=_engine(returns=_the_baby))
+    photoroom(returns=_the_baby)
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     assert images.art_cutout(img) is None, \
         "a round subject is not a picture's border — keep the photo as shot"
 
 
-def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch):
+def test_nothing_inside_the_border_is_ever_removed(photoroom, monkeypatch):
     """The invariant services/artwork exists for, held on the new path too:
     whatever the remote matte said, what ships is a FILLED RECTANGLE."""
     img, box = _framed_print()
-    chain("canva", "local")
 
     def _holes_in_the_art(rgb):
         """A matte shaped like the frame but with a piece of the artwork
@@ -518,7 +357,7 @@ def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch)
         ImageDraw.Draw(out).ellipse((560, 400, 710, 550), fill=(0, 0, 0, 0))
         return out
 
-    _remote(monkeypatch, canva=_engine(returns=_holes_in_the_art))
+    photoroom(returns=_holes_in_the_art)
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -530,13 +369,12 @@ def test_nothing_inside_the_border_is_ever_removed(chain, no_local, monkeypatch)
             f"pixel {xy} inside the border was altered"
 
 
-def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
+def test_a_picture_still_never_gets_the_remote_matte_itself(photoroom,
                                                             monkeypatch):
     """Art takes a BOX from a remote engine and never its matte. Proven by the
     edges: a rectangle's corners are opaque, and the ellipse the engine
     actually returned would have left them white."""
     img, box = _framed_print()
-    chain("canva", "local")
 
     def _rounded(rgb):
         out = Image.new("RGBA", rgb.size, (0, 0, 0, 0))
@@ -544,7 +382,7 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
                                              fill=ITEM + (255,))
         return out
 
-    _remote(monkeypatch, canva=_engine(returns=_rounded))
+    photoroom(returns=_rounded)
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     out = images.art_cutout(img)
@@ -554,38 +392,15 @@ def test_a_picture_still_never_gets_the_remote_matte_itself(chain, no_local,
         "the corner was rounded off the print — that is the matte, not a box"
 
 
-def test_a_paid_engine_is_still_asked_about_a_border_first(chain, no_local,
-                                                           monkeypatch):
-    """The local model may locate a border now (see
-    test_a_square_object_is_a_product_too.py), and this is where it does not:
-    with a key configured, the engine that was paid for answers, and the
-    local slot is never taken."""
+def test_photoroom_is_asked_once_about_a_border_the_scan_missed(photoroom,
+                                                                 monkeypatch):
+    """One call, and only for the picture whose border the geometric scan
+    could not find -- the photo that was otherwise getting nothing at all."""
     img, box = _framed_print()
-    chain("canva", "local")
     asked = []
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, box), log=asked))
+    photoroom(
+        returns=lambda rgb: _cut(rgb.size, box), log=asked)
     monkeypatch.setattr(artwork, "outline", lambda rgb: None)
 
     assert images.art_cutout(img) is not None
-    assert asked == [img.size], "the paid engine located the border"
-
-
-def test_the_inference_lock_is_untouched_by_a_remote_run(chain, no_local,
-                                                          monkeypatch):
-    """A remote engine must work while the single local slot is BUSY: that is
-    what turns ~104s serialized into a batch that actually moves."""
-    chain("canva", "local")
-    _remote(monkeypatch, canva=_engine(
-        returns=lambda rgb: _cut(rgb.size, (400, 300, 800, 600))))
-
-    held = threading.Lock()
-    monkeypatch.setattr(images, "_INFER_LOCK", held)
-    held.acquire()
-    try:
-        out, engine = images.cutout_with_engine(_photo())
-    finally:
-        held.release()
-
-    assert out is not None, "a remote cutout must not queue behind the model"
-    assert engine == "canva"
+    assert asked == [img.size], "Photoroom located the border, once"

@@ -56,16 +56,13 @@ const DEFAULT_TIMEOUT_MS = 90000;
 // Uploads move real bytes: a bulk batch over a phone connection takes
 // minutes and is not stuck.
 export const UPLOAD_TIMEOUT_MS = 300000;
-// Calls that wait on the background-removal model. The default above is a
-// NETWORK deadline and far too short for these: one isnet inference has been
-// measured at 104s on the production machine (shared CPU, one inference thread
-// by design so the app can keep answering health checks), and the request also
-// queues for the single-flight inference lock before that. At 90s the studio's
-// "Remove background" gave up while its own answer was still being computed —
-// the seller saw a failure, the server finished into a closed socket, and the
-// photo they then saved was the untouched original. ONNX cannot be interrupted
-// mid-run, so the client has to outlast it.
-export const MODEL_TIMEOUT_MS = 240000;
+// Calls that wait on background removal (the photo studio's Remove BG). One
+// Photoroom cutout answers in a few seconds, but the server retries a rate
+// limit or a network blip with backoff (BG_API_TRIES attempts of up to
+// BG_API_TIMEOUT each), and the client has to outlast those retries: giving
+// up first tells the seller it failed while the server is still finishing,
+// and the photo they then save is the untouched original.
+export const MODEL_TIMEOUT_MS = 150000;
 
 // Thin fetch wrapper shared by every API call. Errors surface as friendly
 // messages the UI can toast.

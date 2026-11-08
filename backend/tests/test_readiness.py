@@ -1,4 +1,4 @@
-"""Readiness and the busy path.
+"""Readiness.
 
 Two failure modes that used to look identical from the outside -- "the server
 is fine but full" and "the server is broken" -- and both showed up as a
@@ -6,7 +6,6 @@ spinner that never resolved.
 """
 from __future__ import annotations
 
-import threading
 
 import pytest
 
@@ -66,165 +65,22 @@ def test_health_stays_up_even_when_not_ready(client, monkeypatch):
 
 
 # --- the busy path ----------------------------------------------------------
-def test_a_full_inference_queue_gives_up_instead_of_hanging(monkeypatch):
-    """The 'appears to hang' bug. One inference runs at a time, and the wait
-    for that slot used to be unbounded -- so a studio cutout queued behind a
-    forty-photo batch sat there alive and idle, forever.
-
-    An interactive caller passes its own (short) deadline, because there a
-    prompt "busy, try again" is the useful answer."""
-    from PIL import Image
-
-    images._INFER_LOCK.acquire()
-    try:
-        with pytest.raises(images.CutoutBusy):
-            images._mask(Image.new("RGB", (64, 64), (200, 200, 200)),
-                               wait=0.05)
-    finally:
-        images._INFER_LOCK.release()
+def test_the_engine_state_a_probe_reads_is_cheap_and_complete(monkeypatch):
+    """Which engine cuts backgrounds, whether it has a key, and whether that
+    key only makes watermarked previews. Config only: no network and no
+    model, so it stays as cheap as the rest of the payload. It is here because
+    a missing key shows up nowhere else -- every photo is just kept as shot."""
+    monkeypatch.setattr(images.cutout_api.config, "PHOTOROOM_API_KEY", "")
+    monkeypatch.setattr(images.cutout_api.config, "PHOTOROOM_SANDBOX", False)
+    assert images.engine_state() == {
+        "engine": "photoroom", "ready": False, "sandbox": False}
+    monkeypatch.setattr(images.cutout_api.config, "PHOTOROOM_API_KEY", "k")
+    assert images.engine_state()["ready"] is True
 
 
-def test_a_batch_photo_queues_for_the_model_instead_of_giving_up(monkeypatch):
-    """The other half of that trade, and the more expensive one to get wrong.
+def test_ready_names_the_engine(client):
+    assert client.get("/api/ready").json()["image_engine"]["engine"] == "photoroom"
 
-    A photo in a background batch has nobody watching it, so giving up buys
-    nothing: there is no retry, the photo is just SAVED WITH ITS BACKGROUND
-    STILL ON. One deadline used to serve both callers at 25s -- shorter than a
-    single inference on a loaded box -- so in a batch running two photos at a
-    time, the queued one was guaranteed to time out and keep its background.
-    The batch deadline has to outlast a real queue."""
-    from PIL import Image
-
-    assert images.BATCH_INFER_WAIT_SECONDS >= 120, (
-        "the batch deadline has to outlast a slow inference, or queued photos "
-        "silently keep their backgrounds")
-    assert images.BATCH_INFER_WAIT_SECONDS > images.INFER_WAIT_SECONDS
-
-    # With the slot held, a batch caller (no explicit wait) must still be
-    # waiting when the interactive deadline would already have given up.
-    monkeypatch.setattr(images, "BATCH_INFER_WAIT_SECONDS", 30)
-    monkeypatch.setattr(images, "INFER_WAIT_SECONDS", 0.05)
-    settled = threading.Event()
-    outcome = []
-
-    def _queued_photo() -> None:
-        try:
-            images._mask(Image.new("RGB", (64, 64), (200, 200, 200)))
-            outcome.append("got-the-slot")
-        except images.CutoutBusy:
-            outcome.append("gave-up")
-        except Exception:  # noqa: BLE001 - got the slot, then found no rembg
-            outcome.append("got-the-slot")
-        settled.set()
-
-    worker = threading.Thread(target=_queued_photo, daemon=True)
-    images._INFER_LOCK.acquire()
-    try:
-        worker.start()
-        # Well past the interactive deadline, comfortably short of the batch
-        # one. Neither outcome yet -- still queued -- is the whole point.
-        assert not settled.wait(0.5), f"batch photo settled early: {outcome}"
-    finally:
-        images._INFER_LOCK.release()
-    # Wait on the deadline under test, and JOIN. Both matter.
-    #
-    # The old budget was a flat 5 seconds, which is a bet on the environment
-    # rather than on the behaviour: where rembg is absent (CI installs the
-    # server without it) _alpha_mask raises the moment it has the slot, but
-    # where it is present the winning thread pays for a model load and a real
-    # inference first. On a cold, shared box that overran, and the failure it
-    # produced was `outcome == []` -- which reads as "the photo never got the
-    # slot", the exact opposite of what happened.
-    #
-    # Worse, the thread was left running while holding _INFER_LOCK, so
-    # engine_state()["busy"] stayed True for the rest of the session and the
-    # NEXT test failed too, pointing at a probe that was fine. One slow
-    # machine, two red tests, neither naming the cause. Joining bounds that:
-    # _alpha_mask releases the lock in a finally, so a joined worker cannot
-    # leak it into another test.
-    #
-    # Nothing is loosened by waiting longer. Giving up is not a slow success:
-    # it raises CutoutBusy at BATCH_INFER_WAIT_SECONDS and appends
-    # "gave-up", which still fails the assertion below.
-    worker.join(images.BATCH_INFER_WAIT_SECONDS + 5)
-    assert not worker.is_alive(), (
-        "the queued photo never settled within the batch deadline")
-    assert outcome == ["got-the-slot"]
-
-
-def test_busy_is_retryable_not_a_crash():
-    """CutoutBusy has to be its own type: main maps it to 503 + Retry-After,
-    while an engine's own complaint is a 422 about the photo. Collapsing them
-    tells the seller their photo is bad when the machine was merely busy."""
-    assert issubclass(images.CutoutBusy, RuntimeError)
-    assert not issubclass(images.CutoutBusy, ValueError)
-
-
-def test_the_engine_state_a_probe_reads_is_cheap_and_complete():
-    state = images.engine_state()
-    assert set(state) == {"model", "loaded", "busy", "chain",
-                          "last_inference_seconds", "model_load_seconds"}
-    assert state["busy"] is False
-    # `chain` is the engines that cut a background out, in the order they are
-    # tried. It reads config only -- a few string comparisons, no network and
-    # no model -- so it stays as cheap as the rest of this payload. It is here
-    # because a remote engine whose key is missing, mistyped or expired shows
-    # up nowhere else: the app keeps serving local cutouts and the only symptom
-    # is that they got worse. Always ends at "local", the one engine that needs
-    # no credentials.
-    assert isinstance(state["chain"], list)
-    assert state["chain"][-1] == "local"
-
-
-def test_a_slow_model_load_is_not_reported_as_a_slow_inference(monkeypatch,
-                                                                caplog):
-    """The first call pays for importing onnxruntime and building the session
-    around a 176MB file; that is a load, and it happened once per boot. It
-    was timed under the same clock as the inference behind it, so every
-    deploy's warm-up reported itself as a ~107s inference on /api/ready,
-    fired the slow-inference warning into the error feed, and stayed as the
-    "last inference" until a real photo came through -- which on a quiet day
-    is never. Nothing could then say what an inference actually costs."""
-    import sys
-    import time
-    import types
-
-    from PIL import Image
-
-    fake = types.ModuleType("rembg")
-
-    def new_session(model):
-        time.sleep(0.25)          # the load, deliberately over the slow bar
-        return object()
-
-    def remove(img, session=None, only_mask=False):
-        return Image.new("L", img.size, 255)
-
-    fake.new_session = new_session
-    fake.remove = remove
-    monkeypatch.setitem(sys.modules, "rembg", fake)
-    monkeypatch.setattr(images, "_rembg_session", None)
-    monkeypatch.setattr(images, "_model_ready", False)
-    monkeypatch.setattr(images, "_last_infer_seconds", 0.0)
-    monkeypatch.setattr(images, "_model_load_seconds", 0.0)
-    monkeypatch.setattr(images, "INFER_SLOW_SECONDS", 0.1)
-
-    with caplog.at_level("WARNING", logger="thryft"):
-        images._mask(Image.new("RGB", (64, 64), (200, 200, 200)))
-
-    state = images.engine_state()
-    assert state["loaded"] is True
-    assert state["model_load_seconds"] >= 0.25
-    assert state["last_inference_seconds"] < 0.1, (
-        "the load was counted as the inference")
-    assert not [r for r in caplog.records if "inference took" in r.getMessage()], (
-        "a one-time load was reported as a pathological inference")
-
-
-# --- the housekeeping daemon's decision ------------------------------------
-#
-# reclaim_space() had tests for what it frees; nothing covered when the daemon
-# decides to run it, which is where the defect was.
 
 
 def test_a_full_or_unreadable_volume_counts_as_low():

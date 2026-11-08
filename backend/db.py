@@ -296,6 +296,20 @@ class TokenLedger(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class BgRemovalUsage(Base):
+    """How many photos one seller has had cut out by Photoroom in one
+    calendar month (UTC, "YYYY-MM"). The backstop on the app's own Photoroom
+    bill -- see services/bg_removal. One row per seller per month; a row is
+    never reset, a new month simply starts a new one."""
+
+    __tablename__ = "bg_removal_usage"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)
+    photos: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Notification(Base):
     """An in-app alert for one user — today that means "your item sold".
 
@@ -1608,6 +1622,8 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(TokenLedger).where(TokenLedger.user_id == user_id))
             s.execute(delete(TokenAccount).where(TokenAccount.user_id == user_id))
             s.execute(delete(Notification).where(Notification.user_id == user_id))
+            s.execute(delete(BgRemovalUsage)
+                      .where(BgRemovalUsage.user_id == user_id))
             # Bought labels carry a buyer's name and address; they go with
             # the seller who bought them.
             s.execute(delete(ShippingLabel).where(ShippingLabel.user_id == user_id))
@@ -2393,6 +2409,94 @@ def _token_account(s: Session, user_id: str,
         acct.free_period = period
         acct.free_used = 0
     return acct
+
+
+# --- Background removal usage ---------------------------------------------
+# Same shape as the token functions above: one row, locked, inside one
+# transaction, and None on a database error so services/bg_removal decides
+# what a failure means.
+
+def _bg_usage_row(s: Session, user_id: str, period: str) -> BgRemovalUsage:
+    """Fetch-or-create this seller's row for `period`, locked. The insert race
+    is caught and re-read for the same reason _token_account catches it."""
+    row = s.get(BgRemovalUsage, (user_id, period), with_for_update=True)
+    if row is None:
+        row = BgRemovalUsage(user_id=user_id, period=period, photos=0,
+                             updated_at=_now())
+        s.add(row)
+        try:
+            s.flush()
+        except IntegrityError:
+            s.rollback()
+            row = s.get(BgRemovalUsage, (user_id, period), with_for_update=True)
+            if row is None:
+                raise
+    return row
+
+
+def bg_usage(user_id: str, period: str) -> Optional[int]:
+    """Photos cut out for this seller in `period`; 0 with no database, None
+    when the read failed."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        with Session(eng) as s:
+            row = s.get(BgRemovalUsage, (user_id, period))
+            return int(row.photos) if row else 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: bg_usage failed: {exc}")
+        return None
+
+
+def bg_reserve(user_id: str, period: str, photos: int,
+               limit: int) -> Optional[dict]:
+    """Count `photos` against this month's allowance, atomically.
+
+    {"ok": True, "used": n} when they fit (limit 0 means no cap), {"ok":
+    False, "used": n} when they would go past `limit` -- nothing is counted
+    then -- and None on a database error.
+    """
+    if photos <= 0:
+        return {"ok": True, "used": bg_usage(user_id, period) or 0}
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {"ok": True, "used": 0}
+        with Session(eng) as s:
+            row = _bg_usage_row(s, user_id, period)
+            if limit and row.photos + photos > limit:
+                s.commit()
+                return {"ok": False, "used": int(row.photos)}
+            row.photos += photos
+            row.updated_at = _now()
+            s.commit()
+            return {"ok": True, "used": int(row.photos)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: bg_reserve failed: {exc}")
+        return None
+
+
+def bg_release(user_id: str, period: str, photos: int) -> bool:
+    """Give back `photos` reserved in `period` that were never cut out. Never
+    takes the count below zero."""
+    if photos <= 0:
+        return True
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return True
+        with Session(eng) as s:
+            row = s.get(BgRemovalUsage, (user_id, period), with_for_update=True)
+            if row is None:
+                return True
+            row.photos = max(0, row.photos - photos)
+            row.updated_at = _now()
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: bg_release failed: {exc}")
+        return False
 
 
 def token_status(user_id: str, period: str, free_quota: int) -> Optional[dict]:

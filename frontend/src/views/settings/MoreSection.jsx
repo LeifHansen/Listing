@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BookOpen, Link2, LogOut, Moon, ShieldCheck, Truck, UserRound } from "lucide-react";
+import { BookOpen, Eraser, Link2, LogOut, Moon, ShieldCheck, Truck, UserRound } from "lucide-react";
 import { postJson } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
@@ -8,12 +8,13 @@ import { useToast } from "@/components/ui/Toaster";
 import { Disclosure } from "./Disclosure";
 import { ProfileCard } from "./ProfileCard";
 import { EasyPostCard } from "./EasyPostCard";
+import { BackgroundRemovalCard } from "./BackgroundRemovalCard";
 import { MarketplaceConnections } from "./MarketplaceConnections";
 import { ExpertKnowledge } from "./ExpertKnowledge";
 
 // The rows of the "More" section, by id, so a deep link can open one.
-export const MORE_ROWS = ["profile", "easypost", "marketplaces", "teach-ai",
-                          "appearance", "account"];
+export const MORE_ROWS = ["profile", "bg-removal", "easypost", "marketplaces",
+                          "teach-ai", "appearance", "account"];
 
 /**
  * Everything a seller touches at setup and rarely after, folded into one
@@ -22,7 +23,7 @@ export const MORE_ROWS = ["profile", "easypost", "marketplaces", "teach-ai",
  * the row it names.
  */
 export function MoreSection({ openRow }) {
-  const { easypost, marketplaces, user } = useApp();
+  const { bgRemoval, easypost, marketplaces, user } = useApp();
   const others = (marketplaces || []).filter((m) => m.key !== "ebay");
   const connected = others.filter((m) => m.connected).map((m) => m.label);
   return (
@@ -34,6 +35,17 @@ export function MoreSection({ openRow }) {
       >
         <ProfileCard />
       </Disclosure>
+      {bgRemoval?.available && (
+        <Disclosure
+          id="bg-removal" icon={Eraser} title="Background removal"
+          summary={bgRemoval.active
+            ? "On — tick “Remove background” when you upload"
+            : "Off — turn it on to cut photos out onto white"}
+          defaultOpen={openRow === "bg-removal"} expand={openRow === "bg-removal"}
+        >
+          <BackgroundRemovalCard />
+        </Disclosure>
+      )}
       <Disclosure
         id="easypost" icon={Truck} title="Shipping labels"
         summary={easypost?.connected

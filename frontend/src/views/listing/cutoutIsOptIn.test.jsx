@@ -11,6 +11,11 @@
  * THIS pile, and a stored preference from before the change cannot tick it.
  * The single listing and the bulk pile post to different endpoints by
  * different code paths, so both are read off the wire.
+ *
+ * And above the pile, the seller: background removal is Photoroom's, on the
+ * app's account, and a seller's photos go there only once they have switched
+ * it on in Settings. Until then the uploader offers a way to Settings instead
+ * of the toggle, and sends nothing to cut.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -34,12 +39,17 @@ function ok(body) {
 
 let root;
 let host;
+// What GET /api/bg-removal/status answers. Switched on unless a test says
+// otherwise: most of these are about the toggle itself.
+let bgStatus;
+const BG_ON = { available: true, active: true, needs_activation: true, used: 0, limit: 1000 };
 
 /** Every upload the app made, as {url, form}. */
 function recordUploads() {
   const sent = [];
   vi.stubGlobal("fetch", vi.fn((url, opts) => {
     const u = String(url);
+    if (u.includes("/api/bg-removal/status")) return ok(bgStatus);
     if (u.includes("/api/upload") || u.includes("/api/bulk/upload")) {
       sent.push({ url: u, form: opts.body });
       return ok({ session_id: "s1", job_id: "j1" });
@@ -93,6 +103,8 @@ async function press(label) {
 }
 
 beforeEach(() => {
+  bgStatus = BG_ON;
+  recordUploads();
   localStorage.clear();
   // lib/api refuses a photo-bearing call without the stored AI consent, and
   // these tests are about the body of that call.
@@ -151,14 +163,42 @@ describe("background removal is opt-in", () => {
     const sent = recordUploads();
     await mountUploader();
     await pickPhotos(2);
-    // Bulk mode: the second toggle on the card once there are two photos.
+    // Bulk mode: the toggle the card adds once there are two photos.
     await act(async () => {
-      host.querySelectorAll('input[type="checkbox"]')[1].click();
+      [...host.querySelectorAll('input[type="checkbox"]')]
+        .find((c) => c.closest("label")?.textContent.includes("Bulk mode"))
+        .click();
     });
     await press("Split 2 photos into listings");
 
     const batch = sent.find((s) => s.url.includes("/api/bulk/upload"));
     expect(batch, "no batch was sent").toBeTruthy();
     expect(batch.form.get("remove_bg")).toBe("false");
+  });
+});
+
+describe("background removal is switched on per seller", () => {
+  it("isn't offered until the seller switches it on in Settings", async () => {
+    bgStatus = { ...BG_ON, active: false };
+    const sent = recordUploads();
+    await mountUploader();
+    await pickPhotos();
+
+    expect(cutoutToggle()).toBeUndefined();
+    const link = [...host.querySelectorAll("button")]
+      .find((b) => b.textContent.includes("Turn on background removal"));
+    expect(link, "no way to Settings was offered").toBeTruthy();
+
+    await press("Identify with AI");
+    expect(sent[0].form.get("remove_bg")).toBe("false");
+  });
+
+  it("isn't mentioned at all when the server can't remove backgrounds", async () => {
+    bgStatus = { available: false, active: false, needs_activation: true };
+    await mountUploader();
+    await pickPhotos();
+
+    expect(cutoutToggle()).toBeUndefined();
+    expect(host.textContent).not.toContain("background removal");
   });
 });

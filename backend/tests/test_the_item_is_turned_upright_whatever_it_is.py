@@ -305,8 +305,12 @@ def test_a_turn_the_second_look_does_not_pick_is_not_applied(tmp_path, model):
 def test_the_turn_happens_before_the_cutout_so_the_shadow_falls_below(tmp_path, model, monkeypatch):
     """The contact shadow is drawn down and right of the item. Turned after
     the cutout, an upright item would carry its shadow up its left side."""
-    monkeypatch.setattr(images, "_mask", lambda rgb, wait=None:
-                        rgb.convert("L").point(lambda v: 255 if v < 128 else 0))
+    def _engine(rgb):
+        # Photoroom stood in for by a matte of the photo's dark pixels.
+        cut = rgb.convert("RGBA")
+        cut.putalpha(rgb.convert("L").point(lambda v: 255 if v < 128 else 0))
+        return cut
+    monkeypatch.setattr(images.cutout_api, "photoroom_cutout", _engine)
     src = _photo(tmp_path, size=(1200, 900))
     model.answers = [_screen({"rotate": 90, "sure": True}), _confirm("B")]
     (out,) = images.optimize_batch([(src, tmp_path / "out")], remove_bg=True)

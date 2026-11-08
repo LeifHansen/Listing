@@ -5,8 +5,8 @@ name: Gates
 #
 # It exists because those two were separate copies of the same intent and had
 # already drifted: deploy.yml gated production on the lightweight lint + unit
-# job ALONE. The cutout-safety suite (which decides whether the background
-# remover ate the seller's product), the frontend build (the only thing that
+# job ALONE. The cutout-safety suite (which decides what the photo pass does
+# with a seller's photo and a background-removal matte), the frontend build (the only thing that
 # type-checks the JSX) and the smoke test (the only thing that catches a
 # screen a seller cannot open) never gated a deploy at all — and because
 # ci.yml triggers only on `pull_request`, a direct push to main or a manual
@@ -75,10 +75,12 @@ jobs:
   # so nothing here would go unrun without it. What it proves that `smoke`
   # cannot is that the pass deciding what a seller's photo looks like on eBay
   # -- as shot or cut out, upright, no EXIF, resumable -- works on PILLOW
-  # ALONE: no rembg, no onnxruntime, no model download, no Anthropic SDK,
-  # with the cutout model stood in for by a matte the tests draw themselves
-  # and the orientation model by canned answers. It is also ten seconds, so
-  # a broken photo pass says so before the four-minute job gets there.
+  # ALONE: no httpx, no Photoroom key, no network, no Anthropic SDK, with
+  # Photoroom stood in for by a matte the tests draw themselves and the
+  # orientation model by canned answers. It is also ten seconds, so a broken
+  # photo pass says so before the four-minute job gets there. (What talks to
+  # Photoroom's wire needs httpx and is proved in `smoke`, in
+  # test_a_cutout_api_failure_is_explained.py.)
   #
   # Its list of files is therefore a deliberate narrowing, not the kind that
   # bit us in `smoke` -- see the note there. A new photo test left off this
@@ -109,12 +111,7 @@ jobs:
                  backend/tests/test_the_camera_tag_is_honoured_at_phone_size.py \
                  backend/tests/test_a_transparent_photo_does_not_go_black.py \
                  backend/tests/test_photo_resume.py \
-                 backend/tests/test_the_cutout_does_not_eat_the_artwork.py \
                  backend/tests/test_a_painting_is_never_cut_into.py \
-                 backend/tests/test_the_cutout_does_not_leave_a_ghost.py \
-                 backend/tests/test_the_cutout_does_not_punch_a_hole_in_the_garment.py \
-                 backend/tests/test_the_cutout_does_not_ship_an_empty_picture_frame.py \
-                 backend/tests/test_a_thin_product_is_still_a_product.py \
                  backend/tests/test_a_close_up_of_a_tag_keeps_its_background.py \
                  backend/tests/test_the_ai_reads_the_photo_the_camera_saw.py \
                  backend/tests/test_a_remote_cutout_engine_does_the_work.py \
@@ -184,16 +181,13 @@ jobs:
       - name: Publish bar is reachable
         run: npm run reach
         working-directory: frontend
-      # Installed FROM requirements.txt, minus only the two packages the app
-      # imports lazily (rembg pulls onnxruntime and a ~176MB model). A
-      # hand-written second list is what put this job in a loop: it was missing
-      # anthropic, then python-multipart, each found one CI run at a time.
-      # Deriving it from the real file means a new dependency cannot drift out
-      # of sync with what the app actually needs to boot.
+      # Installed FROM requirements.txt, all of it. A hand-written second
+      # list is what put this job in a loop: it was missing anthropic, then
+      # python-multipart, each found one CI run at a time. Deriving it from the
+      # real file means a new dependency cannot drift out of sync with what the
+      # app actually needs to boot.
       - name: Server deps
-        run: |
-          grep -vE '^(rembg|onnxruntime)' requirements.txt > /tmp/ci-reqs.txt
-          pip install -r /tmp/ci-reqs.txt pytest
+        run: pip install -r requirements.txt pytest
       # THE WHOLE SUITE, against the dependencies the app actually ships with.
       #
       # This is the only job with fastapi AND Pillow AND anthropic together,
@@ -232,9 +226,8 @@ jobs:
           # -rs above prints the reason for each, so a failure says which
           # test and why rather than only that the count was not zero.
           #
-          # If a test ever genuinely cannot run in CI (it wants rembg, say,
-          # which is the one thing deliberately left out of the deps above),
-          # do NOT let it skip: mark it and DESELECT it here with
+          # If a test ever genuinely cannot run in CI (it wants a live API
+          # key, say), do NOT let it skip: mark it and DESELECT it here with
           # `-m "not <marker>"`. Deselecting is visible in this file and
           # keeps this guard meaning what it says; skipping hides the
           # exclusion inside the test and buys back the whole problem.

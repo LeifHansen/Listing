@@ -418,60 +418,35 @@ def serpapi_ready() -> bool:
     return bool(SERPAPI_KEY)
 
 
-# --- Background removal: which engine strips photo backgrounds -------------
-# BG_ENGINE picks the engine, and the value is the FIRST entry of a chain that
-# always ends at "local":
-#   "canva"     — Canva's REST API: the `background_removal` image
-#                 transformation (a PREVIEW API) on the Canva account an
-#                 operator connected with scripts/canva_authorize.py. Canva
-#                 owns remove.bg, and this is where its remover lives now that
-#                 the standalone remove.bg API shuts down 2026-12-01. Needs
-#                 CANVA_CLIENT_ID, CANVA_CLIENT_SECRET and CANVA_REFRESH_TOKEN,
-#                 a Canva Pro plan on the connected account, and spends one of
-#                 that account's AI credits per photo. services/cutout_api has
-#                 the four-job round trip and the rate limits.
-#   "local"     — the in-house rembg model on this server (free per photo;
-#                 tunables REMBG_MODEL / REMBG_MAX_SIDE are read in
-#                 services/images). Always available, so it is the floor.
-#   "auto"      — the default: canva when it has credentials, then local.
+# --- Background removal: Photoroom ----------------------------------------
+# Photo backgrounds come off through Photoroom's Remove Background API
+# (services/cutout_api). The app owns ONE Photoroom account and key: Photoroom
+# has no API for creating accounts or keys on a seller's behalf, so instead
+# each seller switches the feature on for themselves in Settings, which is
+# where they agree to their photos being sent to Photoroom
+# (services/bg_removal). Without a key the feature is simply unavailable: the
+# uploader hides the toggle and a photo is never cut.
 #
-# The local model needs no credentials, so a deploy that sets nothing keeps
-# working exactly as it did and spends nothing. The remote engine only runs
-# when all three of its credentials are present.
-#
-# Whatever the chain, a failed engine never loses a photo: the original is
-# kept and the exact reason (reconnect / out of AI credits / rate limit) is
-# surfaced — never a silent mangled cutout.
-BG_ENGINE = os.getenv("BG_ENGINE", "auto").strip().lower() or "auto"
-
-CANVA_CLIENT_ID = _env("CANVA_CLIENT_ID")
-CANVA_CLIENT_SECRET = _env("CANVA_CLIENT_SECRET")
-# The SEED refresh token, from scripts/canva_authorize.py. Canva rotates the
-# refresh token on every use, so the live one is kept under DATA_DIR by
-# services/cutout_api; this value is read at first use, and again whenever the
-# persisted one is refused -- which is how re-seeding it after a breakage works.
-CANVA_REFRESH_TOKEN = _env("CANVA_REFRESH_TOKEN")
+# A key that starts with `sandbox_` is Photoroom's free test key. It works,
+# but every cutout carries a watermark -- fine on a laptop, never in
+# production, so it is warned about below and named in /api/ready.
+PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
+PHOTOROOM_SANDBOX = PHOTOROOM_API_KEY.startswith("sandbox_")
 
 
-def canva_ready() -> bool:
-    return bool(CANVA_CLIENT_ID and CANVA_CLIENT_SECRET and CANVA_REFRESH_TOKEN)
+def photoroom_ready() -> bool:
+    return bool(PHOTOROOM_API_KEY)
 
 
-def bg_engine_chain() -> list[str]:
-    """Background-removal engines to try, in order. Always non-empty: the
-    local model needs no credentials, so it's the floor. An explicit BG_ENGINE
-    whose credentials are missing falls back to the local model (with a
-    warning at import time, below)."""
-    if BG_ENGINE == "local":
-        return ["local"]
-    if canva_ready():
-        return ["canva", "local"]
-    return ["local"]
+# The most photos one seller may have cut out in a calendar month (UTC). The
+# token charge is the price; this is the backstop on the app's Photoroom bill,
+# and it holds when token billing is off too. 0 means no cap.
+BG_REMOVAL_MONTHLY_LIMIT = max(0, _env_int("BG_REMOVAL_MONTHLY_LIMIT", 1000))
 
-
-if BG_ENGINE not in ("auto", "local") and BG_ENGINE not in bg_engine_chain():
-    log.warning("BG_ENGINE=%r isn't fully configured (missing credentials?) — "
-                "using %s instead.", BG_ENGINE, "/".join(bg_engine_chain()))
+if PHOTOROOM_SANDBOX:
+    log.warning("PHOTOROOM_API_KEY is a sandbox key — every background "
+                "removal will carry a Photoroom watermark. Use a live key in "
+                "production.")
 
 
 # --- eBay ------------------------------------------------------------------
@@ -958,9 +933,7 @@ def _watched_names() -> list[tuple[str, str]]:
         ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
         ("STRIPE_WEBHOOK_SECRET", STRIPE_WEBHOOK_SECRET),
         ("SERPAPI_KEY", SERPAPI_KEY),
-        ("CANVA_CLIENT_ID", CANVA_CLIENT_ID),
-        ("CANVA_CLIENT_SECRET", CANVA_CLIENT_SECRET),
-        ("CANVA_REFRESH_TOKEN", CANVA_REFRESH_TOKEN),
+        ("PHOTOROOM_API_KEY", PHOTOROOM_API_KEY),
         ("EBAY_VERIFICATION_TOKEN", EBAY_VERIFICATION_TOKEN),
         ("R2_ACCOUNT_ID", R2_ACCOUNT_ID),
         ("R2_ACCESS_KEY_ID", R2_ACCESS_KEY_ID),
@@ -1002,6 +975,13 @@ def config_warnings() -> list[str]:
         warnings.append(
             f"IDENTIFY_PROVIDER={IDENTIFY_PROVIDER!r} is not one of "
             f"auto/google/anthropic — it is being read as 'auto'.")
+    # Works, and so says nothing: every cutout comes back watermarked and goes
+    # onto eBay that way unless somebody looks closely at a listing photo.
+    if PHOTOROOM_SANDBOX:
+        warnings.append(
+            "PHOTOROOM_API_KEY is a sandbox key (it starts with 'sandbox_'), so "
+            "every background removal carries a Photoroom watermark — set a "
+            "live key from the Photoroom API dashboard.")
     stray = _flag_set_but_false("TOKENS_ENABLED")
     if stray:
         warnings.append(

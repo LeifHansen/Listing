@@ -67,6 +67,13 @@ const NO_EBAY = {
 // dialog must not offer to connect an account the shell simply hasn't
 // checked on.
 const NO_EASYPOST = { connected: false, test: false, key_hint: "", loaded: false };
+// Background removal (Photoroom, on the app's account): `available` is the
+// server having a key at all, `active` is this seller having switched it on in
+// Settings. The uploader offers its toggle only when both are true.
+const NO_BG_REMOVAL = {
+  available: false, active: false, needs_activation: true, used: 0, limit: 0,
+  resets_on: "", sandbox: false, loaded: false,
+};
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
   conversations: [], unread: 0, sources: [], available: false, reason: "",
@@ -434,6 +441,29 @@ export function AppProvider({ children }) {
   // rule on failure, because a fetch that fails is not "disconnected", and the
   // shipping dialog reads this to decide whether to offer rates or a Connect
   // button.
+  // Background removal, loaded beside it on the same keep-previous rule: a
+  // failed read is not "switched off", and the uploader decides from this
+  // whether to offer the toggle.
+  const [bgRemoval, setBgRemoval] = useState(NO_BG_REMOVAL);
+  const loadBgRemovalStatus = useCallback(async () => {
+    try {
+      const s = await api("/api/bg-removal/status");
+      const next = {
+        available: !!s.available,
+        active: !!s.active,
+        needs_activation: s.needs_activation !== false,
+        used: Number(s.used) || 0,
+        limit: Number(s.limit) || 0,
+        resets_on: s.resets_on || "",
+        sandbox: !!s.sandbox,
+        loaded: true,
+      };
+      setBgRemoval(next);
+      return next;
+    } catch (e) { /* keep previous */ }
+    return null;
+  }, []);
+
   const [easypost, setEasypost] = useState(NO_EASYPOST);
   const loadEasypostStatus = useCallback(async () => {
     try {
@@ -1654,6 +1684,7 @@ export function AppProvider({ children }) {
     setThreads({});
     setEbay(NO_EBAY);
     setEasypost(NO_EASYPOST);
+    setBgRemoval(NO_BG_REMOVAL);
     setPoliciesData(null);
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
@@ -1690,7 +1721,8 @@ export function AppProvider({ children }) {
 
     loadEbayStatus();
     loadEasypostStatus();
-  }, [loadEbayStatus, loadEasypostStatus]);
+    loadBgRemovalStatus();
+  }, [loadEbayStatus, loadEasypostStatus, loadBgRemovalStatus]);
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
@@ -1827,8 +1859,9 @@ export function AppProvider({ children }) {
     loadAuth();
     loadEbayStatus();
     loadEasypostStatus();
+    loadBgRemovalStatus();
     loadMarketplaces();
-  }, [loadHealth, loadAuth, loadEbayStatus, loadEasypostStatus, loadMarketplaces]);
+  }, [loadHealth, loadAuth, loadEbayStatus, loadEasypostStatus, loadBgRemovalStatus, loadMarketplaces]);
 
   // Refresh the listings cache (and per-user marketplace connections) when
   // auth changes (login/logout).
@@ -1896,6 +1929,7 @@ export function AppProvider({ children }) {
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
     easypost, loadEasypostStatus,
+    bgRemoval, loadBgRemovalStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -1928,6 +1962,7 @@ export function AppProvider({ children }) {
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     easypost, loadEasypostStatus,
+    bgRemoval, loadBgRemovalStatus,
     etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,
