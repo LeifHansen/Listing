@@ -45,6 +45,7 @@ from PIL import (Image, ImageChops, ImageFile, ImageFilter, ImageOps,
 
 from .. import config
 from ..config import log
+from ..ebay_errors import PHOTO_MIN_SIDE
 from ..storage import natural_key
 from . import artwork
 
@@ -64,6 +65,27 @@ except Exception:  # noqa: BLE001
     pass
 
 TARGET_SIZE = 1600  # px, longest side per eBay's zoom recommendation
+
+
+def below_ebay_minimum(paths) -> list[Path]:
+    """The photos in `paths` that eBay would refuse for size: a longest side
+    under PHOTO_MIN_SIDE (see ebay_errors.photos_too_small). This app never
+    upscales, so a photo that arrived small (adopted from an eBay listing that
+    was first put up with small photos, say) stays small.
+
+    Only a photo that opens and measures small is counted. One that is missing
+    or won't decode is left to the caller's own checks and to eBay. This is a
+    size check, and a guess about an unreadable file would block a listing
+    over a problem it might not have. Reads the header only, not the pixels."""
+    small = []
+    for path in paths:
+        try:
+            with Image.open(path) as img:
+                if max(img.size) < PHOTO_MIN_SIDE:
+                    small.append(Path(path))
+        except Exception:  # noqa: BLE001 - unreadable is not "small"
+            continue
+    return small
 # 90 is the knee: below it JPEG starts showing ringing on the hard
 # subject/white edge a cutout creates, above it the file grows for detail
 # eBay's own re-encode discards anyway.

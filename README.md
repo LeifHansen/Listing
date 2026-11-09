@@ -2096,6 +2096,11 @@ problem:
   for Finish all. The filled-in details stay on the listing, still marked, and
   go to eBay with the save that replaces the photos. The editor's message for
   this refusal names the 500-pixel minimum instead of "re-upload clear photos".
+  **End & relist checks first** (`images.below_ebay_minimum`). Its new
+  listing carries the same photos, so eBay would refuse it, and by then the
+  original is already ended. A listing with any photo under 500 pixels is
+  skipped before anything is copied or ended, and the seller is told to swap
+  in bigger photos.
 - **Finish details → "Enrich all"** fills every listing on the list in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft
