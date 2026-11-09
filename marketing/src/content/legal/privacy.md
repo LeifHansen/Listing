@@ -30,6 +30,10 @@ used.
 
 - Uploaded photos are sent to Anthropic's Claude API to identify the item and
   draft the listing text.
+- If you turn on background removal in Settings, the photos you choose to have
+  their background removed are sent to Photoroom, which cuts the item out and
+  sends it back. Nothing about your account is shared with Photoroom, and no
+  photo is sent there until you turn the feature on.
 - Listing details and photos are sent to the marketplaces you choose (eBay
   today) when you ask us to suggest categories or publish a listing there.
 - Account and listing data are stored in our database (hosted on Neon) so your
@@ -40,7 +44,8 @@ used.
 ## What we don't do
 
 - We do not sell your data or share it with anyone beyond the service providers
-  named above (Anthropic, the marketplaces you connect — eBay today —
+  named above (Anthropic, Photoroom if you turn on background removal, the
+  marketplaces you connect — eBay today —
   our payment processor Stripe, and our hosting/storage providers Fly.io, Neon,
   and Cloudflare).
 - We do not use your photos or listings for advertising.
