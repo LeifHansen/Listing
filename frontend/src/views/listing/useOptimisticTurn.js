@@ -3,8 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /* useOptimisticTurn — the quarter-turn a photo shows the moment its rotate
  * button is tapped, held until the re-encoded file is the one on screen.
  *
- * Shared by the editor's PhotoTile and the listing card, which both show a
- * photo whose bytes the server rewrites in place on a rotate. Rotation
+ * Used by the listing card, which shows a photo whose bytes the server
+ * rewrites in place on a rotate. (The editor's PhotoTile carried the same
+ * rotate until its buttons gave way to drag-to-reorder; the studio's Rotate
+ * turns the canvas instead and writes nothing until Save.) Rotation
  * applies instantly: the <img> is turned with CSS ahead of the server, and
  * that turn holds until the rotated file has loaded, so there is no flash of
  * the old orientation in between.

@@ -546,8 +546,9 @@ export function useListingForm() {
 
   // One-tap 90° clockwise rotate; only the rotated tile refreshes.
   //
-  // RETHROWS after the toast. The tile turns its photo the moment the button
-  // is pressed and undoes that turn if the rotate fails (see PhotoTile) — and
+  // RETHROWS after the toast. The listing card turns its photo the moment the
+  // button is pressed and undoes that turn if the rotate fails (see
+  // useOptimisticTurn) — and
   // swallowing the error here meant the undo never ran. The photo stayed
   // turned on screen while the saved file was untouched, and since a failed
   // rotate also bumps no version, nothing else came along to correct it: the

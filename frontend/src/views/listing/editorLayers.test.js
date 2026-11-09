@@ -10,7 +10,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
-  layersFrom, pushOperation, pushStroke, replay, snapshot,
+  layersFrom, pushOperation, pushStroke, replay, rotateQuarter, snapshot,
 } from "./editorLayers";
 
 function fakeImage(width = 100, height = 80) {
@@ -153,5 +153,26 @@ describe("snapshots", () => {
     expect(other.height).toBe(80);
     expect(restored).toHaveLength(1);
     expect(calls(other.mask).filter((c) => c.op === "stroke")).toHaveLength(1);
+  });
+});
+
+describe("rotateQuarter", () => {
+  it("turns the picture a quarter clockwise into a canvas with its sides swapped", () => {
+    const out = rotateQuarter(fakeImage(100, 80));
+    expect(out.width).toBe(80);
+    expect(out.height).toBe(100);
+    const ops = calls(out);
+    // Pivot to the new top-right corner, turn, draw: the picture's top edge
+    // becomes the right edge, which is what clockwise means.
+    const translate = ops.find((c) => c.op === "translate");
+    expect(translate.args).toEqual([80, 0]);
+    const rotate = ops.find((c) => c.op === "rotate");
+    expect(rotate.args[0]).toBeCloseTo(Math.PI / 2);
+    expect(ops.findIndex((c) => c.op === "drawImage")).toBeGreaterThan(ops.indexOf(rotate));
+  });
+
+  it("gives the studio a frame it can rebuild the layers around", () => {
+    const next = layersFrom(rotateQuarter(fakeImage(100, 80)));
+    expect([next.width, next.height]).toEqual([80, 100]);
   });
 });

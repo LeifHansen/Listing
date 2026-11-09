@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import {
   Plus, X, TrendingUp, ExternalLink, Truck, AlertTriangle,
   Sparkles, Loader2, Pencil, ChevronDown, ChevronRight,
   Video as VideoIcon,
 } from "lucide-react";
-import { cn, formatMoney } from "@/lib/utils";
+import { cn, formatMoney, mediaUrl } from "@/lib/utils";
 import { postJson, isPhotoFile, isVideoFile, PHOTO_ACCEPT, VIDEO_ACCEPT } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { charmPrice } from "@/lib/charmPrice";
@@ -20,6 +21,7 @@ import { Field, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { Section } from "./Section";
 import { PhotoTile } from "./PhotoTile";
+import { useDragReorder, moved } from "./useDragReorder";
 import {
   ShippingPolicySelect, useFulfillmentPolicies, usePolicyIsOrphaned,
 } from "./ShippingPolicySelect";
@@ -67,16 +69,21 @@ export function PhotosCard({ w, onEdit, onDelete, onRemoveVideo }) {
   const formImages = w.form.images || [];
   const { toast } = useToast();
 
-  // Move a photo one place, or to the front. Both go through reorderImages,
-  // which persists the order and rolls the card back if the server refuses.
+  // Carry a photo from one slot to another — a drop, or an arrow key on a
+  // focused tile. Goes through reorderImages, which persists the order and
+  // rolls the card back if the server refuses.
   const moveTo = (from, to) => {
     const imgs = w.form.images || [];
-    if (from < 0 || to < 0 || to >= imgs.length || from === to) return;
-    const next = [...imgs];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    w.reorderImages(next);
+    const next = moved(imgs, from, to);
+    if (next !== imgs) w.reorderImages(next);
   };
+  const { drag, tileProps, wasDrag } = useDragReorder({
+    count: formImages.length, onMove: moveTo,
+  });
+  // While a photo is lifted the grid shows the order it WOULD have if it
+  // were dropped here, and the lifted photo itself rides under the pointer
+  // as a ghost. The slots stay put; the tiles animate between them.
+  const shownImages = drag ? moved(formImages, drag.from, drag.over) : formImages;
 
   // ---------- drop photos straight onto the grid ----------
   // Files dragged from the desktop land here. Gated on the "Files" type so an
@@ -167,7 +174,7 @@ export function PhotosCard({ w, onEdit, onDelete, onRemoveVideo }) {
       id="photos" title="Photos"
       hint={fromEbay
         ? "The photos on your live eBay listing"
-        : "Drop more photos anywhere in here. The first photo is your eBay main image — tap Main on any other photo to promote it, or ‹ › to nudge one place. One-tap rotate & delete; hover Edit to clean up or crop"}
+        : "Drop more photos anywhere in here. The first photo is your eBay main image — drag any photo to reorder (press and hold on a phone). Tap a photo to clean up, crop or rotate it; the bin removes it"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
@@ -183,22 +190,50 @@ export function PhotosCard({ w, onEdit, onDelete, onRemoveVideo }) {
         onDragLeave={onFileDragLeave}
         onDrop={onFileDrop}
       >
-        {formImages.map((name, i) => (
-          <PhotoTile
+        {shownImages.map((name, slot) => (
+          // `layout` carries a tile to its new slot instead of teleporting
+          // it, both during the drag preview and when the order is committed.
+          <motion.div
             key={name}
-            sessionId={w.sessionId}
-            name={name}
-            index={i}
-            total={formImages.length}
-            version={w.imageVersions[name] || w.imageBase}
-            reorderable={formImages.length > 1}
-            onEdit={() => onEdit(name)}
-            onDelete={() => onDelete(name)}
-            onRotate={() => w.rotateImage(name)}
-            onMakeMain={() => moveTo(i, 0)}
-            onMove={(delta) => moveTo(i, i + delta)}
-          />
+            layout
+            transition={{ layout: { duration: 0.18, ease: "easeOut" } }}
+            className="min-w-0"
+          >
+            <PhotoTile
+              sessionId={w.sessionId}
+              name={name}
+              index={slot}
+              total={formImages.length}
+              version={w.imageVersions[name] || w.imageBase}
+              onEdit={() => onEdit(name)}
+              onDelete={() => onDelete(name)}
+              // The handlers belong to the SLOT, not the photo: the gesture
+              // began on slot N and keeps reporting there, whichever photo
+              // the preview has since put in it.
+              dragProps={tileProps(slot)}
+              lifted={!!drag && name === formImages[drag.from]}
+              wasDrag={wasDrag}
+            />
+          </motion.div>
         ))}
+        {drag && createPortal(
+          <div
+            aria-hidden
+            className="fixed z-50 pointer-events-none rounded-tile overflow-hidden
+              shadow-float ring-2 ring-blue scale-105"
+            style={{
+              left: drag.rect.left + drag.dx, top: drag.rect.top + drag.dy,
+              width: drag.rect.width, height: drag.rect.height,
+            }}
+          >
+            <img
+              src={`${mediaUrl(w.sessionId, formImages[drag.from])}?v=${
+                w.imageVersions[formImages[drag.from]] || w.imageBase}`}
+              alt="" className="size-full object-cover" draggable={false}
+            />
+          </div>,
+          document.body,
+        )}
         {/* Add more photos — optimizes + appends to this listing. */}
         <label className={cn(
           "relative rounded-tile border-2 border-dashed border-line bg-bg-sunken/40 aspect-square",
