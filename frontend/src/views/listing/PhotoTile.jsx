@@ -9,6 +9,7 @@ import { cn, mediaUrl } from "@/lib/utils";
  * it somewhere else in the order, arrow keys to move it when focused. The
  * previous tile carried rotate, "Main", ‹ › and a hover Edit as well, and on
  * a phone-sized grid the six of them covered the picture they were about.
+ * Rotate moved into the studio with the other edits.
  *
  * The drag itself lives in useDragReorder, owned by the grid; this tile just
  * takes the handlers it is given. `focused` is `isMain` for the blue ring —

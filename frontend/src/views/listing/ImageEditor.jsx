@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  RotateCcw, Crop, Eraser, Wand2, Paintbrush, Undo2, Redo2, Brush, Eye,
-  History,
+  RotateCcw, RotateCw, Crop, Eraser, Wand2, Paintbrush, Undo2, Redo2, Brush,
+  Eye, History,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -11,7 +11,7 @@ import { api, MODEL_TIMEOUT_MS } from "@/lib/api";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
-  layersFrom, pushOperation, pushStroke, replay, snapshot,
+  layersFrom, pushOperation, pushStroke, replay, rotateQuarter, snapshot,
 } from "./editorLayers";
 
 /* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
@@ -19,6 +19,7 @@ import {
    - Remove background: in-house cutout onto pure white
    - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
    - Crop: drag a rectangle; it applies the moment you release
+   - Rotate: a quarter turn clockwise per tap, on the canvas (client-side)
    - Restore / Erase brushes, undo/redo, and Compare
 
    Nothing here is destructive. The original photo stays underneath the cutout
@@ -391,6 +392,26 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
   }, [cropRect, clearOverlay, commitOperation, toast]);
 
+  // Rotate 90° clockwise. On the canvas, not through /api/rotate-image: the
+  // studio's contract is that nothing is written until Save, and a server
+  // rotate would rewrite the file under an edit still in progress. It is one
+  // undoable step like crop, and like crop it changes the frame, so the
+  // layer stack is rebuilt around the turned picture (see rotateQuarter).
+  const rotate = useCallback(() => {
+    const canvas = canvasRef.current;
+    const layers = layersRef.current;
+    if (!canvas || !layers || aiBusy) return;
+    // Compose fresh: Compare may have painted the original onto the canvas.
+    compose(layers, canvas);
+    // A half-dragged crop belongs to the old frame.
+    setCropRect(null);
+    liveRect.current = null;
+    cropStart.current = null;
+    clearOverlay();
+    commitOperation(rotateQuarter(canvas));
+    toast("Rotated — Undo to take it back, Save to keep it.", { kind: "success" });
+  }, [aiBusy, clearOverlay, commitOperation, toast]);
+
   // Crop applies the moment you release the drag — no separate Apply button.
   useEffect(() => {
     if (cropRect) applyCrop();
@@ -605,6 +626,10 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         <Tool icon={Crop} label="Crop" active={tool === "crop"}
           onClick={toggleCropTool} disabled={!!aiBusy} />
+        {/* The one-tap rotate that used to sit on the photo tile, before the
+            tile's buttons gave way to drag-to-reorder. */}
+        <Tool icon={RotateCw} label="Rotate" onClick={rotate} disabled={!!aiBusy}
+          title="Rotate 90° clockwise" />
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         <Tool icon={Undo2} label="Undo" onClick={undo} disabled={!canUndo || !!aiBusy} />
         <Tool icon={Redo2} label="Redo" onClick={redo} disabled={!canRedo || !!aiBusy} />

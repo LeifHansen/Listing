@@ -94,6 +94,24 @@ export function drawStroke(layers, stroke) {
   ctx.restore();
 }
 
+// A quarter turn clockwise of one image (or canvas), into a fresh canvas
+// with its sides swapped. The studio rotates the COMPOSED picture and
+// rebuilds the layer stack around it, the way crop does: both change the
+// frame, so strokes recorded in the old frame's coordinates would land in
+// the wrong place and the original has to be re-cut to match.
+export function rotateQuarter(source) {
+  const width = source.naturalWidth || source.width;
+  const height = source.naturalHeight || source.height;
+  const out = makeCanvas(height, width);
+  const ctx = out.getContext("2d");
+  ctx.save();
+  ctx.translate(out.width, 0);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
+  return out;
+}
+
 // original -> cutout through the mask -> paint on top.
 export function compose(layers, target) {
   if (target.width !== layers.width || target.height !== layers.height) {

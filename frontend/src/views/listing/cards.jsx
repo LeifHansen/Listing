@@ -174,7 +174,7 @@ export function PhotosCard({ w, onEdit, onDelete, onRemoveVideo }) {
       id="photos" title="Photos"
       hint={fromEbay
         ? "The photos on your live eBay listing"
-        : "Drop more photos anywhere in here. The first photo is your eBay main image — drag any photo to reorder (press and hold on a phone). Tap a photo to clean up or crop it; the bin removes it"}
+        : "Drop more photos anywhere in here. The first photo is your eBay main image — drag any photo to reorder (press and hold on a phone). Tap a photo to clean up, crop or rotate it; the bin removes it"}
       state={w.completion.photos} flagged={w.fixTarget === "photos"}
     >
       {fromEbay ? <EbayPhotos urls={ebayUrls} /> : (
