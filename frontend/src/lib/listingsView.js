@@ -267,9 +267,10 @@ export function keptWhenEnded(item) {
 
 export const MARKET_FILTERS = [
   { id: "all", label: "All" },
-  { id: "ebay", label: "On eBay" },
-  { id: "etsy", label: "On Etsy" },
-  { id: "ebay-only", label: "eBay only, not on Etsy" },
+  { id: "ebay", label: "eBay" },
+  { id: "etsy", label: "Etsy" },
+  // On eBay and not on Etsy: the crosspost's own shopping list.
+  { id: "ebay-only", label: "eBay only" },
 ];
 
 const LIVE_STATUSES = ["published", "live"];

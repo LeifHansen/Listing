@@ -104,11 +104,10 @@ export function ExpertKnowledge() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-[13px] text-ink-secondary max-w-prose">
-        Save a page you trust — a catalogue, a dating guide, a maker’s mark
-        reference — and the AI reads it whenever it drafts that kind of item.
-        <strong className="font-medium"> Your note is an instruction the AI
-        follows. The page itself is only evidence</strong>, so nothing on it can
-        change what a listing is allowed to claim or what it’s priced at.
+        Save a page you trust and the AI reads it whenever it drafts that kind
+        of item. <strong className="font-medium">Your note is an instruction the AI
+        follows. The page itself is only evidence</strong> — it can’t change what
+        a listing claims or what it’s priced at.
       </p>
 
       <div className="flex flex-col gap-3 max-w-lg">
@@ -203,8 +202,8 @@ export function ExpertKnowledge() {
                   </summary>
                   <p className="mt-1.5">{row.distillate}</p>
                   <p className="mt-1.5 italic">
-                    Summarised from the page. The AI treats this as evidence to
-                    weigh against the photos, never as instructions.
+                    Summarised from the page — evidence to weigh against the
+                    photos, never as instructions.
                   </p>
                 </details>
               ) : (

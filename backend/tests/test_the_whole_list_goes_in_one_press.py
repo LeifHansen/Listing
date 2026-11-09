@@ -289,25 +289,25 @@ def test_a_listing_the_fill_could_not_run_on_says_so_and_stays(seller,
 
 
 def test_it_does_not_touch_the_groups_that_need_a_decision(seller, monkeypatch):
-    """A price cut needs a percentage. It is not this button's to make."""
+    """An offer needs a discount. It is not this button's to make."""
     client, dbmod, uid = seller
-    assert dbmod.upsert_listing("looked-at", _listing("looked-at"),
+    assert dbmod.upsert_listing("watched", _listing("watched"),
                                 status="published", user_id=uid)
-    _with_photo("looked-at")
+    _with_photo("watched")
     monkeypatch.setattr(
         main, "_metrics_by_record_id",
-        lambda creds, items, *a, **k: {"looked-at": {"views": 40,
-                                                     "watchers": 0}})
+        lambda creds, items, *a, **k: {"watched": {"watchers": 3}})
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached", lambda creds: None)
     monkeypatch.setattr(
         main, "_enrich_listing_v2",
         lambda listing, paths, tags, progress=None: 0)
     monkeypatch.setattr(main.marketplaces, "get",
                         lambda name: _AcceptingEbay(dbmod, uid))
 
-    # Views with no watchers outrank the fill, so this one is in "Lower prices".
-    assert _groups(client) == {"lower_price": 1}
+    # Watchers outrank the fill, so this one is in "Send offers".
+    assert _groups(client) == {"send_offers": 1}
     assert client.post("/api/listings/finish-all").status_code == 400
-    assert _groups(client) == {"lower_price": 1}
+    assert _groups(client) == {"send_offers": 1}
 
 
 # ------------------------------------------------------- what it says first

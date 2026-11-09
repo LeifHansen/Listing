@@ -80,8 +80,7 @@ export function SettingsView() {
   if (!user) {
     return (
       <div className="flex flex-col gap-5">
-        <PageHeader icon={SettingsIcon} title="Settings"
-          subtitle="Your eBay connection and the defaults applied to every publish." />
+        <PageHeader icon={SettingsIcon} title="Settings" />
         <Card className="p-0">
           <EmptyState
             illustration={AccountIllustration}
@@ -105,49 +104,40 @@ export function SettingsView() {
     <SettingsContext.Provider value={settings}>
       <div className="flex flex-col gap-5">
         <PageHeader icon={SettingsIcon} title="Settings"
-          subtitle="Your eBay connection and the defaults applied to every publish. Changes save as you make them." />
+          subtitle="Changes save as you make them." />
         <JumpNav sections={SECTIONS} />
 
+        {/* Each section is its title and its card, and no more: the sentence
+            under every title used to restate it ("Shipping — where items
+            ship from, which policy…"), and six of those before the first
+            control is a page that explains itself instead of being used.
+            The one kept says the thing a title cannot: that these defaults
+            touch only NEW listings. */}
         <div className="flex flex-col gap-8 mt-1">
-          <SettingsSection
-            id="ebay-account" title="eBay account"
-            description="Where every listing publishes, and what eBay says about the account."
-          >
+          <SettingsSection id="ebay-account" title="eBay account">
             <EbayAccountSection />
           </SettingsSection>
 
-          <SettingsSection
-            id="shipping" title="Shipping"
-            description="Where items ship from, which policy they publish under, and how fast you promise to send them."
-          >
+          <SettingsSection id="shipping" title="Shipping">
             <ShippingSection />
           </SettingsSection>
 
-          <SettingsSection
-            id="returns-payment" title="Returns & payment"
-            description="The policies buyers see on every listing."
-          >
+          <SettingsSection id="returns-payment" title="Returns & payment">
             <ReturnsPaymentSection />
           </SettingsSection>
 
           <SettingsSection
             id="selling-defaults" title="Selling defaults"
-            description="Applied to every new listing you publish. Offers, promotion, pricing, condition and quantity."
+            description="Applied to every new listing you publish."
           >
             <SellingDefaultsSection />
           </SettingsSection>
 
-          <SettingsSection
-            id="more" title="More"
-            description="Profile, cross-posting, AI references, appearance and sign-in."
-          >
+          <SettingsSection id="more" title="More">
             <MoreSection openRow={openRow} />
           </SettingsSection>
 
-          <SettingsSection
-            id="danger" title="Danger zone"
-            description="Deleting here removes this app’s copy only — listings already on eBay stay live."
-          >
+          <SettingsSection id="danger" title="Danger zone">
             <DeleteAccountCard />
           </SettingsSection>
         </div>

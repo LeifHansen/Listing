@@ -102,7 +102,7 @@ export function ReturnsPaymentSection() {
         options={returns}
         value={selected.return_policy_id || ""}
         unavailable={policies.kind === "unavailable"}
-        note="Shown to buyers on every listing. 30-day returns is what eBay’s Top Rated Plus asks for."
+        note="30-day returns is what Top Rated Plus asks for."
         terms={returnTerms(returns.find((p) => p.id === selected.return_policy_id))}
         onSave={savePolicy}
       />
@@ -112,7 +112,6 @@ export function ReturnsPaymentSection() {
         options={payment}
         value={selected.payment_policy_id || ""}
         unavailable={policies.kind === "unavailable"}
-        note="eBay managed payments handles the money; the policy only says whether a buyer must pay at checkout."
         terms={paymentTerms(payment.find((p) => p.id === selected.payment_policy_id))}
         onSave={savePolicy}
       />

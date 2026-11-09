@@ -5,6 +5,7 @@ import {
 import { api, postJson, startConnect } from "@/lib/api";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
+import { Menu } from "@/components/ui/Menu";
 import { TagPill } from "@/components/ui/badges";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toaster";
@@ -25,12 +26,14 @@ function paymentsTone(status) {
 /**
  * The account every listing publishes to, and what eBay says about it.
  *
- * One card now: the connection (connect, reconnect, disconnect) and the
- * read-only facts that used to live in a separate mirror at the bottom of
- * the page -- payouts, the monthly selling limit, an unfinished
- * registration, the programs the account is in. The deployment environment
- * is no longer printed beside the username: a seller cannot act on it, and
- * the payments check deliberately stopped exposing it.
+ * One card: who is connected, what eBay says about the account that would
+ * stop a publish (payouts, the monthly selling limit, an unfinished
+ * registration), a link to Seller Hub, and the once-a-year actions behind
+ * one ⋯ menu. Those used to be a row of four buttons — check payouts,
+ * Seller Hub, refresh, disconnect — under a row of jargon chips naming the
+ * eBay programs the account is in; neither row was ever pressed twice. The
+ * deployment environment is not printed beside the username: a seller
+ * cannot act on it, and the payments check deliberately stopped exposing it.
  */
 export function EbayAccountSection() {
   const { ebay, loadEbayStatus } = useApp();
@@ -83,8 +86,7 @@ export function EbayAccountSection() {
     return (
       <div className="flex flex-col gap-4">
         <p className="text-sm text-ink-secondary">
-          Not connected yet — publishing runs in dry-run mode (you get the exact eBay
-          API payload without posting).
+          Not connected. Publishing runs as a dry run until you connect.
         </p>
         {ebay.oauth_ready ? (
           <div>
@@ -156,11 +158,26 @@ export function EbayAccountSection() {
               <strong> Disconnect and reconnect</strong> to confirm which account it is.
             </p>
           )}
-          <p className="text-[13px] text-ink-secondary truncate">
-            {ebay.email ? `${ebay.email} · ` : ""}every listing you publish goes to this account.
+          {/* The second line: the link out, and eBay's payout status beside
+              it — on the text column rather than at the row's end, so a
+              phone never truncates the account name to make room for it. */}
+          <p className="text-[13px] text-ink-secondary flex flex-wrap items-center gap-x-2 gap-y-1">
+            {ebay.email && <span className="truncate">{ebay.email}</span>}
+            <a href={SELLER_HUB} target="_blank" rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-semibold text-blue">
+              Seller Hub <ExternalLink size={12} aria-hidden />
+            </a>
+            {payments && <TagPill tone={payments.tone}>{payments.label}</TagPill>}
           </p>
         </div>
-        {payments && <TagPill tone={payments.tone}>{payments.label}</TagPill>}
+        <Menu label="eBay account actions" size="iconSm" items={[
+          { label: "Check payout setup", icon: <Wallet aria-hidden />,
+            onSelect: checkPayout, disabled: checking },
+          { label: "Refresh account details", icon: <RefreshCw aria-hidden />,
+            onSelect: loadOverview, disabled: overviewLoading },
+          { label: "Disconnect / switch account", icon: <Unlink aria-hidden />,
+            danger: true, divider: true, onSelect: disconnect },
+        ]} />
       </div>
 
       <ForeignListingsNotice />
@@ -201,14 +218,6 @@ export function EbayAccountSection() {
               )}
             </div>
           )}
-          {programs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 text-[13px]">
-              <span className="text-ink-secondary">eBay programs:</span>
-              {programs.map((p) => (
-                <TagPill key={p} tone="neutral">{p.replace(/_/g, " ").toLowerCase()}</TagPill>
-              ))}
-            </div>
-          )}
           {programsKnown && !hasPolicyProgram && (
             <p className="text-[13px] text-ink-secondary">
               Business policies are off for this account — turn them on under
@@ -221,22 +230,6 @@ export function EbayAccountSection() {
           Couldn’t read the account details from eBay just now.
         </p>
       ) : null}
-
-      <div className="flex flex-wrap gap-2.5">
-        <Button variant="secondary" onClick={checkPayout} loading={checking}>
-          <Wallet aria-hidden /> Check payout setup
-        </Button>
-        <Button variant="secondary"
-          onClick={() => window.open(SELLER_HUB, "_blank", "noopener")}>
-          Seller Hub <ExternalLink aria-hidden />
-        </Button>
-        <Button variant="ghost" onClick={loadOverview} loading={overviewLoading}>
-          <RefreshCw aria-hidden /> Refresh
-        </Button>
-        <Button variant="danger" onClick={disconnect}>
-          <Unlink aria-hidden /> Disconnect / switch account
-        </Button>
-      </div>
     </div>
   );
 }

@@ -1,7 +1,8 @@
 """A listing eBay won't revise over its photo size is the seller's errand, not
 a failed run.
 
-Reported from the dashboard: a red toast reading "2 failed", each line eBay's
+Reported from the dashboard's price drop (the Manage tab's "Lower prices…"
+now): a red toast reading "2 failed", each line eBay's
 own sentence, "The resolution for provided picture(s) does not meet eBay's
 Picture Policy requirements. Please only use pictures that are at least 500
 pixels on the longest side." The run itself had done everything right.
@@ -38,7 +39,6 @@ from backend.services import bulk_actions, ebay_trading  # noqa: E402
 EBAY_SAYS = ("The resolution for provided picture(s) does not meet eBay's "
              "Picture Policy requirements. Please only use pictures that are "
              "at least 500 pixels on the longest side.")
-LOOKERS = {"views": 40, "watchers": 0}
 CUT = bulk_actions.lower_price(40.0, 10)
 _OK = ('<ReviseItemResponse xmlns="urn:ebay:apis:eBLBaseComponents">'
        "<Ack>Success</Ack><ItemID>{}</ItemID></ReviseItemResponse>")
@@ -71,7 +71,7 @@ def test_the_editor_names_the_size_rather_than_the_quality():
     assert "500 pixels" in issue["fix"]
 
 
-# ------------------------------------------------------------ Lower all
+# ------------------------------------------------------------ Lower prices…
 
 @pytest.fixture()
 def seller(dbmod, monkeypatch):
@@ -81,7 +81,6 @@ def seller(dbmod, monkeypatch):
     box: dict = {}
     monkeypatch.setattr(main.deps, "ebay_creds_for", lambda request: {
         "access_token": "t", "_uid": box.get("uid"), "ebay_username": "seller1"})
-    monkeypatch.setattr(main.ebay_offers, "eligible_cached", lambda creds: None)
 
     def _offline(*_a, **_k):
         raise httpx.ConnectError("no network in tests")
@@ -120,12 +119,6 @@ def _ebay(monkeypatch, small: set[str]) -> list[str]:
     return sent
 
 
-def _metrics(monkeypatch, ids) -> None:
-    monkeypatch.setattr(main, "_metrics_by_record_id",
-                        lambda creds, items, status=None, fresh=False:
-                        {rid: LOOKERS for rid in ids})
-
-
 def _run(client, path: str, payload: dict) -> dict:
     body = client.post(path, json=payload)
     assert body.status_code == 200, body.text
@@ -147,10 +140,10 @@ def test_the_reported_toast_is_a_skip_not_a_failure(seller, monkeypatch):
     client, dbmod, uid = seller
     _stock(dbmod, uid, "penguin", 1)
     _stock(dbmod, uid, "johnny", 2)
-    _metrics(monkeypatch, ["penguin", "johnny"])
+    IDS = ["penguin", "johnny"]
     sent = _ebay(monkeypatch, small={"22001", "22002"})
 
-    result = _run(client, "/api/ebay/lower-all", {"percent": 10})
+    result = _run(client, "/api/ebay/lower-prices", {"percent": 10, "listing_ids": IDS})
 
     assert (result["changed"], result["skipped"], result["failed"]) == (0, 2, 0)
     # The drop never sent a photo. eBay was judging the ones already up.
@@ -165,10 +158,10 @@ def test_the_rest_of_the_run_still_reports_as_lowered(seller, monkeypatch):
     client, dbmod, uid = seller
     _stock(dbmod, uid, "clean", 0)
     _stock(dbmod, uid, "small", 1)
-    _metrics(monkeypatch, ["clean", "small"])
+    IDS = ["clean", "small"]
     _ebay(monkeypatch, small={"22001"})
 
-    result = _run(client, "/api/ebay/lower-all", {"percent": 10})
+    result = _run(client, "/api/ebay/lower-prices", {"percent": 10, "listing_ids": IDS})
 
     assert (result["changed"], result["skipped"], result["failed"]) == (1, 1, 0)
     assert dbmod.get_listing("clean")["listing"]["price"] == CUT
@@ -177,13 +170,13 @@ def test_the_rest_of_the_run_still_reports_as_lowered(seller, monkeypatch):
 def test_the_listing_eBay_refused_is_left_as_it_was(seller, monkeypatch):
     """Same rule as any refused price: the record does not claim a price eBay
     is not showing, and it is not stamped as lowered, so it is still in the
-    group once its photos are replaced."""
+    ticked again once its photos are replaced."""
     client, dbmod, uid = seller
     _stock(dbmod, uid, "small", 1)
-    _metrics(monkeypatch, ["small"])
+    IDS = ["small"]
     _ebay(monkeypatch, small={"22001"})
 
-    _run(client, "/api/ebay/lower-all", {"percent": 10})
+    _run(client, "/api/ebay/lower-prices", {"percent": 10, "listing_ids": IDS})
 
     after = dbmod.get_listing("small")["listing"]
     assert after["price"] == 40.0
@@ -196,7 +189,7 @@ def test_any_other_refusal_is_still_a_failure(seller, monkeypatch):
     failure, reported in eBay's words."""
     client, dbmod, uid = seller
     _stock(dbmod, uid, "sale", 1)
-    _metrics(monkeypatch, ["sale"])
+    IDS = ["sale"]
 
     def _call(call, token, body):
         raise ebay_trading.TradingError(
@@ -204,7 +197,7 @@ def test_any_other_refusal_is_still_a_failure(seller, monkeypatch):
             code="21916626")
     monkeypatch.setattr(ebay_trading, "_call", _call)
 
-    result = _run(client, "/api/ebay/lower-all", {"percent": 10})
+    result = _run(client, "/api/ebay/lower-prices", {"percent": 10, "listing_ids": IDS})
 
     assert (result["skipped"], result["failed"]) == (0, 1)
 

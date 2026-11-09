@@ -9986,8 +9986,9 @@ def _finish_all_plan(recs: list[dict], items: list[dict]) -> dict:
 @app.get("/api/insights")
 def insights(request: Request) -> dict:
     """Ranked 'what to do next' actions across the signed-in user's listings —
-    finish drafts, reprice stale live ones. Folds in eBay views/watchers when
-    available. Returns an empty list for logged-out users. Never raises."""
+    offer watchers a discount, finish drafts, fill in details. Folds in eBay
+    watch counts when available. Returns an empty list for logged-out users.
+    Never raises."""
     user = auth.current_user(request)
     if not user:
         return {"recommendations": [], "group_totals": {},
@@ -10025,14 +10026,9 @@ def insights(request: Request) -> dict:
                 "bulk_caps": _bulk_caps()}
 
 
-# How many listings one bulk price run touches. Each is a serial eBay revise;
-# this keeps the request inside the gateway's patience, and whatever is left
-# over comes back as `deferred` for the seller to run again.
-BULK_PRICE_CAP = int(os.getenv("BULK_PRICE_CAP", "40") or "40")
-# How many ids one bulk request may NAME. Above BULK_PRICE_CAP so a
-# selection bigger than one pass is still accepted and deferred rather
-# than refused, and far below anything that makes an `IN (...)` a
-# problem. Same role as the 200 the bulk delete already applies.
+# How many ids one bulk request may NAME. Far below anything that makes an
+# `IN (...)` a problem, and well above what one screen of ticks can hold.
+# Same role as the 200 the bulk delete already applies.
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
@@ -10041,9 +10037,8 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
     """Cut ONE listing's price by `percent` and push it to eBay.
 
     Returns a bulk_actions outcome: {"ok": True, "was", "now"}, {"skip":
-    reason}, or {"message": why eBay refused}. Shared by the route that is
-    handed ids and the job that works its own set out, so a price drop is one
-    thing however it was asked for.
+    reason}, or {"message": why eBay refused}. One listing of the Manage
+    tab's "Lower prices…" job (see lower_prices below).
     """
     if rec.get("status") not in ("published", "live"):
         return {"skip": "No longer live on eBay."}
@@ -10054,11 +10049,8 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
     listing = Listing(**data)
     was = listing.price
     listing.price = new_price
-    # The whole point of the button, recorded on the listing. Without it
-    # the suggestion that offered this drop is rebuilt from `created_at`
-    # and from eBay's cumulative view count — neither of which a price cut
-    # moves — so the group came back in the same slot with the same twelve
-    # listings the moment the run finished. See recommender.price_drop_stamp.
+    # When the price was last marked down, recorded on the listing the way
+    # every other write path records it. See recommender.price_drop_stamp.
     listing.price_lowered_at = recommender.price_drop_stamp(data, new_price)
     # This edit never passes through a save, so there is no diff for
     # dirty_fields to find — and a revise only carries fields marked as
@@ -10093,12 +10085,10 @@ def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
         # A refused revise writes its attempt to the record: the new price,
         # marked pending, and the stamp above. That is the editor's contract
         # ("your new price is saved here either way") and not this one's. The
-        # seller never opened this listing, eBay still shows the old price —
-        # and the stamp would take it out of the group for three weeks, so
-        # pressing again once whatever eBay objected to is cleared could not
-        # reach it. Put it back as it was. Not when the outcome is UNKNOWN:
-        # eBay may have taken the price, and the pending mark is what lets a
-        # later revise settle it.
+        # seller never opened this listing and eBay still shows the old
+        # price, so the record must not claim the new one. Put it back as it
+        # was. Not when the outcome is UNKNOWN: eBay may have taken the price,
+        # and the pending mark is what lets a later revise settle it.
         if not getattr(outcome, "outcome_unknown", False):
             _restore_record(rec, uid)
         if _photos_block_revise(outcome):
@@ -10164,93 +10154,32 @@ def _keep_marked(rid: str, fields: list[str], uid: str) -> None:
                     rid, exc)
 
 
-@app.post("/api/ebay/lower-prices")
-def lower_prices(payload: dict, request: Request) -> dict:
-    """Lower the price of several live listings by one percentage, and push each
-    change to eBay — the Dashboard's "Lower prices" suggestion group applied in
-    one go instead of opening a dozen listings to make the same edit.
-
-    The caller names the listings (the group's own membership), so this can
-    never widen to the seller's whole store. Per listing: skipped when it isn't
-    live or the cut wouldn't change the price, failed with eBay's reason when
-    the revise is rejected, and neither stops the rest of the run.
-    """
-    user = auth.current_user(request)
-    creds = deps.ebay_creds_for(request)
-    if not user or not creds:
-        raise HTTPException(400, "Connect eBay first.")
-    try:
-        percent = bulk_actions.validate_percent(payload.get("percent"))
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to reprice.")
-    # Bounded, because the lookup below is BY id: an unbounded body used to
-    # cost nothing (the store read was capped and this was only a filter) and
-    # now becomes an unbounded `IN (...)`, which is a way to make one request
-    # expensive for everyone. Nothing useful is lost -- a pass reprices at
-    # most BULK_PRICE_CAP of them either way, and the remainder is already
-    # reported as deferred for a second pass.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
-    wanted = set(ids)
-    # The ids, asked for. This used to read the seller's newest LIST_CAP
-    # records and filter -- every one of their JSON blobs across a
-    # cross-region link to keep at most BULK_PRICE_CAP of them, and, worse,
-    # anything outside that window came back to the seller as "Listing not
-    # found." The list is newest-first, so on a store past the cap a ticked
-    # listing only has to be edited past by 3,000 others between opening the
-    # screen and pressing the button. Ownership is enforced inside the read.
-    mine = db.get_listings(ids, user["id"])
-    # Each listing is its own revise round-trip to eBay, run one after another.
-    # Past this many the request outlives the gateway and the seller sees a
-    # timeout instead of a result, so the run is bounded and the remainder is
-    # reported for a second pass rather than silently dropped.
-    records, deferred = mine[:BULK_PRICE_CAP], mine[BULK_PRICE_CAP:]
-    provider = marketplaces.get("ebay")
-    base_url = _base_url(request)
-    result = bulk_actions.run(
-        records, lambda rec: _lower_one(rec, percent, user["id"], creds,
-                                        base_url, provider))
-    # Listings the client asked for that aren't the seller's (or are gone) are
-    # reported rather than silently dropped from the totals.
-    missing = wanted - {r["id"] for r in mine}
-    for rid in sorted(missing):
-        result.skipped.append({"listing_id": rid, "title": "this listing",
-                               "message": "Listing not found."})
-    log.info("bulk lower-prices: user=%s percent=%s changed=%d skipped=%d "
-             "failed=%d deferred=%d", user["id"], percent, len(result.changed),
-             len(result.skipped), len(result.failed), len(deferred))
-    return {"percent": percent, "deferred": len(deferred), **result.as_dict()}
-
-
 # The price drops running right now: user id -> job id. One per account, and
 # not for tidiness — a second press while the first is still going would cut
 # the same prices twice, 20% off and then 20% off that.
 _REPRICE_JOBS: dict[str, str] = {}
 _REPRICE_LOCK = threading.Lock()
-# The suggestion group "Lower all…" clears.
-LOWER_ALL_TYPES = ("lower_price",)
 
 
-def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
-                       creds: dict, base_url: str, percent: float) -> None:
-    """Background worker for "Lower all…": every price in the group, cut and
-    pushed to eBay one serial revise at a time, with the job saying which
-    listing it is on as it goes."""
+def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
+                          creds: dict, base_url: str, percent: float) -> None:
+    """Background worker for the Manage tab's "Lower prices…": every ticked
+    listing's price, cut and pushed to eBay one serial revise at a time, with
+    the job saying which listing it is on as it goes."""
     provider = marketplaces.get("ebay")
 
     def _apply(rec: dict) -> dict:
-        # Re-read: this set was worked out when the button was pressed, and a
-        # run over a whole group takes minutes. A listing that has sold or
-        # been repriced since is judged on what it is now, not on then.
+        if jobstore.cancel_requested(job_id):
+            return {"skip": "Stopped before this one was started."}
+        # Re-read: the set was fixed when the button was pressed, and a run
+        # over a page of ticks takes a while. A listing that has sold or been
+        # repriced since is judged on what it is now, not on then.
+        # And owned: an id that is not this seller's is queued as missing by
+        # the route, and this re-read is not scoped, so the check the by-id
+        # lookup made has to be made again here.
         fresh = db.get_listing(rec["id"])
-        if not fresh:
-            return {"skip": "This listing is gone.", "needs_you": False}
+        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+            return {"skip": "Listing not found.", "needs_you": False}
         return _lower_one(fresh, percent, uid, creds, base_url, provider)
 
     try:
@@ -10262,18 +10191,17 @@ def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
         # INFO a run that lowered 1 of 500 never reached the error feed, and
         # the only record of why was a toast the seller had already lost.
         log.log(logging.WARNING if result.failed else logging.INFO,
-                "lower-all %s: user=%s percent=%s listings=%d changed=%d "
+                "lower-prices %s: user=%s percent=%s listings=%d changed=%d "
                 "skipped=%d failed=%d first_refusal=%s", job_id, uid, percent,
                 len(records), len(result.changed), len(result.skipped),
                 len(result.failed),
                 (result.failed[0].get("message") or "")[:200]
                 if result.failed else "-")
         jobstore.update(job_id, done=True, phase="done", current=len(records),
-                        result={"percent": percent, "deferred": 0,
-                                **result.as_dict()})
+                        result={"percent": percent, **result.as_dict()})
     except Exception as exc:  # noqa: BLE001 - the job must always answer
         reference = deps.support_reference()
-        log.warning("lower-all job %s failed for user=%s [%s]: %s",
+        log.warning("lower-prices job %s failed for user=%s [%s]: %s",
                     job_id, uid, reference, exc)
         jobstore.update(job_id, done=True, phase="failed", error=(
             "We couldn't finish lowering these prices. Try again in a moment — "
@@ -10284,21 +10212,22 @@ def _run_lower_all_job(job_id: str, records: list[dict], uid: str,
                 _REPRICE_JOBS.pop(uid, None)
 
 
-@app.post("/api/ebay/lower-all")
-def lower_all(payload: dict, request: Request) -> dict:
-    """Lower every price in the dashboard's "Lower prices" group by one
-    percentage, and push each to eBay.
+@app.post("/api/ebay/lower-prices")
+def lower_prices(payload: dict, request: Request) -> dict:
+    """Lower the ticked live listings' prices by one percentage, and push each
+    change to eBay — the Manage tab's "Lower prices…", beside End & relist.
 
-    Takes NO ids, and has no cap. The route above is handed the group's rows
-    and reprices at most BULK_PRICE_CAP of them per request, so "Lower all…"
-    on a group of 41 was a button that lowered a slice and deferred the rest —
-    and in an environment where that cap was 1, it lowered one price per
-    press under a badge reading 41. The seller pressing this is asking for the
-    number on the badge, so the set is worked out here, from the same ranking
-    the dashboard renders, and run as a job so its length costs time rather
-    than a gateway timeout.
+    The caller names the listings (the ticks on the Manage tab), so this can
+    never widen to the seller's whole store, and the read is by id with the
+    ownership enforced inside it. Per listing: skipped when it isn't live or
+    the cut wouldn't change the price, failed with eBay's reason when the
+    revise is rejected, and neither stops the rest of the run.
 
-    Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
+    Runs as a job — each listing is its own serial eBay revise, and a page of
+    ticks outlives any request — and returns {"job_id"} at once; poll
+    /api/bulk/status/{job_id} for progress and the per-listing report. One
+    per account at a time: a second press while one is running joins it
+    rather than cutting the same prices twice.
     """
     user = auth.current_user(request)
     if not user:
@@ -10310,6 +10239,17 @@ def lower_all(payload: dict, request: Request) -> dict:
         percent = bulk_actions.validate_percent(payload.get("percent"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing to reprice.")
+    # Bounded, because the lookup below is BY id, and an unbounded body is
+    # an unbounded `IN (...)` — a way to make one request expensive for
+    # everyone. Nothing useful is lost: this is more than a screen of ticks.
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
     uid = user["id"]
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs over the same listings.
@@ -10319,14 +10259,20 @@ def lower_all(payload: dict, request: Request) -> dict:
         if running:
             snap = jobstore.snapshot(running, uid)
             if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
+                return {"job_id": running, "running": True, "joined": True,
+                        "total": snap.get("total_items") or 0}
         _REPRICE_JOBS[uid] = job_id
     try:
-        items = db.list_listings(limit=LIST_CAP, user_id=uid)
-        records = _suggestion_set(items, creds, LOWER_ALL_TYPES)
-        if not records:
-            raise HTTPException(400, "There are no prices left to lower.")
+        wanted = set(ids)
+        # The ids, asked for — never the seller's newest LIST_CAP records
+        # filtered down, which reported anything outside that window as
+        # "Listing not found." Ownership is enforced inside the read.
+        mine = db.get_listings(ids, uid)
+        # Listings the client asked for that aren't the seller's (or are
+        # gone) are reported rather than silently dropped from the totals.
+        missing = [{"id": rid, "status": "missing", "listing": {}}
+                   for rid in sorted(wanted - {r["id"] for r in mine})]
+        records = mine + missing
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without this
@@ -10339,13 +10285,12 @@ def lower_all(payload: dict, request: Request) -> dict:
         "id": job_id, "kind": "reprice", "phase": "repricing", "done": False,
         "error": None, "current": 0, "total_items": len(records),
     }, uid=uid)
-    threading.Thread(target=_run_lower_all_job,
+    threading.Thread(target=_run_lower_prices_job,
                      args=(job_id, records, uid, creds, base_url, percent),
                      daemon=True).start()
-    log.info("lower-all %s: started for user=%s percent=%s listings=%d",
+    log.info("lower-prices %s: started for user=%s percent=%s listings=%d",
              job_id, uid, percent, len(records))
-    return {"job_id": job_id, "running": True, "total": len(records),
-            "deferred": 0}
+    return {"job_id": job_id, "running": True, "total": len(records)}
 
 
 # How many listings one "Send offers" run touches. Each is a separate eBay
@@ -10386,8 +10331,7 @@ def _offer_one(rec: dict, percent: float, message: str, uid: str,
     # which an offer does not move — without the stamp the group comes
     # straight back with the same listings and the same count, which is
     # what a button that does nothing looks like. See
-    # recommender.OFFER_QUIET_DAYS, and price_lowered_at for the same
-    # lesson learned the hard way on the group above this one.
+    # recommender.OFFER_QUIET_DAYS.
     stamp = recommender.offer_sent_stamp()
     db.mutate_listing_data(
         rec["id"], lambda d: {**d, "offer_sent_at": stamp}, user_id=uid)
@@ -10633,11 +10577,10 @@ def _bulk_caps() -> dict:
     along with the recommendations so the group can say what this pass will
     actually do before the seller agrees to spend anything on it.
 
-    "lower_price" and "send_offers" are absent because their buttons are no
-    longer capped: "Lower all…" runs /api/ebay/lower-all and "Send offers…"
-    runs /api/ebay/send-offers-all, and both take the whole group. Absent
-    reads on the dashboard as "one run covers the badge", which is now the
-    truth.
+    "send_offers" is absent because its button is no longer capped: "Send
+    offers…" runs /api/ebay/send-offers-all, which takes the whole group.
+    Absent reads on the dashboard as "one run covers the badge", which is now
+    the truth.
     """
     return {"specifics": BULK_ENRICH_CAP}
 

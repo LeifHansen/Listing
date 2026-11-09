@@ -423,15 +423,15 @@ def interrupted_message(record: dict) -> str:
                 f"{where}, so the run stopped early. The ones it finished are "
                 "filled in — run it again for the rest.")
     if record.get("kind") == "reprice":
-        # "Lower all…". Each cut reaches eBay as it is made and stamps the
-        # listing, which takes it out of the group — so running it again
-        # reaches only the ones this run never got to, never a second cut.
+        # The Manage tab's "Lower prices…". Each cut reaches eBay as it is
+        # made, so the ones that finished are not to be cut again: the seller
+        # ticks the rest and runs it for those.
         total = record.get("total_items") or 0
         current = record.get("current") or 0
         where = f" ({min(current, total)} of {total} done)" if total else ""
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
-                "lowered on eBay — run it again for the rest.")
+                "lowered on eBay — tick the rest and run it again for those.")
     if record.get("kind") == "offers":
         # "Send offers…". Each offer is stamped on its listing as it goes out,
         # which takes it out of the group — so running it again reaches only

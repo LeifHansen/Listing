@@ -1,8 +1,6 @@
 import { useCallback, useState } from "react";
-import { CheckCircle2, MapPin } from "lucide-react";
 import { useApp } from "@/store";
 import { Field, Input, Select } from "@/components/ui/fields";
-import { TagPill } from "@/components/ui/badges";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useSettings } from "./context";
 import { useAutosave } from "./useAutosave";
@@ -80,7 +78,7 @@ export function ShippingSection() {
         options={fulfillment}
         value={selected.fulfillment_policy_id || ""}
         unavailable={policies.kind === "unavailable"}
-        note="Applied to every new listing. It sets the carrier service — a listing can override it on its own Shipping card."
+        note="Sets the carrier service for new listings; a listing can override it."
         onSave={savePolicy}
       />
 
@@ -120,14 +118,10 @@ function ZipField({ initial, locationSet, locationText, onSave, enabled }) {
   const save = useCallback(() => onSave(postal), [onSave, postal]);
   return (
     <Field
-      label={
-        <span className="inline-flex items-center gap-1.5">
-          <MapPin size={14} aria-hidden /> Ship-from ZIP code
-        </span>
-      }
+      label="Ship-from ZIP code"
       note={locationSet
-        ? "Where eBay tells buyers the item ships from. Change the ZIP and save to move it."
-        : "Required to publish — eBay needs a location to ship from. Enter your ZIP and save; we create it on eBay for you."}
+        ? (locationText ? `Ships from ${locationText}.` : "Where eBay says your items ship from.")
+        : "Required to publish — we create the location on eBay for you."}
     >
       <div className="flex flex-wrap items-center gap-3">
         <Input
@@ -137,12 +131,6 @@ function ZipField({ initial, locationSet, locationText, onSave, enabled }) {
         />
         <CardSave label="Save ZIP" onSave={save} disabled={!enabled} />
       </div>
-      {locationSet && (
-        <TagPill tone="green" className="self-start mt-1">
-          <CheckCircle2 size={12} aria-hidden />
-          {locationText ? `Ships from ${locationText}` : "eBay ship-from location is set"}
-        </TagPill>
-      )}
     </Field>
   );
 }
@@ -186,7 +174,7 @@ function HandlingTime({ policy, onSave }) {
   return (
     <Field
       label="Handling time"
-      note="How fast you promise to ship after payment. eBay measures every listing under this policy against it — live ones too — and rewards 1 business day in search."
+      note="Applies to every listing under this policy. eBay rewards 1 business day in search."
     >
       <Select
         value={known ? String(policy.handling_days) : ""}

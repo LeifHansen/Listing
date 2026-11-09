@@ -23,7 +23,6 @@ clears it with it.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -47,20 +46,20 @@ def _rec(type_: str, lid: str, priority: int) -> dict:
 
 
 def test_the_total_counts_every_rec_of_its_type():
-    recs = [_rec("lower_price", f"p{i}", 68) for i in range(9)]
+    recs = [_rec("send_offers", f"p{i}", 95) for i in range(9)]
     recs += [_rec("specifics", f"s{i}", 45) for i in range(4)]
-    assert recommender.totals_by_type(recs) == {"lower_price": 9,
+    assert recommender.totals_by_type(recs) == {"send_offers": 9,
                                                 "specifics": 4}
 
 
 def test_the_cap_is_per_type_so_no_group_is_squeezed_out():
-    """A flat cap of 3 over this list returns three prices and nothing else —
+    """A flat cap of 3 over this list returns three offers and nothing else —
     the specifics group, and the only button that clears it, never reaches the
     screen."""
-    recs = [_rec("lower_price", f"p{i}", 68) for i in range(9)]
+    recs = [_rec("send_offers", f"p{i}", 95) for i in range(9)]
     recs += [_rec("specifics", f"s{i}", 45) for i in range(4)]
     kept = recommender.capped_by_type(recs, 3)
-    assert [r["type"] for r in kept] == ["lower_price"] * 3 + ["specifics"] * 3
+    assert [r["type"] for r in kept] == ["send_offers"] * 3 + ["specifics"] * 3
     # Order within a type is the ranking's own, so the strongest still lead.
     assert [r["listing_id"] for r in kept][:3] == ["p0", "p1", "p2"]
 
@@ -187,23 +186,25 @@ def test_the_badge_goes_down_by_what_the_run_filled(seller, monkeypatch):
         "move — which is what a seller reads as the button not working")
 
 
-def test_a_busy_group_does_not_push_another_off_the_screen(seller):
-    """60 stale prices outrank 10 blank specifics. Under one flat cap of 50
-    the "Fill in details" group never arrived at all, so the only button that
-    clears it was unreachable — on exactly the store that needs it most."""
+def test_a_busy_group_does_not_push_another_off_the_screen(seller, monkeypatch):
+    """60 watched listings outrank 10 blank specifics. Under one flat cap of
+    50 the "Fill in details" group never arrived at all, so the only button
+    that clears it was unreachable — on exactly the store that needs it most."""
     client, dbmod, uid = seller
-    stale = (datetime.now(timezone.utc)
-             - timedelta(days=recommender.STALE_DAYS + 5))
-    # An old listing earns the stronger "Lower the price" rec, and `ranked`
+    watched = [f"WATCHED{i:03d}" for i in range(60)]
+    # A watched listing earns the stronger "Send an offer" rec, and `ranked`
     # keeps one rec per listing — so these are wholly the other group.
-    _stock(dbmod, uid, [f"OLD{i:03d}" for i in range(60)], when=stale)
+    _stock(dbmod, uid, watched)
     _stock(dbmod, uid, [f"NEW{i:03d}" for i in range(10)])
+    monkeypatch.setattr(main, "_metrics_by_record_id",
+                        lambda creds, items: {rid: {"watchers": 2} for rid in watched})
+    monkeypatch.setattr(main.ebay_offers, "eligible_cached", lambda creds: None)
 
     body = _insights(client)
     kinds = {r["type"] for r in body["recommendations"]}
-    assert kinds == {"lower_price", "specifics"}, \
+    assert kinds == {"send_offers", "specifics"}, \
         "the group with the button on it fell off the payload"
-    assert body["group_totals"] == {"lower_price": 60, "specifics": 10}
+    assert body["group_totals"] == {"send_offers": 60, "specifics": 10}
     # ...and the payload itself stays bounded: per type, not per store.
     assert len([r for r in body["recommendations"]
-                if r["type"] == "lower_price"]) == main.INSIGHTS_GROUP_CAP
+                if r["type"] == "send_offers"]) == main.INSIGHTS_GROUP_CAP
