@@ -1149,6 +1149,24 @@ def _unnumbered(name: str) -> str:
     return plain or name
 
 
+def merged_group_name(groups: list[dict]) -> str:
+    """The name one item made of several groups goes by: the name of the
+    group that starts earliest in the pile, without its count.
+
+    The same rule _apply_group_merges applies to the model's own merges, for
+    the seller's (see main.merge_pending_items). The seller shoots the
+    overview first, so the earliest group is the one named after the item
+    rather than after a close-up -- and "bell #1" folded into "bell #2" is one
+    bell, not the first of several.
+    """
+    named = [g for g in groups if isinstance(g, dict)]
+    if not named:
+        return ""
+    first = min(named, key=lambda g: min(g.get("indices") or [], default=10**9))
+    name = str(first.get("name") or "")
+    return _unnumbered(name) if len(named) > 1 else name
+
+
 def _pile_position(indices: list[int]) -> str:
     """Where a group's photos sit in the pile, in the same numbering the first
     pass was shown. Groups next to each other that look the same are the

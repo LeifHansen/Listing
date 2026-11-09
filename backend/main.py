@@ -49,8 +49,9 @@ from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
-                     MarketplaceState, PendingItemRequest, PendingPhotoRequest,
-                     PublishRequest, RefineRequest, SessionOnlyRequest)
+                     MarketplaceState, PendingItemRequest, PendingMergeRequest,
+                     PendingPhotoRequest, PublishRequest, RefineRequest,
+                     SessionOnlyRequest)
 from .services import (barcodes, bulk_actions, claude_ai, dirty_fields,
                        duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
@@ -9066,6 +9067,97 @@ def _pending_item_gone() -> HTTPException:
     PendingItemRequest. Same meaning as _pending_photo_gone."""
     return HTTPException(409, "That item has changed since you saw it — "
                               "reload to see what's left.")
+
+
+@app.post("/api/bulk/notes/{job_id}/merge-items")
+def merge_pending_items(job_id: str, req: PendingMergeRequest,
+                        request: Request) -> dict:
+    """Fold two or more items of a batch into one, while the batch is still
+    asking about them.
+
+    The grouping is the model's guess, and the guess it keeps getting wrong
+    is the split: one bell shot from seven angles comes back as three items,
+    an overview and its close-up as two. The merge pass exists to catch that
+    and does not always. The seller, looking at the sorted pile with nothing
+    drafted yet, can see it at a glance -- and here the fix is free, where
+    after drafting it is three drafts paid for, a merge dialog and two
+    deletes.
+
+    Same rules as the item delete: the job stays PAUSED (revise, not claim),
+    batches only, and every item is checked against its own photos rather
+    than trusted as a slot, so a tap from a tab that has not seen the last
+    change is refused instead of folding together whatever slid into those
+    slots.
+
+    The merged item keeps the earliest slot and its key, so it stays where it
+    was in the queue and whatever the seller typed under it stays with it. It
+    takes every photo of the items folded in, once each and in pile order --
+    which puts the overview first -- and the name the model's own merges give
+    (claude_ai.merged_group_name). The pile itself is untouched: no photo
+    leaves it, only the grouping that reads it changes.
+    """
+    uid = deps.uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    if seen.get("done") or seen.get("phase") != _AWAITING_NOTES:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    if seen.get("kind") == "pipeline":
+        raise HTTPException(
+            400, "A single upload is already one item — there's nothing to "
+                 "merge it with.")
+    rev = seen.get("_rev")
+
+    staging = str(seen.get("_staging_id") or "")
+    names = [n for n in (seen.get("_names") or []) if isinstance(n, str)]
+    groups = [g for g in (seen.get("_groups") or [])
+              if isinstance(g, dict) and isinstance(g.get("indices"), list)]
+    if not staging or not names or not groups:
+        raise _photos_gone(
+            job_id, "run it again",
+            "This batch's photos are no longer on the server — they were "
+            "cleared while it waited for your notes. Please run the batch "
+            "again.")
+    picked: list[int] = []
+    for it in req.items:
+        if not 0 <= it.gi < len(groups):
+            raise _pending_item_gone()
+        mine = [i for i in groups[it.gi]["indices"] if 0 <= i < len(names)]
+        photo = (it.photo or "").strip()
+        if photo not in {f"/media/{staging}/optimized/{names[i]}" for i in mine}:
+            raise _pending_item_gone()
+        if it.gi not in picked:
+            picked.append(it.gi)
+    if len(picked) < 2:
+        raise HTTPException(400, "Pick at least two items to merge.")
+    picked.sort()
+
+    # Stamped with their key on the way through, as for a removal: until the
+    # first edit an item's key IS its slot, and this renumbers every slot
+    # after the first one it folds in.
+    stamped = [{**g, "key": g.get("key", gi)} for gi, g in enumerate(groups)]
+    into = picked[0]
+    folded = [stamped[gi] for gi in picked]
+    combined = sorted({i for g in folded for i in g["indices"]
+                       if 0 <= i < len(names)})
+    merged = {**stamped[into], "indices": combined,
+              "name": claude_ai.merged_group_name(folded)}
+    absorbed = set(picked[1:])
+    regrouped = [merged if gi == into else g
+                 for gi, g in enumerate(stamped) if gi not in absorbed]
+    pending = _pending_items(staging, names, regrouped)
+    job = jobstore.revise(job_id, _AWAITING_NOTES, uid, expect_rev=rev,
+                          _groups=regrouped, pending_items=pending,
+                          total_items=len(regrouped))
+    if job is None:
+        raise HTTPException(
+            409, "This batch moved on while that was sent — reload to see "
+                 "what it's working from.")
+    log.info("bulk %s: seller merged items %s into one (%d photo(s)); %d "
+             "item(s) left", job_id, picked, len(combined), len(regrouped))
+    return {"ok": True, "pending_items": pending, "merged": into}
 
 
 @app.get("/api/bulk/status/{job_id}/brief")

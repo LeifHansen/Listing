@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { MessageSquareText, Sparkles, Trash2 } from "lucide-react";
+import { Combine, MessageSquareText, Sparkles, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiUrl } from "@/lib/platform";
 import { Card } from "@/components/ui/Card";
@@ -40,6 +40,12 @@ import { Field, Textarea } from "@/components/ui/fields";
  * local set buys is the two seconds before that: the thumb goes at the tap,
  * and a batch screen polling every 1.5s cannot put it back on screen with a
  * status that was already in flight when the seller pressed it.
+ *
+ * Merging is the exception to "at the tap", on purpose. Folding two items
+ * together is a new item — its photos, its name, its slot — that only the
+ * server can say, and guessing at it here would mean undoing a guess. So the
+ * cards stay as they are, ticked, until the answer lands, and what the seller
+ * typed under each of them is carried into the one they became.
  */
 
 // Mirrors listing_prompt.ITEM_NOTES_MAX_CHARS. Enforced here as well as on
@@ -123,8 +129,28 @@ function PhotoRow({ item, onDelete, deleted }) {
 // no key, and there the slot never moves, so it serves as one.)
 const idOf = (item) => item.key ?? item.gi;
 
+// What the seller typed under several items, as the one line the item they
+// became is drafted from. Each item's line was about the same thing (that is
+// why they are being merged), so a line typed twice is said once — and the
+// server reads the box as one line, so they are joined as sentences rather
+// than on a newline it would flatten into a run-on.
+export function joinItemNotes(parts) {
+  const seen = new Set();
+  const lines = [];
+  (parts || []).forEach((p) => {
+    const text = (p || "").trim();
+    if (!text || seen.has(text.toLowerCase())) return;
+    seen.add(text.toLowerCase());
+    lines.push(text);
+  });
+  return lines
+    .reduce((acc, text) => (!acc ? text
+      : /[.!?;,:]$/.test(acc) ? `${acc} ${text}` : `${acc}. ${text}`), "")
+    .slice(0, MAX_ITEM_NOTES_CHARS);
+}
+
 export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
-                              onDeletePhoto, onDeleteItem }) {
+                              onDeletePhoto, onDeleteItem, onMergeItems }) {
   const notes = values || {};
   // The rows as the last delete left them, once there has been one. While
   // the job is paused a delete is the ONLY thing that changes them, so its
@@ -134,6 +160,13 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
   // Items this seller has removed, by identity. Optimistic, like `deleted`.
   const [goneItems, setGoneItems] = useState(() => new Set());
   const rows = (latest || items || []).filter((it) => !goneItems.has(idOf(it)));
+  // Items ticked to be merged, by identity, and whether a merge is out.
+  // Read through `rows` rather than on their own, so an item removed while
+  // ticked is simply no longer part of the merge.
+  const [picked, setPicked] = useState(() => new Set());
+  const [merging, setMerging] = useState(false);
+  const pickedRows = rows.filter((it) => picked.has(idOf(it)));
+  const canMerge = !!onMergeItems && !busy && rows.length > 1;
   const single = rows.length === 1;
   const typed = rows.filter((it) => (notes[idOf(it)] || "").trim()).length;
   // Photo URLs this seller has dropped, by the exact string the status gave
@@ -205,8 +238,67 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
       .catch(forget);
   };
 
+  const togglePick = (key) => setPicked((cur) => {
+    const next = new Set(cur);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
+
+  // Fold the ticked items into one. The grouping's usual mistake is one
+  // thing shot from enough angles to look like two or three, and this is the
+  // last moment that costs nothing to fix: after drafting it is a draft paid
+  // for per piece, a merge dialog and the deletes.
+  //
+  // Queued behind the deletes like everything else that renumbers the rows,
+  // and each item is looked up again when its turn comes — by identity, sent
+  // with one of its own photos — so a removal that landed first cannot make
+  // this merge whatever slid into those slots.
+  const mergePicked = () => {
+    const keys = pickedRows.map(idOf);
+    if (keys.length < 2 || merging) return;
+    // The notes as they stand at the tap. The ticked cards' boxes are locked
+    // until the answer lands, so this is also what they say when it does.
+    const atTap = Object.fromEntries(keys.map((k) => [k, notes[k] || ""]));
+    setMerging(true);
+    queue.current = queue.current
+      .then(async () => {
+        const chosen = now().filter((it) => keys.includes(idOf(it)));
+        const sent = chosen.map((row) => ({
+          gi: row.gi,
+          photo: (row.photos || []).find((p) => !deleted.has(p))
+            || row.photos?.[0],
+        }));
+        if (sent.length < 2 || sent.some((it) => !it.photo)) {
+          throw new Error("gone");
+        }
+        const res = await onMergeItems(sent);
+        settle(res);
+        // The item they became keeps the first one's identity, which is
+        // where its notes live — so the others' lines join it there.
+        const into = res?.pending_items?.[res?.merged];
+        const survivor = into ? idOf(into) : idOf(chosen[0]);
+        const text = joinItemNotes(chosen.map((row) => atTap[idOf(row)]));
+        chosen.forEach((row) => {
+          const k = idOf(row);
+          if (k === survivor) {
+            if (text !== (atTap[k] || "")) set(k, text);
+          } else if (atTap[k]) {
+            set(k, "");
+          }
+        });
+        setPicked(new Set());
+      })
+      // Refused, or no longer there to merge: the cards stay as they were and
+      // still ticked, so trying again is one tap. The caller says why.
+      .catch(() => {})
+      .finally(() => setMerging(false));
+  };
+
   const submit = async () => {
-    if (busy) return;
+    // Not while a merge is out: its answer moves notes between items, and
+    // the boxes this would read are the ones from before it did.
+    if (busy || merging) return;
     // Behind the deletes, so the answer is never the thing that races them:
     // submitting takes the job out of its pause, and a delete still in the
     // air would land on a job that has moved on and be refused. Resolved
@@ -253,15 +345,31 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
               {single ? " your item" : " that item"}, and it&apos;s what stops
               you fixing the same field on every draft afterwards.
             </p>
+            {canMerge && (
+              <p className="mt-1.5 text-[13px] text-ink-secondary">
+                One thing split into two? Tick <strong>Same item</strong> on
+                each and merge them — it becomes one listing with all their
+                photos.
+              </p>
+            )}
           </div>
         </div>
       </Card>
 
       {rows.map((item, i) => {
         const value = notes[idOf(item)] || "";
+        const isPicked = picked.has(idOf(item));
+        // Locked while the merge it is part of is out: the line in it is
+        // about to be carried into another card (see mergePicked).
+        const locked = busy || (merging && isPicked);
         return (
-          <Card key={idOf(item)} className="flex flex-col gap-3.5">
-            <div className="flex items-baseline gap-2">
+          <Card key={idOf(item)}
+            className={cn("flex flex-col gap-3.5",
+              isPicked && "border-blue ring-2 ring-blue/25")}>
+            {/* Wraps rather than squeezes: on a phone the two controls
+                drop under the name, which is how the seller tells two
+                look-alike cards apart and must not shrink to "the…". */}
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1.5">
               <p className="text-sm font-bold text-ink shrink-0">
                 {single ? "Your item" : `Item ${i + 1}`}
               </p>
@@ -269,32 +377,62 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                   authoritative — it is the AI's first guess, which is the
                   very thing this box exists to correct. */}
               {item.name && (
-                <p className="text-[13px] text-ink-secondary min-w-0 truncate">
+                <p className="text-[13px] text-ink-secondary min-w-[8rem] flex-1 truncate">
                   the AI thinks: {item.name}
                 </p>
               )}
-              {/* Not on the last one: an empty batch is a stopped batch,
-                  and the screen already has a button for that. */}
-              {onDeleteItem && !busy && rows.length > 1 && item.photos?.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => dropItem(idOf(item))}
-                  aria-label={`Remove item ${i + 1}`}
-                  title="Leave this one out — nothing is drafted or charged for it"
-                  className="ml-auto self-center shrink-0 inline-flex items-center gap-1
-                    rounded-full px-2.5 py-1 text-xs font-semibold text-ink-faint
-                    border border-line cursor-pointer transition-colors duration-150
-                    hover:text-error hover:border-error/40"
-                >
-                  <Trash2 size={12} aria-hidden />
-                  Remove item
-                </button>
-              )}
+              <div className="ml-auto self-center shrink-0 flex items-center gap-1.5">
+                {/* A tick rather than a button: the usual split is one
+                    thing in three, and three ticks and one merge is one
+                    step, where pairwise is two. */}
+                {canMerge && item.photos?.length > 0 && (
+                  <label
+                    title="Tick every card that's the same thing, then merge them into one listing"
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
+                      "text-xs font-semibold border transition-colors duration-150",
+                      merging ? "cursor-default opacity-60" : "cursor-pointer",
+                      isPicked
+                        ? "text-blue border-blue/50 bg-blue-soft"
+                        : "text-ink-faint border-line hover:text-ink hover:border-line-strong",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isPicked}
+                      disabled={merging}
+                      onChange={() => togglePick(idOf(item))}
+                      aria-label={`Item ${i + 1} is the same item as another — merge it`}
+                      className="size-3.5 accent-blue"
+                    />
+                    Same item
+                  </label>
+                )}
+                {/* Not on the last one: an empty batch is a stopped batch,
+                    and the screen already has a button for that. */}
+                {onDeleteItem && !busy && rows.length > 1 && item.photos?.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => dropItem(idOf(item))}
+                    disabled={merging && isPicked}
+                    aria-label={`Remove item ${i + 1}`}
+                    title="Leave this one out — nothing is drafted or charged for it"
+                    className="shrink-0 inline-flex items-center gap-1
+                      rounded-full px-2.5 py-1 text-xs font-semibold text-ink-faint
+                      border border-line cursor-pointer transition-colors duration-150
+                      hover:text-error hover:border-error/40
+                      disabled:opacity-35 disabled:pointer-events-none"
+                  >
+                    <Trash2 size={12} aria-hidden />
+                    Remove item
+                  </button>
+                )}
+              </div>
             </div>
             <PhotoRow
               item={item}
               deleted={deleted}
-              onDelete={onDeletePhoto && !busy
+              onDelete={onDeletePhoto && !locked
                 ? (src) => drop(idOf(item), src) : undefined}
             />
             <Field
@@ -309,7 +447,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                 rows={2}
                 value={value}
                 maxLength={MAX_ITEM_NOTES_CHARS}
-                disabled={busy}
+                disabled={locked}
                 // One item means the seller is here to type, so the cursor is
                 // already in the box. With forty, it would be one scroll
                 // position chosen for them out of forty.
@@ -337,17 +475,49 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
       {/* One button, and no way to get stuck behind it: leaving every box
           blank is the skip, and says so rather than needing a second control
           that means "throw away what I just typed". */}
-      <div className={cn("flex flex-wrap items-center gap-3",
-        rows.length > 2 && "sticky bottom-0 -mx-1 px-1 py-3 bg-bg/95 backdrop-blur")}>
-        <Button variant="primary" size="lg" onClick={submit} loading={busy}>
-          <Sparkles aria-hidden />
-          {single ? "Write my listing" : `Write ${rows.length} listings`}
-        </Button>
-        <p className="text-[13px] text-ink-secondary min-w-0">
-          {typed
-            ? `${typed} of ${rows.length} filled in — the rest work from the photos alone.`
-            : "Every box is optional — leave them blank and the AI works from the photos alone."}
-        </p>
+      <div className={cn("flex flex-col gap-3",
+        (rows.length > 2 || pickedRows.length > 0)
+          && "sticky bottom-0 -mx-1 px-1 py-3 bg-bg/95 backdrop-blur")}>
+        {/* The merge, while anything is ticked. In the sticky footer so it
+            is in reach from wherever the second tick was made, which on a
+            long pile is a long way from the first. */}
+        {canMerge && pickedRows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 rounded-button
+            border border-blue/30 bg-blue-soft px-3 py-2.5">
+            {pickedRows.length > 1 ? (
+              <Button variant="secondary" size="sm" onClick={mergePicked}
+                loading={merging}
+                title="Fold the ticked cards into one item: one listing, with all their photos and anything you typed under them">
+                <Combine aria-hidden />
+                Merge {pickedRows.length} items into one
+              </Button>
+            ) : null}
+            {/* Its own line above the buttons on a phone, where beside them
+                it was squeezed to a word per line. */}
+            <p className="text-[13px] text-ink-secondary min-w-0 basis-full order-first
+              sm:basis-0 sm:flex-1 sm:order-none">
+              {pickedRows.length > 1
+                ? "They'll become one listing with all their photos — and anything you typed under them."
+                : "Now tick the other card (or cards) that's the same thing."}
+            </p>
+            <Button variant="ghost" size="sm" disabled={merging}
+              onClick={() => setPicked(new Set())}>
+              Cancel
+            </Button>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="primary" size="lg" onClick={submit} loading={busy}
+            disabled={merging}>
+            <Sparkles aria-hidden />
+            {single ? "Write my listing" : `Write ${rows.length} listings`}
+          </Button>
+          <p className="text-[13px] text-ink-secondary min-w-0">
+            {typed
+              ? `${typed} of ${rows.length} filled in — the rest work from the photos alone.`
+              : "Every box is optional — leave them blank and the AI works from the photos alone."}
+          </p>
+        </div>
       </div>
     </motion.div>
   );

@@ -358,6 +358,21 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   }, [jobId, toast]);
 
+  // Fold items the grouping split apart back into one, at the same moment
+  // and for the same price. Each of `items` is {gi, photo} — a slot and one
+  // of its own photos, the same proof the item delete sends — so a merge
+  // aimed at slots a removal has renumbered is refused rather than folding
+  // together the wrong ones. Throws like the above, which leaves the cards
+  // ticked for another try.
+  const mergeItems = useCallback(async (items) => {
+    try {
+      return await postJson(`/api/bulk/notes/${jobId}/merge-items`, { items });
+    } catch (e) {
+      toast(`Couldn't merge those items: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  }, [jobId, toast]);
+
   // Take an item the AI could not identify off the batch.
   //
   // Best-effort server-side: a failed identify usually produced no record at
@@ -481,6 +496,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             onSubmit={submitNotes}
             onDeletePhoto={deletePhoto}
             onDeleteItem={deleteItem}
+            onMergeItems={mergeItems}
           />
           {/* Still the way off a batch the seller has changed their mind
               about. Nothing has been drafted at this point, so stopping here
