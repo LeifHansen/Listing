@@ -2084,6 +2084,23 @@ problem:
   unanswered revise keeps the attempt, since eBay may have taken it. A run with
   any refusal logs at WARNING with the first reason, so it reaches the error
   feed rather than living only in the toast.
+
+  **Photos under eBay's 500-pixel minimum are a skip, not a failure.** eBay
+  checks the photos a listing already has on every revise, including one that
+  sends no photos. So a listing first put up with small photos (usually one
+  imported from eBay) refuses even a price-only drop with *"The resolution for
+  provided picture(s) does not meet eBay's Picture Policy requirements."*
+  Resending won't get past that, and the button did nothing wrong, so the run
+  reports the listing as skipped and tells the seller to swap in bigger photos
+  (`ebay_errors.photos_too_small`, `main._photos_block_revise`). The same goes
+  for Finish all. The filled-in details stay on the listing, still marked, and
+  go to eBay with the save that replaces the photos. The editor's message for
+  this refusal names the 500-pixel minimum instead of "re-upload clear photos".
+  **End & relist checks first** (`images.below_ebay_minimum`). Its new
+  listing carries the same photos, so eBay would refuse it, and by then the
+  original is already ended. A listing with any photo under 500 pixels is
+  skipped before anything is copied or ended, and the seller is told to swap
+  in bigger photos.
 - **Finish details → "Enrich all"** fills every listing on the list in one
   pass: eBay's required and recommended item specifics for that listing's
   category, read off its own photos (the same enrichment a fresh AI draft

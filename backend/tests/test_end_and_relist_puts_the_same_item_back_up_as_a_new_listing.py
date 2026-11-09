@@ -288,3 +288,85 @@ def test_it_needs_ebay_and_the_ai(seller, monkeypatch):
     assert resp.status_code == 400 and "Connect eBay" in resp.json()["detail"]
     assert client.post("/api/ebay/end-and-relist",
                        json={"listing_ids": []}).status_code == 400
+
+
+# ------------------------------------------------- photos eBay would refuse
+
+def _photos(rid, sizes):
+    """Real JPEGs of the given (width, height), named a.jpg, b.jpg, ..."""
+    from PIL import Image
+    photos = storage.optimized_dir(rid)
+    photos.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i, size in enumerate(sizes):
+        name = f"{chr(97 + i)}.jpg"
+        Image.new("RGB", size, "white").save(photos / name, "JPEG")
+        names.append(name)
+    return names
+
+
+def _live_with(dbmod, uid, sizes, rid="small-1"):
+    names = _photos(rid, sizes)
+    assert dbmod.upsert_listing(rid, {
+        "title": "Penguin floral shirt", "description": "Old words.",
+        "price": 17.99, "quantity": 1, "images": names, "source": "ebay",
+        "ebay_listing_id": "222", "condition": "Pre-owned",
+    }, status="published", user_id=uid)
+    return rid
+
+
+def test_photos_too_small_for_ebay_end_nothing(seller):
+    """The new listing carries the same photos, and eBay refuses a listing
+    with any photo under 500 pixels on its longest side. Found out at the
+    publish, that refusal comes after the original is already ended: the
+    item is off eBay and the seller is left with a draft. So it is checked
+    first, and the seller keeps exactly what they had."""
+    client, dbmod, uid, ebay = seller
+    rid = _live_with(dbmod, uid, [(400, 300)])
+
+    result = _run(client, dbmod, uid, [rid])["result"]
+
+    assert (result["changed"], result["skipped"], result["failed"]) == (0, 1, 0)
+    row = result["results"]["skipped"][0]
+    assert "500-pixel minimum" in row["message"]
+    assert "Nothing was ended" in row["message"]
+    assert row["needs_you"] is True
+    assert ebay.calls == [], "eBay was touched for a relist it would refuse"
+    rows = _rows(dbmod, uid)
+    assert set(rows) == {rid}, "a draft was left behind"
+    assert rows[rid]["status"] == "published"
+
+
+def test_one_small_photo_is_enough_to_stop_it_and_is_counted(seller):
+    client, dbmod, uid, ebay = seller
+    rid = _live_with(dbmod, uid, [(1200, 900), (320, 480)])
+
+    result = _run(client, dbmod, uid, [rid])["result"]
+
+    assert result["skipped"] == 1
+    assert result["results"]["skipped"][0]["message"].startswith(
+        "1 of its 2 photos are under")
+    assert ebay.calls == []
+
+
+def test_photos_at_the_minimum_relist_as_before(seller):
+    """500 on the longest side is what eBay asks for, so it passes."""
+    client, dbmod, uid, ebay = seller
+    rid = _live_with(dbmod, uid, [(500, 300), (900, 1200)])
+
+    result = _run(client, dbmod, uid, [rid])["result"]
+
+    assert (result["changed"], result["skipped"], result["failed"]) == (1, 0, 0)
+    assert [c[0] for c in ebay.calls] == ["end", "publish"]
+
+
+def test_a_photo_that_wont_open_is_not_called_small(tmp_path):
+    """The check measures. A file it can't read is left to the other checks
+    and to eBay, never refused on a guess."""
+    from PIL import Image
+    unreadable = tmp_path / "x.jpg"
+    unreadable.write_bytes(b"jpeg")
+    small = tmp_path / "s.jpg"
+    Image.new("RGB", (499, 100), "white").save(small, "JPEG")
+    assert main.images.below_ebay_minimum(
+        [unreadable, tmp_path / "missing.jpg", small]) == [small]
