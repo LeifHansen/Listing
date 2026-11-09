@@ -1,147 +1,87 @@
-import {
-  Trash2, Pencil, RotateCw, Star, ChevronLeft, ChevronRight,
-} from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { cn, mediaUrl } from "@/lib/utils";
-import { useOptimisticTurn } from "./useOptimisticTurn";
 
 /* PhotoTile — one uploaded photo as a rounded card.
  *
- * Ordering is explicit: "Make main" promotes a photo to the eBay hero shot in
- * one tap, and ‹ › nudge it one place. There is deliberately no drag.
- * Dragging looked like the obvious answer and was tried twice — a hand-rolled
- * pointer implementation and then @dnd-kit — and it is a poor fit for what
- * this actually is: a three-across grid of ~110px squares on a phone, where
- * the drag target, the scroll gesture and the tap targets all overlap. Buttons
- * cannot stutter, cannot be stolen by the page scroller, work with a keyboard
- * and a screen reader for free, and say what they will do before you commit.
+ * The photo is the tile. The only control laid over it is the bin; the rest
+ * of what a seller does here is done TO the tile rather than with buttons on
+ * it: tap it to open the studio, drag it (press and hold, on a phone) to put
+ * it somewhere else in the order, arrow keys to move it when focused. The
+ * previous tile carried rotate, "Main", ‹ › and a hover Edit as well, and on
+ * a phone-sized grid the six of them covered the picture they were about.
  *
- * Rotation applies instantly: the <img> is turned with CSS in its square
- * frame the moment the button is pressed, and the turn holds until the
- * re-encoded file has loaded, so there is no flash of the old orientation.
- * How that is kept honest — settled by the load of the NEW file, never by
- * the version prop, and taken back when the rotate fails — lives in
- * useOptimisticTurn, which the listing card shares.
+ * The drag itself lives in useDragReorder, owned by the grid; this tile just
+ * takes the handlers it is given. `focused` is `isMain` for the blue ring —
+ * the first photo is the eBay gallery shot, and the ring plus the small badge
+ * is how the grid says so without a button.
  */
 
 export function PhotoTile({
-  sessionId, name, version, index, total, onDelete, onRotate, onEdit,
-  onMakeMain, onMove, reorderable,
+  sessionId, name, version, index, total, onDelete, onEdit,
+  dragProps, lifted, wasDrag,
 }) {
-  const { spin, rotating, rotate, settle } = useOptimisticTurn({ version, onRotate });
   const isMain = index === 0;
-
-  const corner = "z-10 grid place-items-center size-8 rounded-full "
-    + "bg-card/90 backdrop-blur border border-line text-ink-faint shadow-card "
-    + "cursor-pointer transition-colors duration-150 "
-    + "disabled:opacity-35 disabled:pointer-events-none";
+  const label = `Photo ${index + 1} of ${total}${isMain ? ", the main photo" : ""}. `
+    + `Enter to edit${total > 1 ? ", arrow keys to move" : ""}`;
 
   return (
-    <div className={cn(
-      "relative group rounded-tile overflow-hidden border bg-bg-sunken aspect-square",
-      isMain ? "border-blue/60 ring-1 ring-blue/30" : "border-line",
-    )}>
-      <img
-        src={`${mediaUrl(sessionId, name)}?v=${version}`}
-        alt=""
-        // A listing may carry up to MAX_PHOTOS (24) of these, and the Photos
-        // card mounts them all at once. Without this the editor opens by
-        // fetching and decoding every one, on a phone, before the seller has
-        // scrolled to the second row. The two other photo grids in this app
-        // (cards.jsx's EbayPhotos and ListingCard) already set it; this tile
-        // was the one that did not.
-        loading="lazy"
-        draggable={false}
-        onLoad={settle}
-        onError={settle}
-        style={spin ? { transform: `rotate(${spin}deg)` } : undefined}
-        className="size-full object-cover"
-      />
-      {/* Delete — always visible, no hover needed (works on touch). */}
+    <div
+      {...dragProps}
+      className={cn(
+        "relative rounded-tile overflow-hidden border bg-bg-sunken aspect-square select-none",
+        "transition-opacity duration-150",
+        isMain ? "border-blue/60 ring-1 ring-blue/30" : "border-line",
+        // The slot a lifted photo came from: the ghost under the finger is
+        // the photo, this is where it will land if nothing else is chosen.
+        lifted && "opacity-30 border-dashed border-blue",
+      )}
+    >
       <button
         type="button"
+        onClick={(e) => {
+          // The release that ends a drag is also a click; it is not an ask
+          // to open the studio.
+          if (wasDrag?.()) { e.preventDefault(); return; }
+          onEdit?.();
+        }}
+        aria-label={label}
+        className="block size-full cursor-pointer focus:outline-none
+          focus-visible:ring-2 focus-visible:ring-blue focus-visible:ring-inset
+          [-webkit-touch-callout:none]"
+      >
+        <img
+          src={`${mediaUrl(sessionId, name)}?v=${version}`}
+          alt=""
+          // A listing may carry up to MAX_PHOTOS (24) of these, and the Photos
+          // card mounts them all at once. Without this the editor opens by
+          // fetching and decoding every one, on a phone, before the seller
+          // has scrolled to the second row.
+          loading="lazy"
+          draggable={false}
+          className="size-full object-cover pointer-events-none [-webkit-touch-callout:none]"
+        />
+      </button>
+      {/* Delete — always visible, no hover needed (works on touch). Marked so
+          a press on it never starts a drag. */}
+      <button
+        type="button"
+        data-no-drag
         onClick={onDelete}
         aria-label={`Delete photo ${index + 1}`}
         title="Delete photo"
-        className={cn(corner, "absolute top-1.5 left-1.5 hover:text-error hover:border-error/40")}
+        className="absolute top-1.5 left-1.5 z-10 grid place-items-center size-8 rounded-full
+          bg-card/90 backdrop-blur border border-line text-ink-faint shadow-card
+          cursor-pointer transition-colors duration-150 hover:text-error hover:border-error/40"
       >
         <Trash2 size={14} aria-hidden />
       </button>
-      {/* Rotate 90° clockwise. */}
-      {onRotate && (
-        <button
-          type="button"
-          onClick={rotate}
-          disabled={rotating}
-          aria-label={`Rotate photo ${index + 1}`}
-          title="Rotate 90°"
-          className={cn(corner, "absolute top-1.5 right-1.5 hover:text-blue hover:border-blue/40")}
-        >
-          <RotateCw size={14} aria-hidden />
-        </button>
-      )}
-      {/* The eBay gallery shot. A badge once it is, a one-tap promotion until
-          then — which is the ordering question sellers actually have. */}
-      {isMain ? (
+      {isMain && (
         <span className="absolute bottom-1.5 left-1.5 z-10 px-2 py-0.5 rounded-full
-          bg-blue text-on-accent text-[10px] font-bold tracking-wide shadow-card select-none">
+          bg-blue text-on-accent text-[10px] font-bold tracking-wide shadow-card
+          pointer-events-none">
           Main
         </span>
-      ) : reorderable && (
-        <button
-          type="button"
-          onClick={onMakeMain}
-          aria-label={`Make photo ${index + 1} the main image`}
-          title="Use as the main photo"
-          className="absolute bottom-1.5 left-1.5 z-10 inline-flex items-center gap-1
-            h-8 px-2.5 rounded-full bg-card/90 backdrop-blur border border-line
-            text-[11px] font-bold text-ink-faint shadow-card cursor-pointer
-            hover:text-blue hover:border-blue/40 transition-colors duration-150"
-        >
-          <Star size={12} aria-hidden /> Main
-        </button>
       )}
-      {/* Nudge one place. */}
-      {reorderable && (
-        <span className="absolute bottom-1.5 right-1.5 z-10 flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => onMove(-1)}
-            disabled={index === 0}
-            aria-label={`Move photo ${index + 1} earlier`}
-            title="Move earlier"
-            className={cn(corner, "hover:text-blue hover:border-blue/40")}
-          >
-            <ChevronLeft size={14} aria-hidden />
-          </button>
-          <button
-            type="button"
-            onClick={() => onMove(1)}
-            disabled={index === total - 1}
-            aria-label={`Move photo ${index + 1} later`}
-            title="Move later"
-            className={cn(corner, "hover:text-blue hover:border-blue/40")}
-          >
-            <ChevronRight size={14} aria-hidden />
-          </button>
-        </span>
-      )}
-      <div
-        // pointer-coarse: a finger has no hover, so on a phone the Edit
-        // button is simply there. Without it the overlay was invisible AND
-        // still on top of the tile, so a tap on the photo's centre opened
-        // the studio from a control nobody could see.
-        className="ph-ov absolute inset-0 bg-ink/0 group-hover:bg-ink/25 transition-colors duration-200
-          flex items-center justify-center p-2.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100
-          pointer-coarse:opacity-100"
-      >
-        <button
-          type="button"
-          onClick={onEdit}
-          className="inline-flex items-center gap-1.5 h-8 px-3.5 rounded-full bg-card text-ink text-xs font-semibold shadow-float cursor-pointer hover:-translate-y-0.5 transition-transform duration-150"
-        >
-          <Pencil size={13} aria-hidden /> Edit
-        </button>
-      </div>
     </div>
   );
 }
