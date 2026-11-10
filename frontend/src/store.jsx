@@ -1,7 +1,7 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { api, postJson, pollJob, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import {
   EMPTY_FILTERS, addSavedView, normalizeFilters, normalizeSavedView,
   normalizeSavedViews, removeSavedView,
@@ -1390,6 +1390,41 @@ export function AppProvider({ children }) {
     }
   }, [toast, loadListings]);
 
+  // Split -- the inverse of the merge, for a draft written for two items
+  // (the uploader's bulk toggle left off). `body` is what the split dialog
+  // collected: the photos that belong to the other item, whether to rewrite
+  // this draft from the photos it keeps, and a line about each. The server
+  // moves the photos and starts the AI on both drafts (see its split route).
+  //
+  // THROWS on failure, which is what keeps the dialog up with its ticks in
+  // place. On success the grid is refreshed at once -- the new draft is in
+  // Drafts as a stub, this one has fewer photos -- and refreshed again when
+  // the AI lands, which is minutes away and must not be waited on here. The
+  // caller closes an editor it has open on this listing: a chain is
+  // rewriting it, and an autosave over the rewrite would undo it.
+  const splitListing = useCallback(async (id, body) => {
+    const res = await postJson(`/api/listings/${id}/split`, body);
+    loadListings({ quiet: true });
+    const jobs = Object.values(res.jobs || {}).filter(Boolean);
+    toast(`${res.photos} photo${res.photos === 1 ? "" : "s"} moved to a new draft — `
+      + (jobs.length > 1 ? "the AI is writing both listings now."
+        : "the AI is writing it now."), { kind: "success" });
+    Promise.allSettled(jobs.map((j) => pollJob(j))).then((outcomes) => {
+      loadListings({ quiet: true });
+      const failed = outcomes.filter((o) => o.status === "rejected");
+      if (failed.length) {
+        toast(`The AI couldn't finish ${failed.length === jobs.length ? "the" : "one of the"} `
+          + `split listings: ${failed[0].reason?.message || "unknown error"}. `
+          + "The photos are safe — use Start over on that draft to retry.",
+          { kind: "error", ttl: 12000 });
+      } else {
+        toast(jobs.length > 1 ? "Both listings are written — find them in Drafts."
+          : "The new listing is written — find it in Drafts.", { kind: "success" });
+      }
+    });
+    return res;
+  }, [toast, loadListings]);
+
   // Mass delete (drafts): one request for the whole selection.
   const bulkDeleteListings = useCallback(async (ids) => {
     try {
@@ -1908,7 +1943,7 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, setSession, currentSession, startNew, openListing, deleteListing, bulkDeleteListings,
-    duplicateListing,
+    duplicateListing, splitListing,
     rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
@@ -1937,7 +1972,7 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, currentSession, startNew, openListing,
-    deleteListing, bulkDeleteListings, duplicateListing, rotateListingPhoto,
+    deleteListing, bulkDeleteListings, duplicateListing, splitListing, rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,

@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ArrowRight, PlusCircle, LayoutDashboard,
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
-  Rocket, RefreshCw, Copy,
+  Rocket, RefreshCw, Copy, Split,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
@@ -14,6 +14,7 @@ import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
 import { BulkBanner } from "@/components/BulkBanner";
+import { SplitListingDialog } from "@/components/SplitListingDialog";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
@@ -199,7 +200,7 @@ function PublishedScreen({ w }) {
 export function Workflow() {
   const {
     session, startNew, setSession, openListings, deleteListing, duplicateListing,
-    activeBulk,
+    splitListing, activeBulk,
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
@@ -207,6 +208,9 @@ export function Workflow() {
   useEditorShortcuts(w);
   // { name } — the photo open in the studio (clean up, remove background, crop).
   const [editing, setEditing] = useState(null);
+  // The split dialog (see SplitListingDialog); `key` remounts it with fresh
+  // ticks on every open rather than the last split's.
+  const [splitting, setSplitting] = useState({ open: false, key: 0 });
 
   // Leaving a DRAFT asks nothing. Autosave has been sending every edit as it
   // was made (useListingForm), and Done sends whatever the timer has not
@@ -267,6 +271,22 @@ export function Workflow() {
 
   // The header's ⋯ menu: the actions a seller takes once a month, which
   // used to be five buttons across the header and four more in the bar.
+  // Split: a draft written for two items becomes two. Drafts with photos
+  // enough to divide only -- a live listing's photos are the real listing's.
+  const canSplit = !w.isLive && session.status !== "ended"
+    && (w.form.images || []).length >= 2;
+  const split = async (body) => {
+    // What is typed here is saved first: the split copies the server's copy.
+    if (!mustConfirmLeaving) await w.flushSave();
+    await splitListing(session.sessionId, body);
+    // The AI is rewriting this draft (and writing the other). An editor left
+    // open on it would autosave the old text back over the rewrite, so it
+    // closes onto Drafts, where both drafts are.
+    setSplitting({ open: false, key: splitting.key });
+    setSession(null);
+    openListings("drafts");
+  };
+
   const menuItems = [
     // The bar's primary action, listed here for its shortcut.
     { label: w.isLive ? "Update Live Listing" : "Publish Live",
@@ -281,6 +301,11 @@ export function Workflow() {
         if (!mustConfirmLeaving) await w.flushSave();
         duplicateListing(session.sessionId);
       } },
+    canSplit && {
+      label: "Split into two listings", icon: <Split aria-hidden />,
+      title: "Two items in one draft? Move the other item's photos to a new draft the AI writes",
+      onSelect: () => setSplitting((s) => ({ open: true, key: s.key + 1 })),
+    },
     { label: "Check with eBay", icon: <ListChecks aria-hidden />,
       title: "Runs eBay's own checks on this listing without publishing it",
       onSelect: w.runPreflight },
@@ -384,6 +409,18 @@ export function Workflow() {
       {/* Long waits (publish, save, refine) use a full-screen branded overlay
           so feedback is visible no matter where the page is scrolled. */}
       {w.aiBusy && <LoadingOverlay messages={w.aiBusy} />}
+
+      {splitting.key > 0 && (
+        <SplitListingDialog
+          key={splitting.key}
+          open={splitting.open}
+          onClose={() => setSplitting((s) => ({ ...s, open: false }))}
+          sessionId={session.sessionId}
+          images={w.form.images || []}
+          title={w.form.title}
+          onSplit={split}
+        />
+      )}
 
       {/* Above everything: an unanswered conflict is an edit that will never
           reach eBay, so it is not something to scroll past. */}

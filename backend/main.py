@@ -50,8 +50,8 @@ from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
                      MarketplaceState, PendingItemRequest, PendingMergeRequest,
-                     PendingPhotoRequest, PublishRequest, RefineRequest,
-                     SessionOnlyRequest)
+                     PendingPhotoRequest, PendingSplitRequest, PublishRequest,
+                     RefineRequest, SessionOnlyRequest, SplitListingRequest)
 from .services import (barcodes, bg_removal, bulk_actions, claude_ai,
                        dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
@@ -8240,6 +8240,42 @@ def _draft_bulk_items(job_id: str, remaining: list, ctx: _BulkContext,
     _stop_if_cancelled(job_id)
 
 
+def _group_pile(job_id: str, opt_dir: Path, names: list[str],
+                notes: str) -> tuple[list[str], list[dict]]:
+    """Sort a pile of optimized photos into items: (the photos that could be
+    read, in pile order; the groups, as {"name", "indices"} into that list).
+
+    The grouping pass of a batch, on its own so a single upload the seller
+    wants sorted after all (see split_pending_upload) runs exactly the pass a
+    batch would have. `notes` is the seller's inventory of the pile, which is
+    where it earns the most: "two lacoste polos" answers the one question
+    grouping keeps getting wrong before it is asked.
+
+    One unreadable photo must not sink the whole pile (it did: a truncated
+    upload failed the batch right here) — it is dropped and the rest are
+    grouped. Grouped in API-sized chunks: resellers shoot item-by-item, so
+    photos of the same item land in the same chunk except right at a boundary,
+    where worst case one item shows up as two entries to merge by hand.
+    """
+    thumbs, readable = [], []
+    for n in names:
+        try:
+            thumbs.append(images.thumb_jpeg(opt_dir / n))
+            readable.append(n)
+        except Exception as exc:  # noqa: BLE001 - skip one bad photo
+            log.warning("bulk %s: skipping unreadable photo %s: %s",
+                        job_id, n, exc)
+    groups: list[dict] = []
+    for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
+        _stop_if_cancelled(job_id)
+        part = claude_ai.group_photos(
+            thumbs[base:base + BULK_GROUP_CHUNK], notes=notes)["groups"]
+        groups.extend({"name": g["name"],
+                       "indices": [base + i for i in g["indices"]]}
+                      for g in part)
+    return readable, groups
+
+
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                   uid: Optional[str], resumed: bool = False,
                   resume_from: Optional[dict] = None,
@@ -8405,32 +8441,10 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
             opt_dir = storage.optimized_dir(staging_id)
 
             _bulk_set(job_id, phase="grouping", total_photos=len(names), current=0)
-            # One unreadable photo must not sink the whole batch (it did: a
-            # truncated upload failed the job right here) — drop it and group
-            # the rest.
-            thumbs, readable = [], []
-            for n in names:
-                try:
-                    thumbs.append(images.thumb_jpeg(opt_dir / n))
-                    readable.append(n)
-                except Exception as exc:  # noqa: BLE001 - skip one bad photo
-                    log.warning("bulk %s: skipping unreadable photo %s: %s",
-                                job_id, n, exc)
-            names = readable
+            names, groups = _group_pile(job_id, opt_dir, names, notes)
             if not names:
                 _bulk_set(job_id, done=True, error="No usable photos in the upload.")
                 return
-            # Group in API-sized chunks. Resellers shoot item-by-item, so photos of
-            # the same item land in the same chunk except right at a boundary —
-            # worst case a boundary item shows up as two entries to merge by hand.
-            groups: list[dict] = []
-            for base in range(0, len(thumbs), BULK_GROUP_CHUNK):
-                _stop_if_cancelled(job_id)
-                part = claude_ai.group_photos(
-                    thumbs[base:base + BULK_GROUP_CHUNK], notes=notes)["groups"]
-                groups.extend({"name": g["name"],
-                               "indices": [base + i for i in g["indices"]]}
-                              for g in part)
             # The plan, written down before the first draft: this is what lets a
             # restart continue from the next item instead of ending the batch.
             _bulk_set(job_id, total_items=len(groups), _names=names, _groups=groups,
@@ -9159,6 +9173,159 @@ def merge_pending_items(job_id: str, req: PendingMergeRequest,
     return {"ok": True, "pending_items": pending, "merged": into}
 
 
+# The seller said "sort it" to a pile the uploader took as one item, and the
+# sort found one item. The question goes back up with this beside it, so the
+# seller knows the pile is still one listing rather than wondering what the
+# button did -- and knows the one thing that changes the answer.
+_STILL_ONE_ITEM = (
+    "The AI still sees one item in these photos. If there is more than one, "
+    "say what they are in the box and try again — e.g. “a blue polo, a "
+    "champagne bottle”.")
+
+
+@app.post("/api/bulk/notes/{job_id}/split")
+def split_pending_upload(job_id: str, req: PendingSplitRequest,
+                         request: Request) -> dict:
+    """Sort a single upload into items, while it is still asking about them.
+
+    The way back from the toggle the seller did not tick. A pile of two items
+    uploaded with bulk mode off reaches the guidance step as ONE item with
+    every photo under it, and until now the only way out was to write the
+    listing and split it afterwards: one draft paid for, a split, and two
+    more drafts. Here nothing has been drafted or charged for a draft, so the
+    pile can still become the batch it should have been.
+
+    It becomes exactly that. The grouping pass a batch runs (see _group_pile)
+    sorts the session's optimized photos into items, with `notes` -- what the
+    seller typed under the one item, read as the inventory of the pile -- and
+    the job turns into a paused batch: the session is its staging pile, the
+    groups are its plan, and from here the batch screen's own tools apply
+    (merge two cards, drop one, the answer that drafts them all). The AI
+    charge the upload took up front is given back, because a batch charges
+    per item as each one is drafted.
+
+    The sort runs on a thread the client polls, the same as every other pass
+    (phase "grouping"; the question comes back as "awaiting_notes"). A sort
+    that finds one item, or fails, puts the single-item question back as it
+    was with `split_error` beside it: the seller has lost nothing, and is told
+    why nothing changed.
+    """
+    uid = deps.uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    if seen.get("done") or seen.get("phase") != _AWAITING_NOTES:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    if seen.get("kind") != "pipeline":
+        raise HTTPException(
+            400, "These photos are already sorted into items — tick Same item "
+                 "to merge two, or remove one.")
+    session_id = str(seen.get("_session_id") or "")
+    names = storage.list_optimized(session_id) if session_id else []
+    if not names:
+        raise _photos_gone(
+            job_id, "upload them again",
+            "Those photos are no longer on the server — they were cleared "
+            "while this waited for your notes. Please upload them again.")
+    if len(names) < 2:
+        raise HTTPException(
+            400, "One photo can only be one item — add the other item's "
+                 "photos to sort them into separate listings.")
+    hint = listing_prompt.clean_seller_notes(req.notes)
+
+    # Out of the pause and into the sort under one lock, for the reason
+    # bulk_notes gives: two taps arriving together must not both run it.
+    job = jobstore.claim(
+        job_id, _AWAITING_NOTES, uid,
+        phase="grouping", pending_items=None, current=0,
+        total_photos=len(names), split_error=None, beat=time.time())
+    if job is None:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    threading.Thread(
+        target=_run_split_job,
+        args=(job_id, session_id, uid, hint, job.get("_refunds") or []),
+        daemon=True,
+    ).start()
+    log.info("pipeline %s: seller asked for the pile to be sorted into items "
+             "(%d photo(s))", job_id, len(names))
+    return {"ok": True, "job_id": job_id}
+
+
+def _run_split_job(job_id: str, session_id: str, uid: Optional[str],
+                   hint: str, receipts: list) -> None:
+    """Worker for split_pending_upload: sort the session's photos, and either
+    turn the job into a paused batch or put the single-item question back.
+
+    `receipts` is the identify charge the upload took up front. It is given
+    back only once the pile has really become a batch -- a batch charges per
+    item -- and never on the way back to the single question, which still
+    spends it on the one draft when the seller answers (see bulk_notes).
+    """
+    names = storage.list_optimized(session_id)
+    single = _pending_items(
+        session_id, names, [{"name": "", "indices": list(range(len(names)))}])
+
+    def back_to_one(why: str) -> None:
+        # The question as it was, with why nothing changed beside it. A
+        # revise/claim is not needed: this worker is the only thing that
+        # touches a job in "grouping".
+        _bulk_set(job_id, phase=_AWAITING_NOTES, pending_items=single,
+                  split_error=why, kind="pipeline", beat=time.time())
+
+    if not names:
+        back_to_one("Those photos are no longer on the server.")
+        return
+    # The pile's own notes from the uploader, and the line typed under the
+    # item here, read together as the inventory of the pile. Saved back to
+    # the session, which is the staging pile from here on, so every item
+    # drafted out of it inherits both (see _bulk_item_session).
+    pile = storage.load_notes(session_id)
+    notes = ", ".join(p for p in (pile, hint) if p)
+    try:
+        readable, groups = _group_pile(
+            job_id, storage.optimized_dir(session_id), names, notes)
+    except Exception as exc:  # noqa: BLE001 - the question must come back
+        reference = deps.support_reference()
+        log.warning("pipeline %s: couldn't sort the pile [%s]: %s",
+                    job_id, reference, exc)
+        back_to_one("Couldn't sort these photos just now — "
+                    + (claude_ai.ai_error_message(exc)[1]
+                       if claude_ai.is_ai_error(exc)
+                       else _try_again("sort these photos", reference)))
+        return
+    if not readable:
+        back_to_one("None of these photos could be read.")
+        return
+    if len(groups) < 2:
+        back_to_one(_STILL_ONE_ITEM)
+        return
+    if hint:
+        storage.save_notes(session_id, notes)
+    # A batch now: the up-front charge goes back, and each item is charged
+    # for as it is drafted. The refund lands before the record changes, so a
+    # process that dies between the two leaves a pipeline record whose boot
+    # settlement refunds the same receipts -- which the ledger rejects as
+    # already paid rather than paying twice (see tokens.refund_all).
+    tokens.refund_all(receipts)
+    _bulk_set(job_id,
+              # kind is absent on photo batches; None reads the same way
+              # everywhere a batch is told apart from a pipeline job.
+              kind=None, phase=_AWAITING_NOTES, split_error=None,
+              pending_items=_pending_items(session_id, readable, groups),
+              total_items=len(groups), total_photos=len(readable), current=0,
+              items=[], remove_bg=False, beat=time.time(),
+              _staging_id=session_id, _strip_bg=False, _resumes=0,
+              _names=readable, _groups=groups, _done=[], _inflight=[],
+              _refunds=[])
+    log.info("pipeline %s: sorted %d photo(s) into %d item(s); now a batch "
+             "waiting on the seller's notes", job_id, len(readable),
+             len(groups))
+
+
 @app.get("/api/bulk/status/{job_id}/brief")
 def bulk_status_brief(job_id: str, request: Request) -> Response:
     """Just "is this batch finished?" — the same status without the drafted
@@ -9386,6 +9553,14 @@ def identify_async(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     uid = deps.uid(request)
     spent = deps.charge_ai(request, "identify")  # up front: a broke caller 402s here
+    return {"job_id": _start_identify_job(session_id, uid, spent)}
+
+
+def _start_identify_job(session_id: str, uid: Optional[str],
+                        spent: Optional[dict]) -> str:
+    """Register and start a background identify over a session's photos, and
+    return the job id to poll. `spent` is the charge the caller already took
+    for it; the job refunds it if the chain fails."""
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
@@ -9396,7 +9571,7 @@ def identify_async(session_id: str, request: Request) -> dict:
         target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,
     ).start()
     log.info("identify job %s: started (session=%s)", job_id, session_id)
-    return {"job_id": job_id}
+    return job_id
 
 
 @app.post("/api/shelf-scan")
@@ -11494,6 +11669,158 @@ def duplicate_listing(listing_id: str, request: Request) -> dict:
     return {"ok": True, "id": new_id, "from": listing_id,
             "photos": len(copied) + len(listing.image_urls or []),
             "listing": listing.model_dump()}
+
+
+# What a draft split leaves on the new draft while the AI writes it: the
+# photos, and the fields that are about the SELLER rather than the item, so
+# the second listing publishes with the same shipping and store category the
+# first one had before the seller got to it. Nothing that describes the item
+# -- that is what the identify chain is for, and the title it would copy was
+# written for both items.
+_SPLIT_CARRIED_FIELDS = (
+    "fulfillment_policy_id", "return_policy_id",
+    "store_category_id", "store_category_name", "currency", "quantity",
+    "package_weight_lb", "package_weight_oz", "promote", "ad_rate_percent",
+)
+
+
+def _unlink_optimized(session_id: str, name: str) -> None:
+    """Take one optimized photo's bytes off the volume and out of the R2
+    mirror, once nothing refers to them any more. Best-effort: the listing
+    has already been saved without the photo, and a file that outlives it is
+    a tidiness problem for the reclaim pass, not the seller's."""
+    opt_dir = storage.optimized_dir(session_id).resolve()
+    path = (opt_dir / name).resolve()
+    if opt_dir not in path.parents:
+        return
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError as exc:
+        log.info("split: couldn't drop %s from %s: %s", name, session_id, exc)
+    if objstore.enabled():
+        deps.in_background(objstore.delete, objstore.key_for(session_id, name),
+                           what="split R2 delete")
+
+
+@app.post("/api/listings/{listing_id}/split")
+def split_listing(listing_id: str, req: SplitListingRequest,
+                  request: Request) -> dict:
+    """Split a draft written for two items into two drafts.
+
+    The fix for the uploader's bulk toggle left off: every photo of two items
+    went into one upload, and the AI wrote one listing describing both. The
+    seller names the photos that belong to the OTHER item (`photos`, by file
+    name as in Listing.images); those move to a brand-new draft -- copied
+    over and taken off this one -- and the identify chain writes that draft
+    from them. With `redraft` (the default) the chain runs over the photos
+    this listing keeps as well, because its title and description were
+    written for both; off, this listing only loses the photos and keeps its
+    text.
+
+    Drafts only. A live listing's photos are the real listing's photos, and
+    taking half of them away is a revision the seller would make on purpose
+    in the editor, with Update Live Listing, not through a split.
+
+    Both chains are charged for up front like /api/identify-async, so a broke
+    caller gets its 402 before a photo has moved. The new draft lands as a
+    stub (its photos and the seller-side fields of this one) the moment this
+    returns, so it is in Drafts while the AI writes it; the drafts' jobs are
+    returned to poll (`jobs.new`, and `jobs.original` with `redraft`).
+    """
+    if not config.vision_ready():
+        raise HTTPException(400, NO_VISION_BACKEND)
+    rec = db.get_listing(listing_id)
+    if not rec:
+        raise HTTPException(404, "Listing not found")
+    uid = deps.uid(request)
+    if rec.get("user_id") and rec["user_id"] != uid:
+        raise HTTPException(404, "Listing not found")
+    if (rec.get("status") or "draft") not in ("draft", "dry_run"):
+        raise HTTPException(
+            409, "Only a draft can be split. This listing is on a marketplace "
+                 "— end it first, or duplicate it and edit the copy.")
+    data = dict(rec.get("listing") or {})
+    images = [str(n) for n in (data.get("images") or [])] \
+        or storage.list_optimized(listing_id)
+    wanted = {str(n).strip() for n in (req.photos or [])}
+    picked = [n for n in images if n in wanted]
+    if not picked:
+        raise HTTPException(
+            400, "Pick at least one photo for the other item.")
+    if len(picked) >= len(images):
+        raise HTTPException(
+            400, "Leave at least one photo on this listing — a draft with "
+                 "none can't be written.")
+
+    # Charged before anything moves, like every identify: a 402 here costs
+    # nothing, where one after the photos had moved would leave the seller
+    # with a draft nobody is going to write.
+    spent_new = deps.charge_ai(request, "identify")
+    spent_old = None
+    if req.redraft:
+        try:
+            spent_old = deps.charge_ai(request, "identify")
+        except HTTPException:
+            tokens.refund(spent_new)
+            raise
+
+    def _undo_charges() -> None:
+        tokens.refund(spent_new)
+        tokens.refund(spent_old)
+
+    new_id = storage.new_session_id()
+    try:
+        copied = _copy_photos(listing_id, new_id, picked)
+    except HTTPException:
+        _undo_charges()
+        raise
+    if not copied:
+        _undo_charges()
+        raise HTTPException(
+            409, "Those photos aren't on the server any more — reload the "
+                 "listing and try again.")
+    # The notes the seller gave the first draft are about the pile both items
+    # came from, so the new draft inherits them; what they said about THIS
+    # item is written beside them, the way the guidance step does.
+    storage.save_notes(new_id, storage.load_notes(listing_id))
+    storage.save_item_notes(new_id, listing_prompt.clean_item_notes(req.notes))
+
+    # Off this listing: its order first (the row is the truth), and only then
+    # the bytes, so a save that cannot be written deletes nothing. Same order
+    # as _drop_optimized_image, for the same reason.
+    remaining = [n for n in images if n not in set(copied)]
+    try:
+        remaining = _save_image_order(listing_id, rec, remaining, uid)
+    except Exception:
+        _undo_charges()
+        storage.purge_session(new_id)
+        raise
+    for name in copied:
+        _unlink_optimized(listing_id, name)
+    if req.redraft and req.keep_notes is not None:
+        storage.save_item_notes(
+            listing_id, listing_prompt.clean_item_notes(req.keep_notes))
+
+    carried = {k: data[k] for k in _SPLIT_CARRIED_FIELDS
+               if k in data and k in Listing.model_fields}
+    stub = Listing(**carried, images=copied)
+    storage.save_listing(new_id, stub)
+    landed = db.upsert_listing(new_id, stub.model_dump(),
+                               status="draft", user_id=uid)
+    if db.enabled() and not landed:      # see the note in merge_listings
+        _undo_charges()
+        raise errors.StorageUnavailable(
+            "Couldn't create the new draft just now. Try again in a moment.")
+    jobs = {"new": _start_identify_job(new_id, uid, spent_new)}
+    if req.redraft:
+        jobs["original"] = _start_identify_job(listing_id, uid, spent_old)
+    log.info("split: %s -> new draft %s (%d photo(s) moved, %d kept, "
+             "redraft=%s) user=%s", listing_id, new_id, len(copied),
+             len(remaining), req.redraft, uid)
+    return {"ok": True, "id": new_id, "from": listing_id,
+            "photos": len(copied), "remaining": remaining,
+            "listing": stub.model_dump(), "jobs": jobs}
 
 
 @app.delete("/api/listings/{listing_id}")
