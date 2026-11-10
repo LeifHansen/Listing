@@ -26,7 +26,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 
 | Stage | What happens | Tech |
 |-------|--------------|------|
-| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when removal is on) — never on a close-up of a tag or a label, where there is no background to take off, and never by the model on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Anthropic API |
+| Optimize | Honour the camera's EXIF, turn the item upright when it was shot lying sideways or on its head (a vision pass built for objects as much as clothing, applied only when two looks agree), cut the background onto a white canvas with a soft contact shadow (when the seller has switched background removal on and ticked it for the pile) — never on a close-up of a tag or a label, where there is no background to take off, and never by a cutout on a PAINTING, PRINT or POSTER, which is cut to its own outer border or left alone — resize to 1600px, strip the metadata, and keep the pre-cutout frame for the passes that read the item | Pillow + Photoroom API + Anthropic API |
 | Identify | Photos sent to a vision model — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Google Gemini API (`GOOGLE_API_KEY`) or Anthropic API |
 | Price | The draft's price is the one thing the photos cannot answer, so a second pass looks it up. On the Google backend it runs with **Google Search grounding**: the model searches for what comparable items actually sold for and answers with the pages it read, and those URLs — the ones the API vouches for, not the ones the model typed — are what the finding is cited with. Never lowers a price and never demotes an item; it may raise a price to the bottom of the researched range, name a hedged item, and flag the more valuable variant the photos cannot rule out | Google Search grounding, or Claude's web search |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
@@ -202,7 +202,7 @@ than two copies that drift.
 | Job | ~time | What only it can prove |
 |-----|------:|------------------------|
 | Lint + unit tests | 35s | The modules with no heavy dependencies really have none — `listing_prompt.py` and `barcodes.py` hold rules that must stay testable without the SDK installed |
-| Cutout safety | 10s | The photo pass works on **Pillow alone**: no rembg, no model download |
+| Cutout safety | 10s | The photo pass works on **Pillow alone**: no httpx, no Photoroom key, no network |
 | Frontend build | 60s | The only thing that type-checks the JSX, plus lint and the 500-odd component tests |
 | App smoke test | 4m | The whole backend suite against the app's **real** dependencies, then a browser walking every screen of the built app against a booted server |
 
@@ -232,7 +232,7 @@ tree rather than a missing step. Then, from the repository root:
 
 ```bash
 (cd frontend && npm ci && npm run lint && npm test && npm run build)
-pip install -r requirements.txt pytest ruff   # rembg/onnxruntime optional
+pip install -r requirements.txt pytest ruff
 ruff check backend
 python -m pytest backend/tests -q -rs         # nothing may skip, as in CI
 ```
@@ -283,7 +283,7 @@ longer carries a single field below. The operator detail moved behind
 # health-watch alarm reads.
 curl -s https://<app>.fly.dev/api/ready | python3 -m json.tool
 
-# Everything else: config_warnings, bg_engines, the R2 bucket and the missing
+# Everything else: config_warnings, the R2 bucket and the missing
 # variables by name, tokens/Stripe, the raw db and objstore errors.
 curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   https://<app>.fly.dev/api/admin/diagnostics | python3 -m json.tool
@@ -307,32 +307,33 @@ curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   Renaming a live secret restarts the machine, and with
   `min_machines_running = 1` that means restarting it under whatever batch is
   in flight — not a trade worth making to satisfy a spelling.
-- **`image_engine`** on `/api/ready` is the on-server background-removal
-  model (`isnet-general-use`, baked into the image), whether it has loaded,
-  how long the last inference took, and **`chain`** — the engines that cut a
-  background out, in the order they are tried. There is always a remote engine
-  ahead of `local` when its key is set, and `local` is always the last entry,
-  because it is the only engine that needs no credentials: an app with no keys
-  reads `["local"]` and behaves exactly as it did before any of this.
-  `BG_ENGINE` picks the front of that chain (`auto`, `canva`, `local`). The
-  remote engine is **Canva's REST API** — Canva owns remove.bg, and its
-  `background_removal` image transformation is where that remover lives now
-  that the standalone remove.bg API shuts down on 2026-12-01. It is OAuth, not
-  an API key: connect the Canva account once with
-  `python3 scripts/canva_authorize.py`, which prints `CANVA_CLIENT_ID`,
-  `CANVA_CLIENT_SECRET` and `CANVA_REFRESH_TOKEN` for `fly secrets`. The
-  account needs Canva Pro (the remover and transparent PNG export are both
-  paid-plan capabilities) and the image-transformation preview API switched on
-  for the app; each cutout spends one of its AI credits. See `.env.example`
-  for the rate limits (notably 75 exports per five minutes) and
-  `backend/services/cutout_api.py` for the four-job round trip a cutout is.
-  Reading `chain` is how a **broken connection gets noticed**: without it, the
-  only symptom is sellers' cutouts quietly going back to the slow built-in
-  model, and the studio only says so per-cutout (the `degraded` flag on
-  `/api/image/remove-bg`). The older remove.bg / Leonardo / Pixian /
-  Photoroom / Adobe engines are gone, so a `REMOVEBG_API_KEY`,
-  `LEONARDO_API_KEY`, `PHOTOROOM_API_KEY` or `LIGHTROOM_API_KEY` still set on
-  the app is a dead credential and can be unset.
+- **`image_engine`** on `/api/ready` is background removal: `engine`
+  (`photoroom`, the only one), `ready` (a `PHOTOROOM_API_KEY` is set) and
+  `sandbox` (that key is Photoroom's free test key, which watermarks every
+  cutout — `config_warnings` says so too). There is **no model on the server**:
+  every cutout is one call to Photoroom's Remove Background API on the app's
+  own Photoroom account, and a photo Photoroom cannot cut is kept as shot with
+  the reason in `bg_error`. A key Photoroom refuses (401/403) or an account
+  with no plan or no images left (402) reads to the seller as "background
+  removal is unavailable right now" and is logged for the operator with the
+  status; see `backend/services/cutout_api.py`. The Canva, remove.bg,
+  Leonardo, Pixian and Adobe engines, and the in-house rembg model, are all
+  gone, so `CANVA_CLIENT_ID`, `CANVA_CLIENT_SECRET`, `CANVA_REFRESH_TOKEN`,
+  `REMOVEBG_API_KEY`, `LEONARDO_API_KEY` or `LIGHTROOM_API_KEY` still set on
+  the app are dead credentials and can be unset (and
+  `/data/.canva_token.json` deleted).
+- **Background removal is switched on per seller.** Photoroom has no API for
+  creating an account or a key on someone else's behalf, so sellers do not
+  get Photoroom accounts: the app cuts on its own, and each seller turns the
+  feature on once in **Settings → Background removal**, which is where they
+  agree to the photos they choose being sent to Photoroom. Until then the
+  uploader does not offer the toggle and every route that cuts answers 409
+  (`backend/services/bg_removal.py`). Each cutout is the `image_ai` token, and
+  each seller's month is counted against `BG_REMOVAL_MONTHLY_LIMIT` (default
+  1000; `bg_removal_usage` table) as a backstop on the app's own Photoroom
+  bill — reserved before the charge, given back for every photo that kept its
+  background. With no database there are no accounts, and the key alone
+  switches it on.
 - **`disk_free_mb`**, **`checks`** and **`object_storage`** on `/api/ready`
   cover the rest, with **`build`** on `/api/health`; `health-watch.yml` alerts
   on them every two hours. It reads `/api/ready`, not `/api/health` — pointing
@@ -1187,7 +1188,7 @@ free — the right default for local dev and self-hosters.
 | AI refine instruction | 1 | free-form "make it..." edits |
 | Autofill item specifics | 2 | the standalone button (bundled free inside a draft) |
 | Shop Mode shelf scan | 2 | one video's frames |
-| AI photo tool | 1 / photo | background removal, auto-clean, smart crop |
+| Background removal | 1 / photo | Photoroom cutout, in a pile or in the studio (refunded when a photo keeps its background) |
 
 **Packs** (edit `PACKS` in `backend/services/tokens.py`): Starter 50/$5.99 ·
 Plus 120/$11.99 · Pro 300/$24.99 · Power 1000/$69.99 — $0.12 down to
@@ -1408,7 +1409,9 @@ backend/
   marketplaces/      one provider per marketplace (eBay, Etsy, Depop) behind
                      a shared publish contract, plus the shared state model
   services/
-    images.py        photo pipeline (EXIF, upright, local cutout, resize)
+    images.py        photo pipeline (EXIF, upright, cutout on white, resize)
+    cutout_api.py    Photoroom's Remove Background API: one photo in, a matte out
+    bg_removal.py    the per-seller switch and the monthly count
     orient.py        the vision pass that turns an item upright
     claude_ai.py     vision identify, refine, specifics fill, maker lookup —
                      and the router that sends identify + the pricing lookup
@@ -1449,39 +1452,21 @@ production bundle automatically.
 Per photo, the pass does four things and nothing else: it honours the
 camera's EXIF orientation, it turns the item upright when it was photographed
 lying sideways or on its head, it takes the background off when the seller
-asked (one run of the local rembg model, the matte hardened a little, the item
-composited on white), and it sizes the result for eBay -- the longest side to
+asked (one Photoroom cutout, the item composited on white under a soft
+contact shadow), and it sizes the result for eBay -- the longest side to
 1600px, never upscaled -- saved as a JPEG with no metadata, so the GPS of the
 seller's home never rides along to a listing. The frame the seller composed is
-the frame that ships; cropping and fixing a cutout the model got wrong are the
+the frame that ships; cropping and fixing a cutout Photoroom got wrong are the
 seller's, in the photo studio.
 
-**A photo may hold more than one thing.** The cutout asks whether what the
-matte kept is the PRODUCT, and for a long time that meant one solid blob --
-which is false for a great deal of what resells. A seller photographing a pair
-of shoes, two paintings, earrings, or an item beside its box got a perfect
-matte thrown away for having two pieces in it, and the photo came back
-untouched with no explanation that fitted. A few compact objects now count as
-the product, provided they are few, are nearly all of what was kept, and each
-fills its own bounding box. What still refuses is the case the guard was built
-for: a photo OF a picture, where the model finds the tree or the boat the
-picture depicts and deletes the artwork around it. Those pieces sit in
-opposite corners and fill the box between them at 0.10-0.22, where two
-canvases side by side fill it at 0.87.
-
-**A hedged matte is repaired, not refused.** The model is confident where
-there is contrast and unsure where there is not, so a pale item on a pale
-backdrop -- a white shirt on white foamboard, which is what sellers are told
-to shoot on -- comes back with its collar label at full strength and the
-fabric between somewhere in the middle. Shipped as alpha that is a shirt
-composited at a third of its opacity, i.e. a ghost. The pass now makes the
-item's INTERIOR opaque before hardening: a pixel inside the item is the item,
-whatever the model's confidence, because there is nothing else it could be.
-Interior means cells wholly covered by the item, eroded back from the edge,
-so a soft boundary stays soft; and it is gated at the same threshold that
-separates background from an edge, so the hole through a ring, the gap under
-a mug's handle and the backdrop between a pair of boots all stay holes. A
-cutout is refused now only when there is no item in the frame to separate.
+**A matte is judged on one thing only: did it keep anything.** The in-house
+model this replaced had a stack of gates fitted to its failures — is the kept
+part solid, is it one object, does it fill its own box — and every threshold
+in them refused real products on good mattes (necklaces, belts, a pair of
+shoes, an item beside its box). Photoroom's matte answers coverage and
+nothing else. What stands between a photo OF a picture and a cutout that lifts
+the subject out of it is not a gate on the matte, which cannot see that, but
+the screen below, which keeps pictures away from the cutout altogether.
 
 The item's orientation is the one thing EXIF cannot tell, so a vision model is
 asked (`backend/services/orient.py`). The first version of that pass was
@@ -1505,10 +1490,10 @@ quilt she painted it on, floating on white. Another photo kept the turtle and
 the signature and deleted the rest. The item the listing was for had been
 erased from the photos of it.
 
-Every guard above passed, and each was right to. They read the **alpha** and
-ask whether what survived looks like a product: one connected piece, filling
-its own bounding box, solid through the middle. A baby lifted out of a
-painting is all three — arithmetically indistinguishable from a perfect cutout
+Every guard the old in-house model had passed it, and each was right to. They
+read the **alpha** and ask whether what survived looks like a product: one
+connected piece, filling its own bounding box, solid through the middle. A
+baby lifted out of a painting is all three — arithmetically indistinguishable from a perfect cutout
 of a figurine. The fact that separates them is not in the matte at all: it is
 that the item **is itself an image**, and a salient-object model handed a
 picture answers the only question it knows, *which part of this is the
@@ -1571,8 +1556,7 @@ frame that is found rather than the mount inside it. Then:
   photo is refused, because there is nothing to take away.
 
 On the same 300 photos: 270 good cutouts, 6 kept as shot, no piece cut into by
-more than 5%. Through the whole art path with the local model as the fallback,
-39 of 40 good against 11 before.
+more than 5%.
 
 **And when there is no clear border, nothing happens.** A picture bleeding off
 the frame, a shape that is not a rectangle, something too small to be the
@@ -1593,24 +1577,19 @@ the outer shape is ever read, so the guarantee above is untouched: what ships
 is still a solid quad, and a baby lifted out of a painting is refused because
 it is not a rectangle, not because of which model drew it.
 
-That second look was written for a paid engine and, for a while, only a paid
-engine could answer it — which meant it never ran, because nothing configures
-one (`BG_ENGINE` is commented out in fly.toml with no key beside it). The
-local model answers it now (`ART_LOCAL_BORDER=off` restores the old
-behaviour), and it costs one inference on exactly the photos that were
-otherwise getting nothing. Before this, a seller's grid had shirts cut out on
-white beside framed prints and printed trays still sitting on the floor they
-were shot on, and the reason was "no paid API key".
+That matte is Photoroom's, asked for only on a picture whose border the scan
+could not find: one call, on exactly the photos that were otherwise getting
+nothing.
 
 **A square object that is not a picture gets the same geometry.** A tray, a
 sign, a plaque, a boxed set, a record sleeve: the screen is right not to call
-these art — a tray with a map on it is a tray — so they go to the model like
-any other object, and the model drops them or keeps only the picture printed
-on their face. When nothing it returns survives the guards, `artwork.outline()`
-is asked last, and the photo is cut to the rectangle if there is one
-(`bg_engine: "border"`). Only after the model has declined, so no photo that
-gets a cutout today changes, and `outline()` answers None for anything that is
-not a rectangle, so a garment or a close-up is still kept as shot. The studio's
+these art — a tray with a map on it is a tray — so they go to Photoroom like
+any other object. When Photoroom finds nothing in one, `artwork.outline()` is
+asked last, and the photo is cut to the rectangle if there is one
+(`bg_engine: "border"`). Only after Photoroom found NOTHING — an outage or an
+empty account is said, not papered over with geometry — and `outline()`
+answers None for anything that is not a rectangle, so a garment or a close-up
+is still kept as shot. The studio's
 **Remove background** button does the same thing, which matters most there:
 that is the button a seller presses *after* a batch left the photo as shot.
 
@@ -1622,28 +1601,16 @@ of an unframed canvas whose painted edge is the colour of what it lies on:
 that one is kept as shot. The painted or
 printed image itself is never cut into, which is the property the tests hold.
 
-Production runs the `isnet-general-use` model (`REMBG_MODEL` in fly.toml,
-baked into the image; needs the 4GB VM). `u2netp` is the 4MB fallback for a
-smaller box. Both are free per photo; there is no remote engine.
-
-**One inference at a time, but two different deadlines.** The model is
-serialized (two runs at once double peak memory and OOM the box), so callers
-queue for a slot -- and how long they should queue depends on who is waiting.
-Someone watching the photo studio's spinner wants a fast "busy, try again"
-(`REMBG_WAIT_SECONDS`, default 25). A photo in a batch has nobody to tell and
-gets no retry, so it queues (`REMBG_BATCH_WAIT_SECONDS`, default 300) and, if
-even that runs out, is saved as shot with the reason rather than lost.
-
 **Photos one at a time, drafts several.** The two halves of a batch have
-opposite shapes, so they are run in opposite ways. Background removal is
-inference on this machine, single-flight and memory-bound -- two at once
-double peak memory and OOM the box -- so the photo pass stays strictly serial.
+opposite shapes, so they are run in opposite ways. The photo pass is a
+decode, one Photoroom call, a composite and an encode per photo, and stays
+serial within a batch.
 Drafting is five to nine Anthropic calls and a handful of eBay lookups per
 item, nearly all of it spent waiting on somebody else's server, so items are
 drafted `BULK_DRAFT_WORKERS` at a time (default 3, in fly.toml; 1 is the off
 switch). The ceiling is the machine rather than any API: each worker holds a
 listing's photos as base64 for its vision calls and crops the full-size
-originals for the tag close-ups, beside the 176MB cutout model.
+originals for the tag close-ups.
 
 Every guarantee the serial loop gave still holds, and they are what the change
 actually cost. An item is charged for once and refunded if its AI fails. An
@@ -1718,8 +1685,8 @@ granted — **nobody has to reconnect**.
 Three consequences, and they are what the code is shaped around:
 
 - **The upload does not wait for eBay.** The file is streamed to disk a
-  megabyte at a time (150MB awaited into a `bytes` on a 4GB box that is also
-  holding a 176MB cutout model is an OOM waiting for two sellers at once), the
+  megabyte at a time (150MB awaited into a `bytes` on a small box is an OOM
+  waiting for two sellers at once), the
   listing gains the video, and the request returns. The push to eBay and the
   R2 offload run behind it — the same rule "Add photos" follows for its
   optimize pass.
@@ -2588,8 +2555,7 @@ the download was cut instead of discovering it by counting rows.
   with the largest square the frame holds, slid over the item, so the backdrop
   you composed stays in the shot and nothing gets clipped in the gallery
   thumbnail; an item too big for that square keeps the whole photo, padded out
-  to square. Tighter framing is yours to make — Crop and Smart crop in the
-  photo studio.
+  to square. Tighter framing is yours to make — Crop in the photo studio.
 - Category ID is auto-resolved via the eBay Taxonomy API when
   `EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET` are set; otherwise enter it manually in
   the preview. Taxonomy data in the eBay **sandbox** is limited, so category

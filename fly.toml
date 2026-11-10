@@ -55,30 +55,14 @@ primary_region = 'sjc'
   # ETSY_OWNER_EMAILS. Set 'commercial' the day Etsy grants it. Inert while
   # Etsy is withheld above; left in place for the day it comes back.
   # ETSY_ACCESS_TIER = 'personal'
-  # WHICH ENGINE CUTS A BACKGROUND OUT. Unset here, which means "auto": Canva
-  # when it is connected, then the free on-server model. Nothing is connected
-  # on this app today, so the chain is ["local"] and the per-photo cost is
-  # zero -- exactly as it has always been. Setting CANVA_CLIENT_ID,
-  # CANVA_CLIENT_SECRET and CANVA_REFRESH_TOKEN (from
-  # scripts/canva_authorize.py; see .env.example) in `fly secrets` is the
-  # whole switch, and /api/ready reports the chain so a connection that stops
-  # working does not just show up as worse cutouts. Per-image cost on Canva is
-  # one of the connected account's AI credits, against one image_ai token per
-  # photo. Canva rotates the refresh token on every use and the live one is
-  # kept on the volume (DATA_DIR/.canva_token.json), so keep this at ONE
-  # machine doing cutouts.
-  #   BG_ENGINE = 'auto'
-  #
-  # The on-server model, one pass per photo, the item composited on white.
-  # isnet-general-use is the better-edged of the two bundled models -- it needs
-  # the 4GB VM below -- and is baked into the image (see Dockerfile), so no
-  # runtime download and no volume dependency. u2netp (4MB) is the fallback for
-  # a smaller machine.
-  REMBG_MODEL = 'isnet-general-use'
-  # The copy handed to the model. isnet normalizes its input to 1024x1024
-  # whatever it is given, so feeding it less means it upscales our downscale
-  # for the same cost and a worse matte.
-  REMBG_MAX_SIDE = '1024'
+  # Background removal is Photoroom's API (services/cutout_api), on the app's
+  # one Photoroom account. PHOTOROOM_API_KEY in `fly secrets` is the whole
+  # switch: without it the feature is unavailable and the uploader does not
+  # offer it. Each seller then turns it on for themselves in Settings. A key
+  # starting `sandbox_` watermarks every cutout -- never in production.
+  # /api/ready names the engine and whether it has a key. The per-seller
+  # monthly cap is BG_REMOVAL_MONTHLY_LIMIT (default 1000 photos):
+  #   BG_REMOVAL_MONTHLY_LIMIT = '1000'
   # How many items of one bulk batch are drafted at the same time. Each one is
   # five to nine Anthropic calls and a handful of eBay lookups, and the machine
   # spends nearly all of that waiting on somebody else's server -- so one at a
@@ -86,8 +70,7 @@ primary_region = 'sjc'
   #
   # Three, and the ceiling is this machine rather than any API: each worker
   # holds a listing's photos as base64 for its vision calls and crops the
-  # full-size originals for the tag close-ups, on the 4GB VM below that is
-  # already holding a 176MB cutout model. Here rather than in code so raising
+  # full-size originals for the tag close-ups. Here rather than in code so raising
   # it -- or dropping to 1, which is the off switch and the old behaviour
   # exactly -- is a one-line commit somebody can review.
   BULK_DRAFT_WORKERS = '3'
@@ -118,7 +101,7 @@ primary_region = 'sjc'
   # outage it cannot fix, turning someone else's blip into a restart loop.
   # Their state is on /api/ready (public) and /api/admin/diagnostics (behind
   # the admin token); /api/health carries liveness and the UI's flags only.
-  # grace_period covers the model warm-up thread started at boot.
+  # grace_period covers the boot: the R2 probe and the database warm-up.
   [[http_service.checks]]
     interval = "15s"
     timeout = "5s"
@@ -127,15 +110,11 @@ primary_region = 'sjc'
     path = "/api/health"
 
 [[vm]]
-  # Background removal loads onnxruntime + rembg (scipy/numba). The
-  # isnet-general-use model ([env] above) needs 4GB — on 2GB it OOM-kills the
-  # box and only the light u2netp runs reliably. 4GB is a flat ~$10/mo over
-  # 2GB, versus the per-image price of a paid cutout API.
-  #
-  # That trade is no longer either/or: a paid engine can go in FRONT of this
-  # model (BG_ENGINE above) while the model stays as the floor, so an outage,
-  # an expired key or a spent account degrades to a free cutout instead of no
-  # cutout. The 4GB is what keeps that floor real. Dropping to 2GB means
-  # REMBG_MODEL = 'u2netp' and accepting rougher edges on the fallback path.
+  # 4GB was for the on-server background-removal model (onnxruntime + the
+  # 176MB isnet-general-use), which is gone: Photoroom does the cutting now.
+  # What is left is the API process, Pillow on one 1600px photo at a time, and
+  # BULK_DRAFT_WORKERS listings' photos held as base64 -- well inside 2GB.
+  # Watch the memory graph after the first deploy at this size; going back is
+  # this one line.
   size = 'shared-cpu-2x'
-  memory = '4gb'
+  memory = '2gb'

@@ -359,8 +359,8 @@ def test_the_video_id_is_read_from_the_location_header(monkeypatch):
 
 
 def test_the_upload_streams_the_file_rather_than_reading_it(monkeypatch, tmp_path):
-    """150MB awaited into a bytes object, on the box that also holds a 176MB
-    cutout model, is an OOM waiting for two sellers at once."""
+    """150MB awaited into a bytes object, on a small box, is an OOM waiting
+    for two sellers at once."""
     path = tmp_path / "v.mp4"
     path.write_bytes(mp4_bytes(pad=2048))
     seen = {}
@@ -641,7 +641,7 @@ def test_a_video_is_streamed_back_from_r2_rather_than_held_in_memory(monkeypatch
     """A video older than a few hours lives in the bucket — the reclaim pass
     frees the local copy, and on a 1GB volume that is the normal state, not a
     missing video. Fetching it back through restore() would hold all 150MB in
-    a bytes on the box that is also holding a 176MB cutout model."""
+    a bytes on a small box."""
     from backend import objstore
     from backend.services import listing_sync
 

@@ -249,7 +249,30 @@ Ordered by what it costs a seller.
       them). Nothing reads them; they hand full account control to anything
       that can read the process environment.
       `flyctl secrets unset FLY_API_TOKEN FLY_ACCESS_TOKEN -a listing-lfwjrg --stage`.
-- [ ] **Unset the dead credentials** while there: `PHOTOROOM_API_KEY`,
+- [ ] **Background removal (Photoroom).** The on-server model and the Canva
+      engine are gone; every cutout is now Photoroom's Remove Background API on
+      ONE account the app owns, and each seller switches the feature on in
+      Settings (that is their consent to photos going to Photoroom). Until a
+      key is set the feature is simply unavailable.
+      1. **Check what `PHOTOROOM_API_KEY` holds today.** It used to be on this
+         list as a dead credential, so an old key may still be set — and it
+         is live again the moment this deploys. Replace it with the key from
+         step 3, or unset it.
+      2. Create the Photoroom account with a shared company address (not a
+         person's), enable the API and buy the **Basic (Remove Background)**
+         plan (~$0.02/image) in the API dashboard. A live key answers 402
+         until a plan is active.
+      3. Create a live key (never a `sandbox_` one: it watermarks every
+         cutout) and `flyctl secrets set PHOTOROOM_API_KEY=… -a listing-lfwjrg`.
+      4. `/api/ready` → `image_engine` should read `ready: true, sandbox: false`.
+      5. Optional: `BG_REMOVAL_MONTHLY_LIMIT` (default 1000 photos per seller
+         per month) in fly.toml `[env]`.
+      6. At 100K+ images a month, ask Photoroom about the Partner plan
+         (~$0.01/image; requires a Photoroom attribution in the app, which the
+         Settings card already carries).
+      7. After the first deploy at the new 2 GB VM size (fly.toml), watch the
+         memory graph through a bulk batch.
+- [ ] **Unset the dead credentials** while there:
       `LIGHTROOM_API_KEY`, `OPENAI_API_KEY`, `SENDGRID_API_KEY`,
       `Ebay_Sandbox_App_Id` / `Ebay_Sandbox_Cert_Id` / `Ebay_Sandbox_Dev_Id`,
       `STRIPE_API_KEY` (the near-miss; `STRIPE_API_SECRET_KEY` is the one read).

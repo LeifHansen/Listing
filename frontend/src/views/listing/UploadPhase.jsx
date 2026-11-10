@@ -21,8 +21,9 @@ import { useToast } from "@/components/ui/Toaster";
 import { MAX_PHOTOS } from "./blockers";
 import { AiNotesStep } from "./AiNotesStep";
 
-// When background removal can't run (out of credits, bad key, rate limit) the
-// server KEEPS the original photo — the right call, but silent: the photos just
+// When background removal can't run (Photoroom unavailable, out of this
+// month's allowance, rate limit, nothing found) the server KEEPS the original
+// photo — the right call, but silent: the photos just
 // come back with their backgrounds, looking like the feature does nothing. Say
 // so, with the reason the server gave.
 function bgFailureMessage(results, total) {
@@ -71,7 +72,7 @@ function countHints(notes) {
 //                     below for why anywhere else still starts shut.
 export function UploadPhase({ defaultOpen = false }) {
   const { setSession, currentSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings } = useApp();
+          invalidateListings, bgRemoval, openSettings } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -88,6 +89,12 @@ export function UploadPhase({ defaultOpen = false }) {
   // still hands its own choice back with its files — same pile, seconds
   // later, not a default.
   const [removeBg, setRemoveBg] = useState(() => !!bulkRetry?.removeBg);
+  // Background removal is offered only to a seller who has switched it on in
+  // Settings (that is where they agree to their photos going to Photoroom),
+  // and only when the server can do it at all. A tick left over from before
+  // it was switched off sends nothing.
+  const canCut = !!(bgRemoval?.available && bgRemoval?.active);
+  const cutting = removeBg && canCut;
   // Hints for the AI, comma-separated: what the seller knows and the camera
   // can't show. Like the cutout toggle it describes THIS pile and is never
   // carried over — last week's pile leaking into this one is worse than
@@ -297,7 +304,7 @@ export function UploadPhase({ defaultOpen = false }) {
   // upload itself runs from the store (see runBulkUpload).
   const startBulk = once("bulk", async () => {
     if (!files.length) return;
-    await runBulkUpload(files, removeBg, notes);
+    await runBulkUpload(files, cutting, notes);
   });
 
   // The draft has landed — the same ending for the pass that ran straight
@@ -396,7 +403,7 @@ export function UploadPhase({ defaultOpen = false }) {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
-      fd.append("remove_bg", removeBg ? "true" : "false");
+      fd.append("remove_bg", cutting ? "true" : "false");
       // Saved with the session server-side, so a later "Start over" re-drafts
       // with the same hints instead of forgetting them.
       fd.append("notes", notes);
@@ -419,7 +426,7 @@ export function UploadPhase({ defaultOpen = false }) {
         stopWhen: (j) => j.phase === "awaiting_notes",
       });
       const optResults = last?.upload?.optimize_results || [];
-      if (removeBg) {
+      if (cutting) {
         const warning = bgFailureMessage(optResults, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
       }
@@ -455,7 +462,7 @@ export function UploadPhase({ defaultOpen = false }) {
     const doneCount = Math.min((stage?.current || 0) + 1, total);
     const stageLine = !stage?.phase ? "Uploading your photos…"
       : stage.phase === "optimizing"
-        ? `${removeBg ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
+        ? `${cutting ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
         : stage.phase === "identifying" ? "Identifying your item…"
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
@@ -778,12 +785,26 @@ export function UploadPhase({ defaultOpen = false }) {
                   && ` ${MAX_NOTES_CHARS - notes.length} characters left.`}
               </p>
 
-              <Toggle
-                checked={removeBg}
-                onChange={setRemoveBg}
-                label="Remove background & replace with white"
-                help="Cleaner, eBay-friendly product shots. Adds a few seconds per photo."
-              />
+              {canCut ? (
+                <Toggle
+                  checked={removeBg}
+                  onChange={setRemoveBg}
+                  label="Remove background & replace with white"
+                  help="Cleaner, eBay-friendly product shots, cut out by Photoroom."
+                />
+              ) : bgRemoval?.available && (
+                <p className="text-sm text-ink-secondary">
+                  Want the backgrounds taken off?{" "}
+                  <button
+                    type="button"
+                    className="text-blue font-semibold hover:underline cursor-pointer"
+                    onClick={() => openSettings("bg-removal")}
+                  >
+                    Turn on background removal
+                  </button>{" "}
+                  in Settings first.
+                </p>
+              )}
 
               {forceBulk ? (
                 <p className="text-sm text-ink-secondary">

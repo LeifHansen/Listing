@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
 import { api, MODEL_TIMEOUT_MS } from "@/lib/api";
+import { useApp } from "@/store";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
@@ -16,7 +17,8 @@ import {
 
 /* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
    (nothing is stored until Save):
-   - Remove background: in-house cutout onto pure white
+   - Remove background: Photoroom's cutout onto pure white (once the seller
+     has switched background removal on in Settings)
    - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
    - Crop: drag a rectangle; it applies the moment you release
    - Rotate: a quarter turn clockwise per tap, on the canvas (client-side)
@@ -85,8 +87,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   // Which photo is open RIGHT NOW. This dialog is one long-lived instance
   // whose `name` prop changes (NewListing renders it unkeyed), so an in-flight
   // request holds the name it started on while the canvas has already moved
-  // to another photo. Background removal takes ~107s in production, which is
-  // ample time to close the studio and open a different photo.
+  // to another photo. A background removal is a round trip to Photoroom, which
+  // is time enough to close the studio and open a different photo.
   const nameRef = useRef(name);
   useEffect(() => { nameRef.current = name; }, [name]);
   const canvasRef = useRef(null);
@@ -113,6 +115,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const liveRect = useRef(null);
   const [cropRect, setCropRect] = useState(null); // {x,y,w,h} in canvas px
   const { toast, confirm } = useToast();
+  const { bgRemoval, loadBgRemovalStatus, openSettings } = useApp();
+  const canCut = !!(bgRemoval?.available && bgRemoval?.active);
 
   // Opening a different photo starts from a clean slate: the brush tool, no
   // half-dragged crop carried over from the last one. This is derived DURING
@@ -287,6 +291,15 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   const removeBg = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || aiBusy) return;
+    // Not switched on: the server would refuse it (409), so send the seller
+    // to the one place that can switch it on instead of to an error.
+    if (!canCut) {
+      toast("Background removal is off — turn it on in Settings first.",
+        { kind: "info" });
+      onClose?.();
+      openSettings("bg-removal");
+      return;
+    }
     setAiBusy("Removing the background…");
     try {
       const blob = await canvasBlob(canvas);
@@ -298,24 +311,16 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       // photo's file. Staying quiet is right: the seller moved on.
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
-      // `degraded` is the server saying a paid engine was configured and did
-      // not answer, so this cutout came from the slower built-in model. Said
-      // out loud only in that case -- a deploy with no paid engine is not
-      // degraded, it is just how it works, and saying so every time is noise.
-      // Without this, an expired or mistyped key shows up as nothing but
-      // cutouts quietly getting worse.
-      toast(
-        res.degraded
-          ? `Background removed with the built-in model — the usual engine didn't answer. Review and Save to keep it.`
-          : `Background removed — review and Save to keep it.`,
-        { kind: "success" },
-      );
+      toast("Background removed — review and Save to keep it.",
+        { kind: "success" });
+      loadBgRemovalStatus();
     } catch (e) {
       toast(`Remove background failed: ${e.message}`, { kind: "error" });
     } finally {
       setAiBusy(null);
     }
-  }, [aiBusy, sessionId, name, applyPreview, toast]);
+  }, [aiBusy, canCut, sessionId, name, applyPreview, toast, onClose,
+      openSettings, loadBgRemovalStatus]);
 
   // Auto levels — a percentile contrast/brightness stretch, done right on the
   // canvas so it's instant (no round-trip). Ignores the darkest/lightest 0.5%
@@ -612,7 +617,9 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
       <div className="flex items-center gap-1 p-1.5 mb-2 rounded-[14px] bg-bg-sunken border border-line overflow-x-auto">
-        <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />
+        {bgRemoval?.available && (
+          <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />
+        )}
         <Tool icon={Wand2} label="Auto levels" onClick={autoLevels} disabled={!!aiBusy} />
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
         {/* The two brushes. Restore is the one that did not exist: with only a

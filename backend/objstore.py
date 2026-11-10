@@ -296,8 +296,8 @@ def download(key: str, local_path: Path) -> bool:
     """`restore`, streamed — for objects too big to hold in memory.
 
     restore() above reads the whole object into a bytes and then writes it,
-    which is fine for a photo and is two copies of a 150MB video on a box
-    that is also holding a 176MB cutout model. boto3's download_file chunks
+    which is fine for a photo and is two copies of a 150MB video on a small
+    box. boto3's download_file chunks
     it. Same contract otherwise: atomic via a temp name, False on any
     failure, never raises.
     """

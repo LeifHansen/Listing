@@ -37,7 +37,7 @@ encloses the piece, because the direction that matters is the same for a box
 as for four corners: wider keeps a strip of wall, narrower cuts the artwork.
 The ones that check the matte that actually ships ask for the corners.
 
-Pillow only, no rembg and no download: the outline is geometry, not inference.
+Pillow only, no key and no network: the outline is geometry, not inference.
 """
 from __future__ import annotations
 
@@ -934,6 +934,20 @@ def _photo(dirpath, name, im=None) -> "object":
     return dirpath / name
 
 
+def _as_engine(monkeypatch, model):
+    """Photoroom stood in for by `model`, which answers a photo with the
+    item on white (or None, for no key). Every cutout and every look for a
+    picture's border goes through it, so whatever `model` records is
+    everything Photoroom was sent."""
+    from backend.services import images
+
+    def _photoroom(img):
+        out = model(img)
+        return None if out is None else out.convert("RGBA")
+
+    monkeypatch.setattr(images.cutout_api, "photoroom_cutout", _photoroom)
+
+
 class _Recorder:
     """Stands in for the salient-object model, and remembers being asked."""
 
@@ -952,7 +966,7 @@ def test_a_picture_never_reaches_the_model(tmp_path, monkeypatch):
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     src = _photo(tmp_path, "src_000.jpg")
 
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True,
@@ -965,13 +979,15 @@ def test_a_picture_never_reaches_the_model(tmp_path, monkeypatch):
 
 def test_a_picture_with_no_findable_border_is_kept_as_shot(tmp_path,
                                                            monkeypatch):
-    """And when the border cannot be found, the model still is not asked.
-    None from the art path means "do nothing" — never "fall back", which
-    would hand the painting to the very thing that eats it."""
+    """And when the border cannot be found, the engine is never asked for a
+    CUTOUT. It may be asked once where the border is -- art_cutout's second
+    look, whose answer is used as geometry and nothing else -- but None from
+    the art path means "do nothing", never "fall back", which would hand the
+    painting to the very thing that eats it."""
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     bleeding = Image.new("RGB", SIZE, (90, 200, 190))
     _painted(ImageDraw.Draw(bleeding), (0, 0, SIZE[0], SIZE[1]))
     src = _photo(tmp_path, "src_000.jpg", bleeding)
@@ -979,7 +995,7 @@ def test_a_picture_with_no_findable_border_is_kept_as_shot(tmp_path,
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True,
                           art=True)
 
-    assert model.asked == []
+    assert len(model.asked) <= 1, "asked for more than where the border is"
     assert out["background_removed"] is False
     assert out["bg_error"] == images.ART_NO_BORDER_KEPT_AS_SHOT
     # ...and the photo on disk is the photo that was taken.
@@ -995,8 +1011,7 @@ def test_the_reported_photo_comes_back_cut_out(tmp_path, monkeypatch):
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
-    monkeypatch.setattr(images, "_mask", model)
+    _as_engine(monkeypatch, model)
     corners = _outer((320, 140, 880, 760), 4, 0.06)
     im = _in_a_room(_hung(Image.new("RGB", SIZE, PAINTED_WALL), corners,
                           (176, 140, 70), MOUNT))
@@ -1019,7 +1034,7 @@ def test_everything_that_is_not_a_picture_still_goes_to_the_model(tmp_path,
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     src = _photo(tmp_path, "src_000.jpg")
 
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True)
@@ -1034,7 +1049,7 @@ def test_a_picture_costs_nothing_when_the_seller_never_asked(tmp_path,
     say about it, nothing to refund."""
     from backend.services import images
 
-    monkeypatch.setattr(images, "cutout", _Recorder())
+    _as_engine(monkeypatch, _Recorder())
     out = images.optimize(_photo(tmp_path, "src_000.jpg"),
                           tmp_path / "img_000.jpg", remove_bg=False, art=True)
 
@@ -1049,7 +1064,7 @@ def test_the_batch_routes_pictures_away_from_the_model(tmp_path, monkeypatch):
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     names = [f"src_{i:03d}.jpg" for i in range(4)]
     srcs = [_photo(tmp_path, n) for n in names]
     monkeypatch.setattr(
@@ -1074,7 +1089,7 @@ def test_a_close_up_still_wins_over_a_picture(tmp_path, monkeypatch):
     from backend.services import images
 
     model = _Recorder()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     src = _photo(tmp_path, "src_000.jpg")
 
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True,

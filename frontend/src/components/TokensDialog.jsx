@@ -15,7 +15,7 @@ const COST_LABELS = [
   ["refine", "AI refine instruction"],
   ["specifics", "Autofill item specifics"],
   ["shelf_scan", "Shop Mode shelf scan"],
-  ["image_ai", "AI photo tool (per photo)"],
+  ["image_ai", "Background removal (per photo)"],
 ];
 
 // Ledger `kind` in seller language. "reversal" is what a refund or a lost

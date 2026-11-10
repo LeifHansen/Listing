@@ -54,6 +54,20 @@ def _session(tmp: Path) -> tuple[Path, Path]:
     return src, tmp / "optimized" / "img_000.jpg"
 
 
+def _as_engine(monkeypatch, model):
+    """Photoroom stood in for by `model`, which answers a photo with the
+    item on white (or None, for no key). Every cutout and every look for a
+    picture's border goes through it, so whatever `model` records is
+    everything Photoroom was sent."""
+    from backend.services import images
+
+    def _photoroom(img):
+        out = model(img)
+        return None if out is None else out.convert("RGBA")
+
+    monkeypatch.setattr(images.cutout_api, "photoroom_cutout", _photoroom)
+
+
 def _erasing_cutout(img, wait=None):
     """A cutout that keeps nothing — the damage, in its purest form."""
     return Image.new("RGB", img.size, WHITE)
@@ -61,7 +75,7 @@ def _erasing_cutout(img, wait=None):
 
 @pytest.fixture()
 def cut_out(monkeypatch):
-    monkeypatch.setattr(images, "cutout", _erasing_cutout)
+    _as_engine(monkeypatch, _erasing_cutout)
 
 
 def test_the_photo_the_cutout_replaced_is_what_the_ai_reads(tmp_path, cut_out):
@@ -85,7 +99,7 @@ def test_a_photo_no_cutout_changed_is_its_own_faithful_copy(tmp_path,
     """No second file, and nothing to invalidate: when the cutout did not run,
     or found nothing to keep, the optimized photo already IS what the camera
     saw."""
-    monkeypatch.setattr(images, "cutout", lambda img, wait=None: None)
+    _as_engine(monkeypatch, lambda img, wait=None: None)
     src, dst = _session(tmp_path)
 
     images.optimize(src, dst, remove_bg=False)

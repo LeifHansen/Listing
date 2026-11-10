@@ -72,6 +72,10 @@ _SCRUBBED = (
     # the roster, so the gate's own tests would pass for reasons unrelated to
     # the code.
     "MARKETPLACES_ENABLED",
+    # Background removal. A real key inherited from a developer's shell would
+    # make every "no key" test pass a key to Photoroom, and the monthly cap
+    # would move the line the usage tests draw.
+    "PHOTOROOM_API_KEY", "BG_REMOVAL_MONTHLY_LIMIT",
 )
 
 

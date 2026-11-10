@@ -62,6 +62,13 @@ const NO_EBAY = {
   foreign_listings: 0,
   unowned_listings: 0,
 };
+// Background removal (Photoroom, on the app's account): `available` is the
+// server having a key at all, `active` is this seller having switched it on in
+// Settings. The uploader offers its toggle only when both are true.
+const NO_BG_REMOVAL = {
+  available: false, active: false, needs_activation: true, used: 0, limit: 0,
+  resets_on: "", sandbox: false, loaded: false,
+};
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
   conversations: [], unread: 0, sources: [], available: false, reason: "",
@@ -420,6 +427,29 @@ export function AppProvider({ children }) {
         unowned_listings: s.unowned_listings || 0,
       };
       setEbay(next);
+      return next;
+    } catch (e) { /* keep previous */ }
+    return null;
+  }, []);
+
+  // Background removal, loaded beside the eBay status on the same
+  // keep-previous rule: a failed read is not "switched off", and the uploader
+  // decides from this whether to offer the toggle.
+  const [bgRemoval, setBgRemoval] = useState(NO_BG_REMOVAL);
+  const loadBgRemovalStatus = useCallback(async () => {
+    try {
+      const s = await api("/api/bg-removal/status");
+      const next = {
+        available: !!s.available,
+        active: !!s.active,
+        needs_activation: s.needs_activation !== false,
+        used: Number(s.used) || 0,
+        limit: Number(s.limit) || 0,
+        resets_on: s.resets_on || "",
+        sandbox: !!s.sandbox,
+        loaded: true,
+      };
+      setBgRemoval(next);
       return next;
     } catch (e) { /* keep previous */ }
     return null;
@@ -1621,6 +1651,7 @@ export function AppProvider({ children }) {
     setMessageSource("");
     setThreads({});
     setEbay(NO_EBAY);
+    setBgRemoval(NO_BG_REMOVAL);
     setPoliciesData(null);
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
@@ -1655,7 +1686,8 @@ export function AppProvider({ children }) {
     setAuthOpen(true);
 
     loadEbayStatus();
-  }, [loadEbayStatus]);
+    loadBgRemovalStatus();
+  }, [loadEbayStatus, loadBgRemovalStatus]);
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
@@ -1791,8 +1823,9 @@ export function AppProvider({ children }) {
     loadHealth();
     loadAuth();
     loadEbayStatus();
+    loadBgRemovalStatus();
     loadMarketplaces();
-  }, [loadHealth, loadAuth, loadEbayStatus, loadMarketplaces]);
+  }, [loadHealth, loadAuth, loadEbayStatus, loadBgRemovalStatus, loadMarketplaces]);
 
   // Refresh the listings cache (and per-user marketplace connections) when
   // auth changes (login/logout).
@@ -1859,6 +1892,7 @@ export function AppProvider({ children }) {
     clearSignedInState,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
+    bgRemoval, loadBgRemovalStatus,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -1889,6 +1923,7 @@ export function AppProvider({ children }) {
     savedViews, loadSavedViews, saveListingView, deleteListingView,
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
+    bgRemoval, loadBgRemovalStatus,
     etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,

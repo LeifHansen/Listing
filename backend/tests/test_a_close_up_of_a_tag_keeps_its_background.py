@@ -62,25 +62,16 @@ def _torn_label() -> Image.Image:
     return m
 
 
-def test_no_guard_in_the_file_can_see_this(monkeypatch):
-    """The reason this is fixed a layer up. Every measure the cutout has says
-    this matte is excellent, because as a matte it is: one opaque blob that
-    fills its own box. Shape and opacity cannot answer a question about what
-    was in the photo to begin with.
-
-    If a future guard ever does catch it, this test fails and should be
-    deleted — but until one does, nothing downstream of the model is load
-    bearing here."""
-    alpha = images._harden(images._fill_interior(_torn_label()))
-    kept = alpha.point(lambda a: 255 if a >= 128 else 0)
+def test_the_one_gate_a_matte_still_answers_cannot_see_this():
+    """The reason this is fixed a layer up. The one question asked of a matte
+    is whether it kept anything at all, and the matte of a torn-out label
+    kept plenty: as a matte it is excellent, one opaque blob that fills its
+    own box. Nothing reading a matte can answer a question about what was in
+    the photo to begin with, so the close-up has to be spared before the
+    engine is asked, not after."""
+    kept = _torn_label().point(lambda a: 255 if a >= 128 else 0)
     coverage = sum(kept.histogram()[128:]) / (SIZE[0] * SIZE[1])
-    total, regions, box_fill = images._kept_shape(kept)
-
-    assert coverage >= images._MIN_FG_COVERAGE          # 0.18 against 0.02
-    assert images._interior_solidity(alpha) >= images._MIN_INTERIOR_SOLIDITY
-    assert regions[0][0] / total >= images._MIN_LARGEST_REGION
-    assert box_fill >= images._MIN_BBOX_FILL
-    assert images._kept_is_the_product(total, regions, box_fill)
+    assert coverage >= images._MIN_FG_COVERAGE
 
 
 # --- what the screen reports ------------------------------------------------
@@ -129,6 +120,20 @@ def test_an_answer_that_makes_no_sense_names_nobody(tmp_path):
 
 # --- and what the photo pass does with it -----------------------------------
 
+def _as_engine(monkeypatch, model):
+    """Photoroom stood in for by `model`, which answers a photo with the
+    item on white (or None, for no key). Every cutout and every look for a
+    picture's border goes through it, so whatever `model` records is
+    everything Photoroom was sent."""
+    from backend.services import images
+
+    def _photoroom(img):
+        out = model(img)
+        return None if out is None else out.convert("RGBA")
+
+    monkeypatch.setattr(images.cutout_api, "photoroom_cutout", _photoroom)
+
+
 class _Cutout:
     """Stands in for the model, and records whether it was asked at all."""
 
@@ -153,7 +158,7 @@ def test_a_close_up_is_never_handed_to_the_model(tmp_path, monkeypatch,
     """The point of the fix. Not "the cutout is refused for it" — the model is
     not asked, because there is no question to ask: every pixel is the item."""
     model = _Cutout()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     src = _photo(tmp_path, "src_000.jpg")
 
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True,
@@ -171,7 +176,7 @@ def test_a_photo_of_the_whole_item_is_still_cut_out(tmp_path, monkeypatch,
                                                     never_screened):
     """The feature is not weakened for the photos it was built for."""
     model = _Cutout()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     src = _photo(tmp_path, "src_000.jpg")
 
     out = images.optimize(src, tmp_path / "img_000.jpg", remove_bg=True)
@@ -185,7 +190,7 @@ def test_a_close_up_costs_nothing_when_the_seller_never_asked(
         tmp_path, monkeypatch, never_screened):
     """With cutouts off, a close-up is just a photo: no cutout to skip, so
     nothing to say about it and nothing to refund."""
-    monkeypatch.setattr(images, "cutout", _Cutout())
+    _as_engine(monkeypatch, _Cutout())
     out = images.optimize(_photo(tmp_path, "src_000.jpg"),
                           tmp_path / "img_000.jpg", remove_bg=False,
                           detail=True)
@@ -198,7 +203,7 @@ def test_the_batch_spares_only_the_close_ups(tmp_path, monkeypatch):
     one shirt, two of them tags, one screen answer, and only the two whole
     garment shots reach the model."""
     model = _Cutout()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
     names = ["src_000.jpg", "src_001.jpg", "src_002.jpg", "src_003.jpg"]
     srcs = [_photo(tmp_path, n) for n in names]
     monkeypatch.setattr(
@@ -225,7 +230,7 @@ def test_a_screen_that_fails_cuts_out_everything_as_before(tmp_path,
     API off, over budget, cancelled or simply broken, every photo goes to the
     model exactly as it did before any of this existed."""
     model = _Cutout()
-    monkeypatch.setattr(images, "cutout", model)
+    _as_engine(monkeypatch, model)
 
     def _explode(paths, should_stop=None):
         raise RuntimeError("no API key")
