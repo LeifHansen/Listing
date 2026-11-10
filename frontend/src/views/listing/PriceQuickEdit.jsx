@@ -280,9 +280,9 @@ export function PriceQuickEdit({ listing, onPick, saving, className }) {
  * listing's price is revisable on eBay, but only through a revise: a PATCH
  * here would change the number this app shows and leave eBay showing the old
  * one, with nothing on either screen saying they disagree. Repricing a live
- * listing keeps its existing routes — the editor's save, and the dashboard's
- * "Lower prices" group (POST /api/ebay/lower-prices) — both of which push the
- * change to eBay.
+ * listing keeps its existing routes — the editor's save, and the Manage tab's
+ * "Lower prices…" on a tick (POST /api/ebay/lower-prices) — both of which push
+ * the change to eBay.
  */
 export function DraftPriceEdit({ item, className }) {
   const { loadListings } = useApp();

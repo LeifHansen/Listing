@@ -6,8 +6,9 @@ who were just offered the discount, and they are still watching a second
 later. So without something else, the group a seller had just cleared would
 come back in the same slot, same listings, same count — which is what a button
 that does nothing looks like, and which this app has already been reported for
-twice on its other two groups ("Lower prices" and "Fill in details"; see
-models.Listing.price_lowered_at and test_a_group_says_how_many_are_left).
+twice on the groups it sat beside ("Lower prices", since removed, and "Fill
+in details"; see models.Listing.price_lowered_at and
+test_a_group_says_how_many_are_left).
 
 The stamp is the answer, and eBay agrees with it from the other side: it
 refuses a second seller offer while the first is still live (error 150019), so
@@ -146,25 +147,26 @@ def test_the_stamp_is_the_servers_own_clock():
 
 # --------------------------------------------- where it sits among the rest
 
-def test_an_offer_outranks_a_price_cut_on_the_same_listing():
-    """A stale listing with watchers earns both. The offer goes first because
-    it is the one that does not move the price the rest of eBay sees: only
-    the people already interested learn the number."""
+def test_an_old_watched_listing_is_offered_not_marked_down():
+    """A stale listing with watchers used to earn a price cut as well, ranked
+    under the offer. The price nudge is gone (removed on request), so the
+    offer is the whole of the advice — and it is the one that does not move
+    the price the rest of eBay sees: only the people already interested learn
+    the number."""
     item = _live(offer_sent_at="")
-    item["created_at"] = _days_ago(recommender.STALE_DAYS + 5)
+    item["created_at"] = _days_ago(120)
     recs = recommender.recommend_for(item, metrics={"watchers": 2})
-    assert [r["type"] for r in recs][:2] == ["send_offers", "lower_price"]
-    # And the ranking keeps the strongest per listing, so the group a seller
-    # sees this listing in is the offer one.
+    assert [r["type"] for r in recs] == ["send_offers"]
     assert recommender.ranked([item], {item["id"]: {"watchers": 2}}
                               )[0]["type"] == "send_offers"
 
 
-def test_the_traffic_price_nudge_still_owns_the_unwatched_listing():
-    """The two rules barely overlap by construction — that one wants views
-    with NO watchers — and this checks the seam rather than assuming it."""
+def test_views_without_watchers_are_nobody_to_offer():
+    """Lookers are not watchers. A listing plenty of people have glanced at
+    and nobody has saved earns no offer — and no price nudge either, any
+    more; that decision is the seller's, on the Manage tab."""
     item = _live()
-    assert _types(item, {"views": 40, "watchers": 0}) == ["lower_price"]
+    assert _types(item, {"views": 40, "watchers": 0}) == []
 
 
 # ------------------------------------------- only what eBay will carry
@@ -196,11 +198,11 @@ def test_ebay_unasked_falls_back_to_the_watch_count():
 
 def test_the_ranking_carries_ebays_answer_through():
     item = _live()
-    item["created_at"] = _days_ago(recommender.STALE_DAYS + 5)
+    item["created_at"] = _days_ago(120)
     recs = recommender.ranked([item], {item["id"]: {"watchers": 2}},
                               offer_eligible=frozenset())
-    # Not offered, so the listing falls to the next thing it has earned.
-    assert recs[0]["type"] == "lower_price"
+    # Not offered, and nothing else earned: eBay's "no" is the whole answer.
+    assert recs == []
 
 
 class _Sweep:

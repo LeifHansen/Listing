@@ -1,7 +1,5 @@
 import { useCallback, useState } from "react";
-import { Handshake, Megaphone, PackageOpen, TrendingUp } from "lucide-react";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
-import { SectionHeader } from "@/components/ui/Card";
 import { Field, Input } from "@/components/ui/fields";
 import { cn } from "@/lib/utils";
 import { useSettings } from "./context";
@@ -15,31 +13,39 @@ import { CardSave, PrefsGate, PrefSelect, PrefToggle } from "./PrefControls";
  */
 export function SellingDefaultsSection() {
   return (
-    <div className="flex flex-col gap-7">
-      <div>
-        <SectionHeader icon={Handshake} title="Offers" />
+    <div className="flex flex-col divide-y divide-line">
+      <Group title="Offers">
         <PrefsGate height="h-16">
           <BestOfferCard />
         </PrefsGate>
-      </div>
-      <div className="pt-7 border-t border-line">
-        <SectionHeader icon={Megaphone} title="Promoted Listings" />
+      </Group>
+      <Group title="Promoted listings">
         <PrefsGate height="h-16">
           <PromotedListingsCard />
         </PrefsGate>
-      </div>
-      <div className="pt-7 border-t border-line">
-        <SectionHeader icon={TrendingUp} title="Pricing strategy" />
+      </Group>
+      <Group title="Pricing strategy">
         <PrefsGate height="h-16">
           <PricingStrategyPicker />
         </PrefsGate>
-      </div>
-      <div className="pt-7 border-t border-line">
-        <SectionHeader icon={PackageOpen} title="Listing defaults" />
+      </Group>
+      <Group title="Listing defaults">
         <PrefsGate height="h-24">
           <ListingDefaultsFields />
         </PrefsGate>
-      </div>
+      </Group>
+    </div>
+  );
+}
+
+/* A quiet label over a few controls. These four used to be four SectionHeaders
+   — a 36px blue icon tile each — which made the heaviest card on the page
+   out of four small groups, in the same vocabulary as the page's own title. */
+function Group({ title, children }) {
+  return (
+    <div className="py-6 first:pt-0 last:pb-0 flex flex-col gap-4">
+      <h3 className="text-[12px] font-bold uppercase tracking-wide text-ink-faint">{title}</h3>
+      {children}
     </div>
   );
 }
@@ -81,7 +87,6 @@ function BestOfferCard() {
       <PrefToggle
         k="allow_offers"
         label="Allow offers on new listings"
-        help="There’s no minimum unless you set one below: eBay passes every offer to you to accept, counter, or decline. Auctions don’t take offers."
         note="Buyers can send an offer on every new fixed-price listing. Listings already live, and auctions, are left as they are."
       />
       {on && (

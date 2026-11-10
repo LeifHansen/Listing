@@ -67,9 +67,8 @@ export function DeleteAccountCard() {
     <>
       <div className="flex flex-col gap-4 max-w-lg">
         <p className="text-sm text-ink-secondary">
-          You can close your account whenever you like. Anything you already
-          published stays live on eBay under your own seller account — end
-          those in eBay first if you want them gone too.
+          Listings already on eBay stay live under your seller account; deleting
+          here removes Thryft Shop’s copy.
         </p>
         <div>
           <Button variant="danger" onClick={start}>

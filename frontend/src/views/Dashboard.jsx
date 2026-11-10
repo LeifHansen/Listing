@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Camera, Upload, PlusCircle, Store, ArrowRight, Rocket, FileText,
-  Tags, Coins, Lightbulb, TrendingDown, BadgePercent,
+  Tags, Coins, Lightbulb, BadgePercent,
   ListChecks, Loader2, RefreshCw, CheckCircle2, Eye, Heart, BarChart3,
   ChevronDown, DollarSign, AlertTriangle, Sparkles,
 } from "lucide-react";
@@ -12,6 +12,8 @@ import { api, pollJob, postJson } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { BulkAmountPanel } from "@/components/ui/BulkAmountPanel";
+import { reasonLines } from "@/lib/bulkReport";
 import { StatCard } from "@/components/ui/StatCard";
 import { ListingCard } from "@/components/ListingCard";
 import { DuplicateListings } from "@/components/DuplicateListings";
@@ -47,8 +49,8 @@ const NO_TOTALS = Object.freeze({});
 const NO_PLAN = Object.freeze({ total: 0, enrich: 0, accept: 0 });
 // How many of a group ONE tap actually reaches. A group whose type has a cap
 // in bulk_caps runs that many and defers the rest; one with none runs all of
-// it — which is every group button here now (Enrich all, Lower all, Send
-// offers). Kept for a cap the server may send again, because a capped group
+// it — which is every group button here now (Enrich all, Send offers). Kept
+// for a cap the server may send again, because a capped group
 // must not promise the whole badge: it asked to confirm 46, quoted the AI
 // cost of 46, then ran 25 and reported "1 of 25".
 const runSize = (n, cap) => (cap > 0 ? Math.min(n, cap) : n);
@@ -64,19 +66,6 @@ const runCount = (n, total, noun) =>
 // it that was sent. Never below the rows on screen — a stale total must not
 // make a group claim to be smaller than what it is showing.
 const groupSize = (group) => Math.max(group.total || 0, group.recs.length);
-
-// "• Nike hoodie: Nobody is watching that listing yet." — one line per
-// listing a bulk run left alone, in the server's own words. "1 skipped" on its
-// own is a button that did nothing and will not say why: the seller pressed
-// "Lower all", read "1 skipped", and had no way to find out what was wrong.
-// Three at most, and the rest counted, which is what a toast has room for.
-const reasonLines = (rows) => {
-  const lines = rows.slice(0, 3).map(
-    (r) => `• ${r.title || "A listing"}: ${r.message}`);
-  const more = rows.length - lines.length;
-  if (more > 0) lines.push(`• …and ${more} more`);
-  return lines;
-};
 
 /* Finishing a listing's details is ONE group, and there is no second half.
    
@@ -96,11 +85,9 @@ const DETAILS = "specifics";
 
 // Icon + tone for each recommendation type from /api/insights.
 const REC_ICON = {
-  lower_price: TrendingDown, send_offers: BadgePercent,
-  finish: PlusCircle, specifics: ListChecks,
+  send_offers: BadgePercent, finish: PlusCircle, specifics: ListChecks,
 };
 const REC_TONE = {
-  lower_price: "bg-yellow-soft text-warning",
   // The one group here that is an opportunity rather than a chore: somebody
   // is already watching these listings. Green, and the only green on the
   // list, so it reads as the thing to do first — which is also where the
@@ -110,9 +97,8 @@ const REC_TONE = {
   specifics: "bg-yellow-soft text-warning",
 };
 // Category headings for the grouped view — the per-rec `label` is an
-// imperative for one listing ("Lower the price"); groups need the noun form.
+// imperative for one listing ("Send an offer"); groups need the noun form.
 const REC_GROUP_LABEL = {
-  lower_price: "Lower prices",
   send_offers: "Send offers",
   finish: "Finish & list",
   // The noun form of "Fill in details", and the group Enrich all clears.
@@ -160,10 +146,13 @@ function RecRow({ rec, openListing, onAct, ActIcon }) {
 // The group-level verbs. A suggestion category earns an entry here when the
 // same edit makes sense across every listing in it — repeating one edit a dozen
 // times by hand is the whole problem. `amount` marks the ones that need a
-// number first (lower prices by HOW much); the rest fire on click.
+// number first (a discount of HOW much); the rest fire on click.
 //
 // Finish is deliberately absent: finishing a draft creates a listing, which is
-// not something to hand a single button.
+// not something to hand a single button. So is any price cut: the "Lower
+// prices" group and its "Lower all…" are gone on request — whether a price
+// should come down is the seller's call, and the cut itself is one tick away
+// on the Manage tab (ListingsView's "Lower prices…").
 const BULK_ACTIONS = {
   // Finishing a listing's details used to be a prompt to go and do it: open
   // each one, wait for the AI to read its photos, save, repeat. It is the
@@ -183,28 +172,15 @@ const BULK_ACTIONS = {
     icon: Sparkles,
     run: (ctx) => ctx.finishEverything(),
   },
-  lower_price: {
-    verb: "Lower all…",
-    icon: TrendingDown,
-    amount: {
-      unit: "%", initial: 10, min: 1, max: 75, step: 1,
-      label: "Lower every price in this group by",
-      submit: (n, value, total) =>
-        `Lower ${runCount(n, total, "price")} by ${value}%`,
-      note: "New prices go straight to eBay. Anything that has sold or ended is skipped.",
-    },
-    run: (ctx, value) => ctx.lowerAll(ctx.group, value),
-  },
   // The discount that never shows up on the listing. eBay carries it
   // privately to the buyers watching each item; the asking price everyone
-  // else sees does not move, which is what makes this worth offering before
-  // the price drop above.
+  // else sees does not move.
   //
   // The minimum is eBay's, not a taste: an offer below 5% off is refused
   // outright (see services/ebay_offers.MIN_DISCOUNT). The maximum is ours,
-  // and lower than the price drop's 75% because a buyer accepts one of these
-  // with a single tap — a slipped decimal here is a sale at that number, not
-  // a price a seller can still think better of.
+  // and lower than the 75% a Manage-tab price cut allows because a buyer
+  // accepts one of these with a single tap — a slipped decimal here is a
+  // sale at that number, not a price a seller can still think better of.
   send_offers: {
     verb: "Send offers…",
     icon: BadgePercent,
@@ -226,74 +202,6 @@ const BULK_ACTIONS = {
     run: (ctx, value) => ctx.sendOffers(ctx.group, value),
   },
 };
-
-// "Lower every price in this group by [ 10 ]%" — the amount an action needs
-// before it can run, with its own submit. Rendered in normal flow under the
-// group header rather than as a floating panel: the suggestions Card clips
-// overflow, so anything absolutely positioned inside it gets cut off.
-function BulkAmountPanel({ amount, count, total, busy, onSubmit, onCancel }) {
-  const { unit, initial, min, max, step, label, submit, note } = amount;
-  const [value, setValue] = useState(initial);
-  const valid = Number(value) >= min && Number(value) <= max;
-  const apply = () => { if (valid) onSubmit(Number(value)); };
-  return (
-    <motion.div
-      initial={{ height: 0, opacity: 0 }}
-      animate={{ height: "auto", opacity: 1 }}
-      exit={{ height: 0, opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
-      className="overflow-hidden"
-    >
-      <div className="mx-4 mb-4 rounded-[13px] border border-line bg-bg-sunken p-3.5">
-        <label className="flex flex-wrap items-center gap-2 text-[13px] font-semibold text-ink">
-          {label}
-          <span className="inline-flex items-center gap-1">
-            <input
-              type="number" inputMode="decimal"
-              min={min} max={max} step={step} value={value}
-              autoFocus
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") apply();
-                if (e.key === "Escape") onCancel();
-              }}
-              className={cn(
-                "w-20 rounded-lg border bg-bg px-2 py-1 text-sm font-bold tabular-nums text-ink",
-                "focus:outline-none focus:ring-2 focus:ring-blue/40",
-                valid ? "border-line" : "border-error",
-              )}
-            />
-            <span className="text-ink-secondary">{unit}</span>
-          </span>
-        </label>
-        <p className="mt-2 text-[12px] text-ink-secondary">{note}</p>
-        {/* A capped run covers part of the group and defers the rest.
-            Said here, next to the button that spends it, rather than only in
-            the toast that arrives once it is already too late to plan. */}
-        {count < total && (
-          <p className="mt-1 text-[12px] text-ink-secondary">
-            One run covers {count} of them — the other {total - count}{" "}
-            {total - count === 1 ? "stays" : "stay"} on the list for a second run.
-          </p>
-        )}
-        {!valid && (
-          <p className="mt-1 text-[12px] font-semibold text-error">
-            Enter a number between {min} and {max}.
-          </p>
-        )}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button variant="primary" size="sm" loading={busy}
-            disabled={busy || !valid} onClick={apply}>
-            {submit(count, value, total)}
-          </Button>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
-            Cancel
-          </Button>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
 
 // The icon, name and count every group header shows — shared so the version
 // inside the expand toggle and the plain one on a button-only group stay the
@@ -325,10 +233,10 @@ function GroupHead({ group, Icon }) {
 
 
 // One suggestion category: a collapsed header (icon, label, count) that
-// expands to the full row list. Collapsed by default — eight "Lower the
-// price" rows read as clutter; one "Lower prices · 8" reads as a to-do.
-function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
-                    finishEverything, busy, progress }) {
+// expands to the full row list. Collapsed by default — eight "Fill in
+// details" rows read as clutter; one "Finish details · 8" reads as a to-do.
+function RecGroup({ group, cap, openListing, sendOffers, finishEverything,
+                    busy, progress }) {
   const [open, setOpen] = useState(false);
   // WHAT the amount panel is about to run on, or null when it is closed:
   // the whole group, or the one listing whose row asked for it. It was a
@@ -380,7 +288,7 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
             aria-expanded={action.amount ? amountFor === group : undefined}
             onClick={() => (action.amount
               ? setAmountFor((f) => (f === group ? null : group))
-              : action.run({ group, cap, lowerAll, sendOffers, finishEverything }))}>
+              : action.run({ group, cap, sendOffers, finishEverything }))}>
             <ActionIcon aria-hidden /> {action.verb}
           </Button>
         )}
@@ -398,7 +306,7 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
             {/* A capped run has to account for its remainder right here, or
                 "2 of 25" under a badge reading 46 reads as a contradiction.
                 None of the jobs that draw this line has one any more — the
-                fill, the price drop and the offers all take the whole group. */}
+                fill and the offers both take the whole group. */}
             {progress.deferred > 0
               ? ` · ${progress.deferred} more after this run` : ""}
           </span>
@@ -408,7 +316,7 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
         {action?.amount && amountFor && (
           <BulkAmountPanel
             amount={action.amount} count={panelCount} total={panelTotal}
-            busy={busy}
+            busy={busy} className="mx-4 mb-4"
             onCancel={() => setAmountFor(null)}
             onSubmit={(value) => {
               // One listing's run goes through the same handler as the
@@ -421,8 +329,8 @@ function RecGroup({ group, cap, openListing, lowerAll, sendOffers,
                     only: amountFor.listing_id }
                 : group;
               setAmountFor(null);
-              action.run({ group: target, cap, lowerAll, sendOffers,
-                           finishEverything }, value);
+              action.run({ group: target, cap, sendOffers, finishEverything },
+                         value);
             }} />
         )}
       </AnimatePresence>
@@ -667,7 +575,7 @@ export function Dashboard() {
   // lose that. The `/api/insights` fetch has no abort — a response sent for
   // the old session can resolve after the logout render and repopulate the
   // list, and past that edge nothing would ever clear it again, leaving one
-  // account's listings (with live Lower-price / Enrich buttons) on a
+  // account's listings (with live Send-offers / Enrich buttons) on a
   // signed-out dashboard. Level-triggering costs an identity check and
   // converges: once `insights` is the shared empty, the write is skipped.
   if (!user && insights !== NO_INSIGHTS) setInsights(NO_INSIGHTS);
@@ -702,71 +610,22 @@ export function Dashboard() {
     () => items.map((i) => `${i.id}:${i.status}`).join("|"), [items]);
   useEffect(() => { refreshInsights(); }, [refreshInsights, storeShape]);
 
-  // Bulk price drop across the whole "Lower prices" group. Reports
-  // per-listing outcomes rather than a bare success: over a dozen listings
-  // some will have sold or ended since the suggestion was computed, and
-  // "lowered 11, skipped 1" is the honest answer.
-  //
-  // ALL of them, the same way "Enrich all" came to mean all of them. This
-  // used to hand the server the rows this screen was holding, and the server
-  // repriced a capped BULK_PRICE_CAP of those per press — so in an
-  // environment where that cap was 1, "Lower all…" on a group of 41 said
-  // "Lower 1 price by 20%" and lowered one. The run sends no ids and has no
-  // cap now: the server works the group out from the same ranking this
-  // screen renders, and runs it as a job this polls.
+  // Which group's bulk job is running, or null. The fill and the offers are
+  // background JOBS the client polls — minutes of vision passes and eBay
+  // calls, far longer than any browser holds a request open — and a spinner
+  // with no end in sight is the shape of a hang. `bulkProgress.type` says
+  // which group the progress line belongs under.
   const [bulkBusy, setBulkBusy] = useState(null); // group type, or null
-  // What a long run is doing right now, or null. The fill, the price drop and
-  // the offers are background JOBS the client polls — minutes of vision passes
-  // and eBay calls, far longer than any browser holds a request open — and a
-  // spinner with no end in sight is the shape of a hang. `type` says which
-  // group the line belongs under.
   const [bulkProgress, setBulkProgress] = useState(null);
-  const lowerAll = async (group, percent) => {
-    setBulkBusy(group.type);
-    setBulkProgress({ type: group.type, done: 0, total: groupSize(group),
-                      deferred: 0, title: "" });
-    try {
-      const start = await postJson("/api/ebay/lower-all", { percent });
-      const total = start.total || groupSize(group);
-      const res = await pollJob(start.job_id, {
-        onUpdate: (j) => setBulkProgress({
-          type: group.type, done: j.current || 0,
-          total: j.total_items || total, deferred: 0,
-          title: j.current_title || "",
-        }),
-      });
-      // The run's own percentage: a press that found one already going is
-      // handed that run, which may have been started at a different number.
-      const cut = res.percent ?? percent;
-      const parts = [];
-      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${cut}%`);
-      if (res.skipped) parts.push(`${res.skipped} skipped`);
-      if (res.failed) parts.push(`${res.failed} failed`);
-      const results = res.results || {};
-      const lines = reasonLines(
-        [...(results.failed || []), ...(results.skipped || [])]);
-      toast([parts.join(" · ") || "Nothing to change.", ...lines].join("\n"), {
-        kind: res.changed ? "success" : res.failed ? "error" : "info",
-        ttl: lines.length ? 12000 : undefined,
-      });
-      refreshInsights();
-      loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
-    } finally {
-      setBulkBusy(null);
-      setBulkProgress(null);
-    }
-  };
 
-  // The same shape for "Send offers", and it reports the same way, because
-  // the same thing is true of it: the group was computed minutes ago and eBay
+  // "Send offers" reports per listing rather than a bare success, because
+  // the group was computed minutes ago and eBay
   // decides per listing whether there is anybody to offer it to. "Sent 9
   // offers · 3 skipped" is the honest answer, and the skips are ordinary —
   // a listing whose watchers have already been offered this week, or one
   // eBay no longer counts as having interested buyers.
   //
-  // And ALL of them, for the reason "Lower all…" is: the group button used
+  // And ALL of them, for the reason "Enrich all" is: the group button used
   // to send the rows this screen held to a route that offers a capped
   // BULK_OFFER_CAP per press. It sends no ids now and runs as a job over the
   // whole group. A single row (`group.only`) still names its one listing —
@@ -826,8 +685,8 @@ export function Dashboard() {
   // rest, so 131 was six presses. "Check details" is now gone entirely and
   // its half runs inside this press (see services/recommender).
   //
-  // So this one sends NO ids — and neither, now, do Lower all and Send
-  // offers. Handing the server the group's membership is right when the
+  // So this one sends NO ids — and neither, now, does Send offers. Handing
+  // the server the group's membership is right when the
   // client is naming a selection and wrong here: the recommendations payload
   // is a capped slice per type, so a client-named set could only reach the
   // rows it happens to have been sent. The server works the set out from the
@@ -1229,7 +1088,7 @@ export function Dashboard() {
               }
               return groups.map((g) => (
                 <RecGroup key={g.type} group={g} cap={bulkCaps[g.type]}
-                  openListing={openListing} lowerAll={lowerAll}
+                  openListing={openListing}
                   sendOffers={sendOffers} finishEverything={finishEverything}
                   busy={bulkBusy === g.type}
                   progress={bulkProgress?.type === g.type ? bulkProgress : null} />

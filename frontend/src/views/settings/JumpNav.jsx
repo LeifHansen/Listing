@@ -2,8 +2,12 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * The sticky row of pills at the top of Settings, one per section. Tapping
- * one scrolls to the section; the pill for the section in view is filled.
+ * The sticky row of tabs at the top of Settings, one per section. Tapping
+ * one scrolls to the section; the tab for the section in view is underlined.
+ *
+ * Underlined, not filled: filled blue pills are what the Manage tab uses to
+ * FILTER a list, and a navigation drawn the same way read as a filter with
+ * nothing to filter. The underline is the shape of a table of contents.
  *
  * Highlighting watches the sections with an IntersectionObserver, guarded
  * because jsdom (the unit tests) has none — there the first pill stays
@@ -42,12 +46,12 @@ export function JumpNav({ sections, className }) {
     <nav
       aria-label="Settings sections"
       className={cn(
-        "sticky top-0 z-10 -mx-4 px-4 sm:-mx-6 sm:px-6 py-2",
-        "bg-bg/90 backdrop-blur border-b border-line/60",
+        "sticky top-0 z-10 -mx-4 px-4 sm:-mx-6 sm:px-6",
+        "bg-bg/90 backdrop-blur",
         className,
       )}
     >
-      <div className="flex items-center gap-2 overflow-x-auto">
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-line">
         {sections.map((s) => (
           <button
             key={s.id}
@@ -55,11 +59,11 @@ export function JumpNav({ sections, className }) {
             onClick={() => jump(s.id)}
             aria-current={active === s.id ? "location" : undefined}
             className={cn(
-              "shrink-0 inline-flex items-center gap-1.5 h-9 px-3.5 rounded-full text-[13px]",
-              "font-semibold cursor-pointer transition-colors duration-150 border",
+              "shrink-0 h-10 px-3 text-[13px] font-semibold cursor-pointer",
+              "border-b-2 -mb-px transition-colors duration-150",
               active === s.id
-                ? "bg-blue text-on-accent border-blue"
-                : "bg-card text-ink-secondary border-line hover:text-ink hover:border-line-strong",
+                ? "border-blue text-ink"
+                : "border-transparent text-ink-secondary hover:text-ink",
             )}
           >
             {s.label}

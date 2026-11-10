@@ -22,14 +22,22 @@ def test_raised_limit_returns_full_membership():
 
 
 def test_one_rec_per_listing_keeps_strongest():
-    # Live since 2020: each also earns the age-driven "Lower the price" (68).
-    items = [_published(i, created_at="2020-01-01T00:00:00+00:00")
-             for i in range(20)]
-    recs = recommender.recommendations(items, limit=50)
+    # Somebody is watching each one: each also earns "Send an offer" (95).
+    items = [_published(i) for i in range(20)]
+    watched = {it["id"]: {"watchers": 2} for it in items}
+    recs = recommender.recommendations(items, metrics_by_id=watched, limit=50)
     ids = [r["listing_id"] for r in recs]
     assert len(ids) == len(set(ids))
-    # Every item's specifics rec (priority 45) lost to its price rec (68).
-    assert all(r["type"] == "lower_price" for r in recs)
+    # Every item's specifics rec (priority 45) lost to its offer rec (95).
+    assert all(r["type"] == "send_offers" for r in recs)
+
+
+def test_a_stale_price_is_nobodys_business_but_the_sellers():
+    # A listing live for years, nobody watching: no "Lower the price" nudge.
+    # Removed on request — the cut lives on the Manage tab, one tick away.
+    old = _published(0, created_at="2020-01-01T00:00:00+00:00")
+    recs = recommender.recommend_for(old, metrics={"views": 400, "watchers": 0})
+    assert [r["type"] for r in recs] == ["specifics"]
 
 
 def test_sorted_by_priority_desc():

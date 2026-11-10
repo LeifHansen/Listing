@@ -1,9 +1,8 @@
 """A bulk action reads the listings it was asked about, not the whole store.
 
-`POST /api/listings/lower-prices` takes the ids the seller ticked -- at most
-twenty get repriced in one pass -- and found them by reading the seller's
-newest 3,000 records and filtering. Two things follow from that, and the
-second is the one that matters:
+`POST /api/ebay/lower-prices` takes the ids the seller ticked, and used to
+find them by reading the seller's newest 3,000 records and filtering. Two
+things follow from that, and the second is the one that matters:
 
   * it fetches every one of those records' whole JSON blob, across a
     cross-region link, to keep twenty of them; and
@@ -21,6 +20,8 @@ it says: no such row, or not this seller's -- which is a real answer and stays
 in the report.
 """
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -47,7 +48,21 @@ def seller(dbmod, monkeypatch):
     # or absent, so `provider.publish` is never called.
     monkeypatch.setattr(main.deps, "ebay_creds_for",
                         lambda request: {"access_token": "t"})
+    main._REPRICE_JOBS.clear()
     return client, dbmod, uid
+
+
+def _finish(client, job_id: str, timeout: float = 30.0) -> dict:
+    """The route runs as a job now (a page of ticks is a page of serial eBay
+    revises); its per-listing report is on the job's result."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = client.get(f"/api/bulk/status/{job_id}").json()
+        if body.get("done"):
+            assert not body.get("error"), body["error"]
+            return body["result"]
+        time.sleep(0.02)
+    raise AssertionError(f"lower-prices job {job_id} never finished")
 
 
 def test_it_asks_for_the_ids_it_was_given(seller):
@@ -108,9 +123,10 @@ def test_the_route_does_not_read_the_whole_store_to_find_twenty_rows(
     r = client.post("/api/ebay/lower-prices",
                     json={"percent": 10, "listing_ids": ["mine-0"]})
     assert r.status_code == 200, r.text
+    result = _finish(client, r.json()["job_id"])
     # Not live, so it is skipped -- which is the honest answer and proves the
     # record was found and read rather than reported missing.
-    assert r.json()["results"]["skipped"][0]["message"].startswith(
+    assert result["results"]["skipped"][0]["message"].startswith(
         "No longer live")
 
 
@@ -120,9 +136,8 @@ def test_the_ask_itself_is_bounded(seller):
     Under the old code a huge `listing_ids` cost nothing extra -- the store
     read was capped and the list was only a filter. Asking for the ids means
     an unbounded body becomes an unbounded `IN (...)`, which is a way to make
-    one request expensive for everybody. At most BULK_PRICE_CAP are repriced
-    in a pass anyway, so nothing useful is lost by refusing to look up more
-    than a pass could act on.
+    one request expensive for everybody. The bound sits well above what a
+    screen of ticks can hold, so nothing useful is lost by refusing it.
     """
     client, _dbmod, _uid = seller
     many = [f"id-{i}" for i in range(5000)]
@@ -136,10 +151,11 @@ def test_a_selection_a_pass_could_act_on_is_still_accepted(seller):
     """The bound has to sit above what the screen can actually select, or it
     refuses ordinary work."""
     client, _dbmod, _uid = seller
-    ids = [f"id-{i}" for i in range(main.BULK_PRICE_CAP)]
+    ids = [f"id-{i}" for i in range(main.BULK_SELECT_CAP)]
     r = client.post("/api/ebay/lower-prices",
                     json={"percent": 10, "listing_ids": ids})
     assert r.status_code == 200, r.text
+    _finish(client, r.json()["job_id"])
 
 
 def test_the_read_itself_refuses_an_unbounded_ask(seller):
@@ -167,6 +183,6 @@ def test_an_id_that_is_not_the_sellers_is_still_reported_missing(
     r = client.post("/api/ebay/lower-prices",
                     json={"percent": 10, "listing_ids": ["never-existed"]})
     assert r.status_code == 200, r.text
-    skipped = r.json()["results"]["skipped"]
+    skipped = _finish(client, r.json()["job_id"])["results"]["skipped"]
     assert [s["listing_id"] for s in skipped] == ["never-existed"]
     assert skipped[0]["message"] == "Listing not found."

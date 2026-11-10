@@ -1,50 +1,30 @@
 """Seller action recommendations — the app's 'what should I do next' engine.
 
-Rules over the signals we already have (listing status, age, price, missing
-details) turn a pile of listings into a short, ranked list of concrete next
-actions: finish a draft, drop a stale price, fill in missing details.
+Rules over the signals we already have (listing status, missing details, and
+eBay's watch count when the scope is granted) turn a pile of listings into a
+short, ranked list of concrete next actions: offer the buyers watching an
+item a discount, finish a draft, fill in missing details.
 
-eBay traffic (views/watchers), when available, sharpens these: a listing with
-lots of views but no watchers is priced too high. Pass a per-listing metrics
-dict ({views, watchers}) to fold those in — without it, the age heuristics
-still produce useful advice.
+There is no price advice here, and deliberately none. "Lower the price" was a
+group of its own — a stale listing, or one with views and no watchers — and
+it was removed on request: whether a price should come down is the seller's
+call, not a chore to be nagged about, and the same cut is one tick away on
+the Manage tab (POST /api/ebay/lower-prices) for whoever decides it should.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import AbstractSet, Optional
 
-STALE_DAYS = 21   # a live listing this old with no sale → nudge price/sale
-
-# What a price drop BUYS: neither price nudge below comes back until the new
-# price has had this long to be seen.
-#
-# Both of them are computed from signals a drop does not move. The age
-# heuristic counts from `created_at`, which never changes. The traffic one
-# reads eBay's view count, which is cumulative for the life of the listing —
-# the thirty views that earned "buyers are looking; the price may be high" are
-# still thirty views the second after the price comes down, and stay so
-# forever. So the group a seller had just cleared came straight back, same
-# listings, same count, saying the same thing. Reported as the button not
-# working, and from the outside it is not distinguishable from that.
-#
-# The same three weeks a listing gets before it is called stale in the first
-# place. A new price deserves at least the run the old one got, and nothing is
-# lost by waiting: if the cut does not work, the nudge is right again — and
-# comes back on its own, worded from the drop rather than from the listing's
-# birthday.
-PRICE_QUIET_DAYS = STALE_DAYS
-
 # How long "Send offers" leaves a listing alone after an offer has gone out to
-# its buyers, for the same reason and out of the same history as the price
-# quiet period above.
+# its buyers.
 #
 # The signal this nudge reads is the WATCH COUNT, and sending an offer does
 # not move it: the watchers are exactly the people who were just offered a
 # discount, and they are still watching a second later. So the group would
 # come back the moment the run finished, same listings, same count — the shape
-# of a button that does nothing, reported twice already on the other two
-# groups.
+# of a button that does nothing, reported twice already on the groups this one
+# used to sit beside.
 #
 # eBay's own clock sets the floor. A seller-initiated offer stands for 4 days
 # on EBAY_US and EBAY_GB (2 on most other sites) and eBay refuses a second one
@@ -102,17 +82,18 @@ def price_drop_stamp(stored: dict, new_price) -> str:
     `new_price`, given the record already stored for it.
 
     Now when this write actually LOWERS the asking price; otherwise whatever
-    the stored record already held. This is the writer for the field the two
-    price rules above read, and it lives beside them so the two cannot drift.
+    the stored record already held. When this app still nudged sellers about
+    stale prices this was the stamp that silenced the nudge; the nudge is
+    gone, and the stamp stays as what it always also was — the record of when
+    a listing was last marked down, which the sync and every save path keep.
 
     Every write path derives it this way — from the stored price and nothing
-    else — rather than honouring what arrived in the payload. That is what
-    makes the field server-owned in the way that matters here: a second tab
+    else — rather than honouring what arrived in the payload. A second tab
     saving a copy loaded this morning cannot blank the stamp, and a payload
-    cannot mint one to silence advice the listing has earned. It is also why
-    the field is absent from state.SERVER_OWNED_FIELDS, whose rule is that the
-    STORED value wins — under that rule the stamp could never move forward on
-    the one write that is entitled to move it.
+    cannot mint one. It is also why the field is absent from
+    state.SERVER_OWNED_FIELDS, whose rule is that the STORED value wins —
+    under that rule the stamp could never move forward on the one write that
+    is entitled to move it.
     """
     was, now_ = _price((stored or {}).get("price")), _price(new_price)
     if was is not None and now_ is not None and now_ < was:
@@ -183,6 +164,9 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
     {listing_id, listing_title, type, label, reason, action, priority}.
     Higher priority = surface sooner.
 
+    `metrics` is eBay's traffic for the listing ({views, watchers, offers});
+    only the watch count and the pending-offer flag are read.
+
     `blank_specifics` is how many of eBay's item specifics for this listing's
     category it currently holds no value for, counted against eBay's own
     aspect list — see the "Fill in details" rule below. None means nobody
@@ -220,27 +204,13 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
         return recs
 
     m = metrics or {}
-    views = m.get("views")
     watchers = m.get("watchers")
-    age = _age_days(item.get("created_at"))
-    # How long ago the asking price was last CUT, in days — None when it never
-    # has been. Both price rules below are gated on it, because neither of the
-    # signals they read moves when a seller takes the advice: see
-    # PRICE_QUIET_DAYS above, and `price_lowered_at` on the model.
-    since_cut = _age_days(str(listing.get("price_lowered_at") or "").strip() or None)
-    quiet = since_cut is not None and since_cut < PRICE_QUIET_DAYS
 
     # The strongest signal a live listing can carry: somebody is watching it
     # and has not bought. eBay will privately offer all of them a discount at
-    # once (the Negotiation API — see services/ebay_offers), which beats the
-    # price nudge below on the listings that qualify for both, because the
-    # public price never moves: only the people already interested see the
-    # number, and everyone else still sees the listing at full price.
-    #
-    # Ranked above the traffic-driven price drop for that reason. The two
-    # barely overlap by construction — that rule wants views with NO watchers
-    # — but a stale listing with watchers can earn both, and on that listing
-    # this is the one to offer first.
+    # once (the Negotiation API — see services/ebay_offers), and the public
+    # price never moves: only the people already interested see the number,
+    # and everyone else still sees the listing at full price.
     #
     # Three gates, each of them something eBay would refuse:
     #   * an AUCTION takes bids, not offers (it is not a Buy It Now price to
@@ -272,25 +242,9 @@ def recommend_for(item: dict, metrics: Optional[dict] = None,
             f"{watchers} watcher{'' if watchers == 1 else 's'} — offer them a "
             "discount before they move on.", 95)
 
-    # Data-driven (real eBay traffic) beats the age heuristics below.
-    # (No "Add a sale" nudge — removed on request: it read as noise.)
-    if views is not None and views >= 30 and not watchers and not quiet:
-        add("lower_price", "Lower the price",
-            f"{views} views but no watchers — buyers are looking; the price may be high.", 92)
-
-    # Heuristics that need no eBay metrics. The stale clock runs from the last
-    # price cut where there has been one: what this rule is actually about is
-    # how long the CURRENT price has been sitting there, and on a listing that
-    # has been marked down twice the date it went up is no longer that.
-    if since_cut is not None:
-        if since_cut >= STALE_DAYS:
-            add("lower_price", "Lower the price",
-                f"Still here {since_cut} days after the last price drop — "
-                "another cut can restart interest.", 68)
-    elif age is not None and age >= STALE_DAYS:
-        add("lower_price", "Lower the price",
-            f"Live {age} days — a price drop can restart interest.", 68)
-    # (No "Add more photos" nudge — removed on request.)
+    # (No "Lower the price" nudge — removed on request, see the module
+    # docstring. No "Add a sale" and no "Add more photos" either, for the same
+    # reason: each read as noise.)
     # Two signals decide this, and they answer the same question at different
     # prices.
     #

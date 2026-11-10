@@ -25,9 +25,9 @@ const BASE = {
 };
 
 const STALE = { recommendations: [
-  { listing_id: "b", listing_title: "Canon AE-1", type: "lower_price",
-    label: "Lower the price", reason: "Live 30 days.", action: "open",
-    priority: 68, rate: null }] };
+  { listing_id: "b", listing_title: "Canon AE-1", type: "send_offers",
+    label: "Send an offer", reason: "2 watchers.", action: "open",
+    priority: 95, rate: null }] };
 
 function json(body) {
   return {
@@ -106,6 +106,6 @@ describe("the dashboard's suggestions", () => {
     for (let i = 0; i < 3; i++) {
       await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     }
-    expect(document.body.textContent).not.toContain("Lower prices");
+    expect(document.body.textContent).not.toContain("Send offers");
   });
 });

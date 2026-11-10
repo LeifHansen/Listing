@@ -1,7 +1,8 @@
 """"Send offers…" offers all of them.
 
-The same shape as "Lower all…" (see test_lower_all_lowers_all_of_them), on
-the group next to it. The button sent the rows the dashboard happened to be
+The same shape "Lower all…" had, back when the price cut was a dashboard
+group next to this one (it is the Manage tab's "Lower prices…" now, see
+test_lower_prices_lowers_the_ticked_ones). The button sent the rows the dashboard happened to be
 holding to /api/ebay/send-offers, which offers at most BULK_OFFER_CAP of them
 per request and defers the rest — so a group of 41 was reached a slice at a
 time, and with the cap set low, one listing per press under a verb that says

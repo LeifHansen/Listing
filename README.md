@@ -974,7 +974,7 @@ the two controls above it: a live listing's price *is* revisable, but only
 through a revise, and a number changed here would leave this app and eBay
 disagreeing with nothing on either screen saying so. A live listing is repriced
 from its card's **Quick edit** instead (below), the editor's save, or the
-dashboard's "Lower prices" group — all of which push the change to eBay.
+Manage tab's **Lower prices…** on a tick — all of which push the change to eBay.
 
 **An auction is started, not priced,** and that is a different number rather
 than the same one relabelled. "Check market price" answers the Buy It Now
@@ -1155,8 +1155,7 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `POST` | `/api/messages/read` | Mark one conversation read |
 | `GET`  | `/api/ebay/duplicates` | Live listings that look like the same item listed more than once, minus the pairs the seller has already waved away |
 | `POST` | `/api/ebay/duplicates/dismiss` | Stop reminding the seller about the pairs they've looked at. Ends nothing; holds only while each pair stands as they left it |
-| `POST` | `/api/ebay/lower-prices` | Lower the named listings' prices by one percentage and push each to eBay |
-| `POST` | `/api/ebay/lower-all` | Lower every price in the dashboard's "Lower prices" group by one percentage, as a background job (`job_id`) |
+| `POST` | `/api/ebay/lower-prices` | Lower the ticked listings' prices by one percentage and push each to eBay, as a background job (`job_id`) — the Manage tab's "Lower prices…" |
 | `POST` | `/api/ebay/send-offers` | Offer the named listings' watchers one discount (capped per request) |
 | `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
@@ -1950,12 +1949,13 @@ it.
 ## Suggested actions (and applying them in bulk)
 
 The Dashboard's **Suggested actions** card is `services/recommender.py` over the
-signals the app already has — listing status, age, price, photo count, plus eBay
-views/watchers when the scope is granted. Rules turn a store into a short ranked
-list: offer a discount to the buyers watching an item, finish a draft, drop a
-stale price, add photos, fill in specifics. An ended listing earns nothing:
-relisting is done by hand, and the ended bucket picks up sold items.
-Suggestions are grouped by kind and collapsed ("Lower prices · 12"), keeping
+signals the app already has — listing status and missing details, plus eBay's
+watch counts when the scope is granted. Rules turn a store into a short ranked
+list: offer a discount to the buyers watching an item, finish a draft, fill in
+specifics. An ended listing earns nothing: relisting is done by hand, and the
+ended bucket picks up sold items. A stale price earns nothing either, any more
+(see **Lower prices** below). Suggestions are grouped by kind and collapsed
+("Send offers · 12"), keeping
 one strongest action per listing so the list spans the portfolio instead of
 piling onto one item — with the two kinds that both mean "this listing's
 details aren't finished" grouped as one row (see **Finish details** below).
@@ -2003,10 +2003,11 @@ problem:
   sent and each marketplace applies its own; and **counter-offers** are not in
   this release of eBay's API, so `allowCounterOffer` is sent explicitly false
   rather than left to a default. The floor of 5% off is eBay's and is enforced
-  on the input; the 50% ceiling is this app's, and lower than the price drop's
-  75% because a buyer takes one of these with a single tap.
+  on the input; the 50% ceiling is this app's, and lower than the 75% a
+  Manage-tab price cut allows because a buyer takes one of these with a single
+  tap.
 
-  **"Send offers…" means all of them**, the same fix as "Lower all…" below.
+  **"Send offers…" means all of them**, the same fix "Enrich all" got.
   The group button used to send the rows the dashboard was holding to
   `POST /api/ebay/send-offers`, which offers at most `BULK_OFFER_CAP` per
   request and defers the rest. The press sends no ids and has no cap now:
@@ -2022,53 +2023,30 @@ problem:
   an offer, so that row would be a button that leads nowhere. It names its one
   listing and goes through `POST /api/ebay/send-offers`: one call fits in any
   request, and there is no group to work out.
-- **Lower prices → "Lower all…"** opens an amount field (*lower every price in
-  this group by X %*) with its own submit. Each listing is repriced and pushed to
-  eBay through the same revise path a single edit uses.
+- **There is no "Lower prices" group.** There was one — a listing live for
+  three weeks, or one with views and no watchers — with a "Lower all…" button
+  that cut every price in it by one percentage. Removed on request: whether a
+  price should come down is the seller's call, not a chore to be nagged about.
+  The cut itself moved to the **Manage** tab, beside End & relist: tick the
+  live listings, press **Lower prices…**, enter a percentage, and
+  `POST /api/ebay/lower-prices` cuts exactly those and pushes each to eBay as
+  a **background job** (`job_id`, polled on `/api/bulk/status/{id}`, with the
+  listing it is on shown on the selection bar and a per-listing report at the
+  end). One per account at a time — a second press while one is running joins
+  it rather than cutting the same prices twice. The route never widens past
+  the ids it was given, and reads them by id with ownership enforced inside
+  the read; an id that is not the seller's comes back as *"Listing not
+  found."* rather than vanishing from the totals.
 
-  **"All" means all of them**, for the same reason as "Enrich all" below. The
-  button used to send the rows the dashboard was holding to
-  `POST /api/ebay/lower-prices`, which reprices at most `BULK_PRICE_CAP` per
-  request — and in an environment where that cap was **1**, *"Lower prices ·
-  41"* offered *"Lower 1 price by 20%"* and lowered one. The press sends no
-  ids and has no cap now: `POST /api/ebay/lower-all` works the group out from
-  the same ranking the dashboard renders (`_suggestion_set`) and runs it as a
-  **background job** (`job_id`, polled on `/api/bulk/status/{id}`, with the
-  listing it is on under the group). One per account at a time: a second press
-  while one is running joins it instead of cutting the same prices twice. The
-  capped, ids-in route is still there for a caller that means a selection;
-  nothing in the app does.
-
-  **The group clears once the cut is made** (`Listing.price_lowered_at`), and
-  until it did, this was the same broken-looking button as "Enrich all" below.
-  Both rules that put a listing in this group are computed from signals a price
-  cut does not move: the age heuristic counts from `created_at`, which never
-  changes, and the traffic one reads eBay's **view** count, which is cumulative
-  for the life of the listing — the thirty views that earned *"buyers are
-  looking; the price may be high"* are still thirty views the second after the
-  price comes down, and stay so for good. So the seller pressed "Lower all…",
-  sat through a dozen serial eBay revises, was told *"Lowered 12 prices by
-  10%"*, and the group came back in the same slot with the same twelve
-  listings and the same count. Reported, reasonably, as the button not
-  working.
-
-  The stamp is what ends it. A cut buys `recommender.PRICE_QUIET_DAYS` (the
-  same three weeks a listing gets before it is called stale in the first
-  place) before either rule may ask again, and after that the age rule runs
-  its clock **from the last cut** rather than from the listing's birthday —
-  *"still here 24 days after the last price drop"*, which is what the rule was
-  always about. Every way a price can come down stamps it: the bulk button,
-  the card's quick edit, an editor save, and a markdown the seller made in
-  Seller Hub or the eBay app, which reaches the record through the sync.
-  A relist starts without one.
-
-  It is **derived, not sent** (`recommender.price_drop_stamp`): every write
-  works it out from the price already stored, so the payload's copy is never
-  read — a second tab cannot blank it, and a body cannot mint one to silence
-  advice a listing has earned. That is also why it is deliberately *not* in
-  `SERVER_OWNED_FIELDS`, whose rule is that the **stored** value wins: under
-  that rule the stamp could never move forward on the one write entitled to
-  move it.
+  `Listing.price_lowered_at` still records when a listing was last marked
+  down — by this button, the card's quick edit, an editor save, or a markdown
+  made in Seller Hub or the eBay app, which reaches the record through the
+  sync. It is **derived, not sent** (`recommender.price_drop_stamp`): every
+  write works it out from the price already stored, so the payload's copy is
+  never read — a second tab cannot blank it, and a body cannot mint one. That
+  is also why it is deliberately *not* in `SERVER_OWNED_FIELDS`, whose rule is
+  that the **stored** value wins: under that rule the stamp could never move
+  forward on the one write entitled to move it.
 
   **The revise carries the price and nothing else** (`_lower_one`). A
   listing's pending edits are stored on it (`dirty_fields`), and a revise eBay
@@ -2080,10 +2058,9 @@ problem:
   The other marks are now left out of the request and **stay marked** for the
   next save that is about them. A price eBay refuses (a sale that blocks price
   revisions, say) puts the listing **back as it was**, rather than leaving a
-  price eBay does not show and a stamp that hides it from the group; an
-  unanswered revise keeps the attempt, since eBay may have taken it. A run with
-  any refusal logs at WARNING with the first reason, so it reaches the error
-  feed rather than living only in the toast.
+  price eBay does not show; an unanswered revise keeps the attempt, since eBay
+  may have taken it. A run with any refusal logs at WARNING with the first
+  reason, so it reaches the error feed rather than living only in the toast.
 
   **Photos under eBay's 500-pixel minimum are a skip, not a failure.** eBay
   checks the photos a listing already has on every revise, including one that
@@ -2187,15 +2164,15 @@ a single button. The rules bulk runs follow — `services/bulk_actions.py`:
   a group computed a while ago will contain items that have since sold or ended.
 - **One listing's failure never stops the run**, and the response reports per
   listing, so the seller sees "lowered 11 · 1 skipped" rather than a bare OK.
-- **A run that names ids is bounded** (`BULK_PRICE_CAP`, default 40;
-  `BULK_OFFER_CAP`, default 40; `BULK_ENRICH_CAP`, default 25) because each
-  listing is its own serial eBay call — a revise, or, for an offer, the one
-  listing eBay's Negotiation API takes per request; the remainder comes back
-  as `deferred` for another pass instead of the request outliving the
-  gateway. The group buttons — finish the details list, lower every price,
-  send every offer — name none, so they have no remainder to defer: each is
-  a job from the first moment, and the client polls it rather than holding a
-  request open.
+- **A request that runs its listings inline is bounded** (`BULK_OFFER_CAP`,
+  default 40; `BULK_ENRICH_CAP`, default 25) because each listing is its own
+  serial eBay call — a revise, or, for an offer, the one listing eBay's
+  Negotiation API takes per request; the remainder comes back as `deferred`
+  for another pass instead of the request outliving the gateway. The group
+  buttons — finish the details list, send every offer — name no ids and have
+  no remainder to defer, and the Manage tab's ticked actions (End & relist,
+  Lower prices…) name ids and have none either: each is a job from the first
+  moment, and the client polls it rather than holding a request open.
 
 Every row also carries a **dismiss** (×). The engine rebuilds this list from
 scratch on every load, so advice the seller has already considered and decided

@@ -6,7 +6,7 @@ import {
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
-import { Field, InfoTip, Input, Toggle } from "@/components/ui/fields";
+import { Field, Input, Toggle } from "@/components/ui/fields";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { FORMAT_CHIP_LABELS } from "@/lib/listingFormat";
 import {
@@ -24,8 +24,10 @@ import { cn } from "@/lib/utils";
  *
  * Three rows, each of which earns its space or isn't drawn:
  *
- *   1. The saved views, the Filters button (badged with how many dimensions
- *      are narrowing) and Save view.
+ *   1. The Filters button (badged with how many dimensions are narrowing),
+ *      Save view, the saved views — and, at the right end, whatever the
+ *      caller passes as `trailing` (the Manage tab puts its where-it-lives
+ *      control there, so every narrowing control is on one line).
  *   2. The panel, when it's open.
  *   3. The chips for what's on, with "Showing N of M" beside them.
  *
@@ -60,19 +62,16 @@ function ChipToggle({ on, onClick, children, title }) {
   );
 }
 
-function ChipRow({ label, help, children }) {
+function ChipRow({ label, children }) {
   return (
     <div className="flex flex-col gap-1.5 min-w-0">
-      <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
-        {label}
-        {help && <InfoTip text={help} />}
-      </span>
+      <span className="text-[13px] font-semibold text-ink">{label}</span>
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
     </div>
   );
 }
 
-export function ListingFilters({ shown, total, hasListings = true }) {
+export function ListingFilters({ shown, total, hasListings = true, trailing = null }) {
   const {
     listingFilters: filters, setListingFilters, clearListingFilters,
     listingsTab, savedViews, saveListingView, deleteListingView,
@@ -142,7 +141,12 @@ export function ListingFilters({ shown, total, hasListings = true }) {
   // is nothing to narrow — unless a filter or a saved view is already there,
   // in which case the controls are exactly what is needed to get back out.
   if (!user) return null;
-  if (!hasListings && empty && !views.length) return null;
+  if (!hasListings && empty && !views.length) return trailing
+    ? <div className="flex justify-end">{trailing}</div> : null;
+
+  // How many more views can be saved — said on the button that would fail,
+  // as its tooltip, rather than as a sentence on the row.
+  const full = views.length >= MAX_SAVED_VIEWS;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -152,7 +156,6 @@ export function ListingFilters({ shown, total, hasListings = true }) {
           size="sm"
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
-          title="Narrow the list below — format, condition, price, brand, category, photos or age."
         >
           <SlidersHorizontal aria-hidden /> Filters
           {count > 0 && (
@@ -169,7 +172,8 @@ export function ListingFilters({ shown, total, hasListings = true }) {
             would make a pill that does nothing when pressed. */}
         {!empty && !showNameBox && (
           <Button variant="ghost" size="sm" onClick={() => setNaming(true)}
-            title="Keep these filters under a name — it's on every device you sign in from.">
+            disabled={full}
+            title={full ? `${MAX_SAVED_VIEWS} views saved — delete one to make room.` : undefined}>
             <BookmarkPlus aria-hidden /> Save view
           </Button>
         )}
@@ -196,52 +200,49 @@ export function ListingFilters({ shown, total, hasListings = true }) {
         )}
 
         {/* The saved strip. Each pill applies its own tab AND its filters, so
-            pressing one lands on the same list it was saved from. */}
-        {views.map((v) => (
-          <span key={v.id} className={cn(
-            "inline-flex items-center rounded-full border transition-colors duration-150",
-            v.id === showingId
-              ? "bg-blue text-on-accent border-blue"
-              : "bg-card border-line hover:border-line-strong",
-          )}>
-            <button
-              type="button"
-              onClick={() => applyListingView(v)}
-              aria-pressed={v.id === showingId}
-              title={`Show “${v.name}”`}
-              className={cn(
-                "inline-flex items-center gap-1.5 h-8 pl-3 pr-1.5 rounded-l-full",
-                "text-[13px] font-semibold cursor-pointer max-w-52",
-                v.id === showingId ? "text-on-accent" : "text-ink-secondary hover:text-ink",
+            pressing one lands on the same list it was saved from. A neutral
+            pressed state — blue is the lifecycle tab's — and the delete only
+            on the pill that is showing: a row of bookmarks each with its own
+            bin read as a row of things to be careful of. */}
+        {views.map((v) => {
+          const showing = v.id === showingId;
+          return (
+            <span key={v.id} className={cn(
+              "inline-flex items-center rounded-full border transition-colors duration-150",
+              showing
+                ? "bg-bg-sunken border-line-strong"
+                : "bg-card border-line hover:border-line-strong",
+            )}>
+              <button
+                type="button"
+                onClick={() => applyListingView(v)}
+                aria-pressed={showing}
+                title={`Show “${v.name}”`}
+                className={cn(
+                  "inline-flex items-center gap-1.5 h-8 pl-3 rounded-full",
+                  "text-[13px] font-semibold cursor-pointer max-w-52",
+                  showing ? "pr-1.5 rounded-r-none text-ink" : "pr-3 text-ink-secondary hover:text-ink",
+                )}
+              >
+                <Bookmark size={13} aria-hidden className="shrink-0" />
+                <span className="truncate">{v.name}</span>
+              </button>
+              {showing && (
+                <button
+                  type="button"
+                  onClick={() => askDelete(v)}
+                  aria-label={`Delete the view “${v.name}”`}
+                  title={`Delete “${v.name}”`}
+                  className="grid place-items-center size-8 pr-1 rounded-r-full cursor-pointer text-ink-faint hover:text-error"
+                >
+                  <Trash2 size={13} aria-hidden />
+                </button>
               )}
-            >
-              <Bookmark size={13} aria-hidden className="shrink-0" />
-              <span className="truncate">{v.name}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => askDelete(v)}
-              aria-label={`Delete the view “${v.name}”`}
-              title={`Delete “${v.name}”`}
-              className={cn(
-                "grid place-items-center size-8 pr-1 rounded-r-full cursor-pointer",
-                v.id === showingId
-                  ? "text-on-accent/70 hover:text-on-accent"
-                  : "text-ink-faint hover:text-error",
-              )}
-            >
-              <Trash2 size={13} aria-hidden />
-            </button>
-          </span>
-        ))}
+            </span>
+          );
+        })}
 
-        {/* Said once, where the press would fail, rather than as a surprise
-            after typing a name. */}
-        {views.length >= MAX_SAVED_VIEWS && (
-          <span className="text-xs text-ink-faint">
-            {MAX_SAVED_VIEWS} views saved — delete one to make room.
-          </span>
-        )}
+        {trailing && <div className="ml-auto">{trailing}</div>}
       </div>
 
       <AnimatePresence initial={false}>
@@ -254,8 +255,7 @@ export function ListingFilters({ shown, total, hasListings = true }) {
             className="overflow-hidden"
           >
             <div className="rounded-card border border-line bg-card p-4 flex flex-col gap-4">
-              <ChipRow label="Format"
-                help="How the listing sells. A listing saved before this app stored a format counts as Buy It Now, which is what it publishes as.">
+              <ChipRow label="Format">
                 {FORMAT_CHOICES.map((f) => (
                   <ChipToggle key={f} on={filters.format.includes(f)}
                     onClick={() => toggleIn("format", f)}>
@@ -264,8 +264,7 @@ export function ListingFilters({ shown, total, hasListings = true }) {
                 ))}
               </ChipRow>
 
-              <ChipRow label="Condition"
-                help="eBay's own grades. Not every category offers every one — a listing is matched on the grade it carries.">
+              <ChipRow label="Condition">
                 {CONDITIONS.map((c) => (
                   <ChipToggle key={c} on={filters.condition.includes(c)}
                     onClick={() => toggleIn("condition", c)}>
@@ -280,14 +279,13 @@ export function ListingFilters({ shown, total, hasListings = true }) {
                     className="h-10 text-sm"
                     onChange={(e) => set({ brand: e.target.value })} />
                 </Field>
-                <Field label="Category" hint="contains"
-                  help="Matches eBay's category path and your own eBay Store shelf name.">
+                <Field label="Category" hint="contains">
                   <Input value={filters.category} placeholder="Shirts"
                     className="h-10 text-sm"
                     onChange={(e) => set({ category: e.target.value })} />
                 </Field>
                 <Field label="Price from"
-                  help="What a live listing ASKS, and what a sold one WENT FOR. An auction is measured at its starting bid, or its Buy It Now where it has one. Listings nobody has priced yet are left out of a range — an unpriced draft isn't 'under $20'.">
+                  help="A sold listing is measured at what it went for; an unpriced draft is left out of a range.">
                   <Input value={filters.priceMin} inputMode="decimal" placeholder="0"
                     className="h-10 text-sm"
                     onChange={(e) => set({ priceMin: e.target.value })} />
@@ -308,8 +306,7 @@ export function ListingFilters({ shown, total, hasListings = true }) {
                 ))}
               </ChipRow>
 
-              <ChipRow label="Listed"
-                help="When the listing was created here. A record that doesn't say when is left out of a window rather than assumed recent.">
+              <ChipRow label="Listed">
                 {AGE_CHOICES.map(([id, label]) => (
                   <ChipToggle key={id || "any"} on={filters.within === id}
                     onClick={() => set({ within: id })}>
@@ -322,13 +319,10 @@ export function ListingFilters({ shown, total, hasListings = true }) {
                 checked={filters.needsWork}
                 onChange={(on) => set({ needsWork: on })}
                 label="Only listings that still need work"
-                help="Missing a price, a category or photos — the three blanks that stop a draft being published. Sold and ended listings are finished business and never match."
+                note="Missing a price, a category or photos."
               />
 
-              <div className="flex items-center justify-between gap-3 pt-1">
-                <span className="text-xs text-ink-faint">
-                  Filters apply to the listings loaded on this screen.
-                </span>
+              <div className="flex justify-end pt-1">
                 <Button variant="ghost" size="sm" onClick={clearListingFilters}
                   disabled={empty}>
                   Clear all
