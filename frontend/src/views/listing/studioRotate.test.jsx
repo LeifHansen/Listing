@@ -17,6 +17,18 @@ import { ImageEditor } from "./ImageEditor";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+// The studio reads one thing from the app store: whether background removal
+// is switched on, which decides whether Remove BG shows. Stood in for here
+// rather than mounting the real AppProvider, whose boot fetches would break
+// this file's point that nothing reaches the server before Save.
+vi.mock("@/store", () => ({
+  useApp: () => ({
+    bgRemoval: { available: false, active: false },
+    loadBgRemovalStatus: () => {},
+    openSettings: () => {},
+  }),
+}));
+
 let root;
 let host;
 let fetches;
