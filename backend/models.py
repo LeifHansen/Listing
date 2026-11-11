@@ -828,6 +828,42 @@ class PendingMergeRequest(BaseModel):
     items: list[PendingItemRequest] = Field(default_factory=list)
 
 
+class PendingSplitRequest(BaseModel):
+    """A single upload the seller wants sorted into items after all — see
+    POST /api/bulk/notes/{job_id}/split.
+
+    The uploader's bulk toggle was left off, so the whole pile is one item at
+    the guidance step. This asks for the grouping a batch would have run,
+    with `notes` as the seller's own inventory of the pile ("a blue polo, a
+    champagne bottle") — the hint the grouping reads as the expected number
+    of items, and the one thing that fixes its usual mistake. Optional.
+    """
+
+    notes: str = ""
+
+
+class SplitListingRequest(BaseModel):
+    """A draft that was written for two items, split in two — see POST
+    /api/listings/{listing_id}/split.
+
+    `photos` are the file names (as in Listing.images) that belong to the
+    OTHER item: they move to a new draft, which the AI writes from them. What
+    is not named stays. `redraft` re-runs the AI over the photos this listing
+    keeps, because its title and description were written for both items;
+    off, the text is left exactly as it is and only the photos leave.
+
+    `notes` is about the other item and `keep_notes` about this one — each
+    the line a seller types at the guidance step, so the two drafts are
+    written knowing which is which. Both optional; `keep_notes` left None
+    leaves whatever this listing already had.
+    """
+
+    photos: list[str] = Field(default_factory=list)
+    redraft: bool = True
+    notes: str = ""
+    keep_notes: Optional[str] = None
+
+
 class PublishRequest(BaseModel):
     session_id: SessionId
     listing: Listing

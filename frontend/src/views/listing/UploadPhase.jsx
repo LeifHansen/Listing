@@ -72,7 +72,10 @@ function countHints(notes) {
 //                     below for why anywhere else still starts shut.
 export function UploadPhase({ defaultOpen = false }) {
   const { setSession, currentSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings, bgRemoval, openSettings } = useApp();
+          invalidateListings, bgRemoval, openSettings,
+          // The store's "a batch is running from here": not the local
+          // startBulk below, which is the button that uploads one.
+          startBulk: watchBulk } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -376,6 +379,45 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // "It's more than one item": the bulk toggle the seller did not tick, put
+  // right at the question instead of after a draft that describes both.
+  //
+  // The server sorts the photos the way a batch would have (phase
+  // "grouping", polled here like every other pass) and the job comes back
+  // paused either way. Sorted into several items, it IS a batch now, and the
+  // batch screen takes over — its question has the tools this one lacks
+  // (merge two cards, drop one), and its answer is what drafts them all. So
+  // the uploader's own record of the question goes, and the store's record
+  // of a running batch takes its place, exactly as a bulk upload's would.
+  // Still one item (the sort saw one, or could not run), the question comes
+  // back here as it was, with the server's reason as a toast: nothing has
+  // been lost, and the line typed under the item is still in its box.
+  const splitPending = async (hint) => {
+    if (!pending || notesBusy) return;
+    setNotesBusy(true);
+    setStage({ phase: "grouping" });
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}/split`, { notes: hint });
+      const out = await pollJob(pending.jobId, {
+        onUpdate: (j) => setStage(j),
+        stopWhen: (j) => j.phase === "awaiting_notes",
+      });
+      if (out?.split_error) {
+        setPending({ ...pending, items: out.pending_items || pending.items });
+        toast(out.split_error, { kind: "warning", ttl: 12000 });
+        return;
+      }
+      clearLocal(ASK_KEY);
+      setPending(null);
+      watchBulk(pending.jobId);
+    } catch (e) {
+      toast(`Couldn't sort the photos: ${e.message}`, { kind: "error" });
+    } finally {
+      setNotesBusy(false);
+      setStage(null);
+    }
+  };
+
   // Drop one photo from the item the question is about. The job is still
   // paused, so nothing has been drafted from it and nothing is refunded —
   // the photo simply isn't there when the AI starts reading.
@@ -463,6 +505,7 @@ export function UploadPhase({ defaultOpen = false }) {
     const stageLine = !stage?.phase ? "Uploading your photos…"
       : stage.phase === "optimizing"
         ? `${cutting ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
+        : stage.phase === "grouping" ? "Sorting your photos into items…"
         : stage.phase === "identifying" ? "Identifying your item…"
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
@@ -503,6 +546,7 @@ export function UploadPhase({ defaultOpen = false }) {
           onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
           onSubmit={submitNotes}
           onDeletePhoto={deletePhoto}
+          onSplit={splitPending}
         />
       </div>
     );

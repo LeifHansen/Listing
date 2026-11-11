@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
   SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Pencil,
-  ChevronDown, Copy,
+  ChevronDown, Copy, Split,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
@@ -346,7 +346,7 @@ function turnStyle(spin, square) {
 // parents already keep stable.
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
-  onDuplicate, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  onDuplicate, onSplit, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   onQuickEdit, quickEditOpen = false,
   showEbayChip = false,
   layout = "grid", className,
@@ -573,11 +573,29 @@ export const ListingCard = memo(function ListingCard({
     </button>
   );
 
+  // Split: two items drafted as one (the uploader's bulk toggle left off).
+  // Drafts with photos enough to divide only.
+  const splittable = !!onSplit && draft && (l.images || []).length >= 2;
   const actions = (onDelete || onEnd || onStartOver || onSkip || onDuplicate
-    || (list && rotatable) || quickEditButton) && (
+    || splittable || (list && rotatable) || quickEditButton) && (
     <>
       {quickEditButton}
       {list && rotateButton}
+      {splittable && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onSplit(item); }}
+          aria-label="Split into two listings"
+          title="Split — two items in one draft? Move the other item's photos to a new draft the AI writes"
+          className={cn(
+            "grid place-items-center size-8 rounded-full cursor-pointer",
+            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+            "hover:text-blue hover:border-blue/40 transition-colors",
+          )}
+        >
+          <Split size={15} aria-hidden />
+        </button>
+      )}
       {/* Duplicate: "sell similar". A brand-new draft copied from this one,
           photos included, with nothing of this listing's life on eBay. On
           draft and live cards alike -- the second of the same thing turns

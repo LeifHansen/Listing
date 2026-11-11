@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Combine, MessageSquareText, Sparkles, Trash2 } from "lucide-react";
+import { Combine, MessageSquareText, Sparkles, Split, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiUrl } from "@/lib/platform";
 import { Card } from "@/components/ui/Card";
@@ -46,6 +46,13 @@ import { Field, Textarea } from "@/components/ui/fields";
  * server can say, and guessing at it here would mean undoing a guess. So the
  * cards stay as they are, ticked, until the answer lands, and what the seller
  * typed under each of them is carried into the one they became.
+ *
+ * The single-item question has the opposite escape, `onSplit`: the uploader's
+ * bulk toggle left off puts two items' photos under ONE card here, and this
+ * is the last moment that costs nothing to fix — the pile is sorted the way a
+ * batch would have sorted it, and the question comes back per item. The line
+ * typed under the one card goes with the request, as the seller's inventory
+ * of the pile, which is the hint the sort reads first.
  */
 
 // Mirrors listing_prompt.ITEM_NOTES_MAX_CHARS. Enforced here as well as on
@@ -150,7 +157,8 @@ export function joinItemNotes(parts) {
 }
 
 export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
-                              onDeletePhoto, onDeleteItem, onMergeItems }) {
+                              onDeletePhoto, onDeleteItem, onMergeItems,
+                              onSplit }) {
   const notes = values || {};
   // The rows as the last delete left them, once there has been one. While
   // the job is paused a delete is the ONLY thing that changes them, so its
@@ -168,6 +176,9 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
   const pickedRows = rows.filter((it) => picked.has(idOf(it)));
   const canMerge = !!onMergeItems && !busy && rows.length > 1;
   const single = rows.length === 1;
+  // One card holding more than one photo can be two items. One photo cannot.
+  const canSplit = !!onSplit && single
+    && ((rows[0].photo_count || rows[0].photos?.length || 0) >= 2);
   const typed = rows.filter((it) => (notes[idOf(it)] || "").trim()).length;
   // Photo URLs this seller has dropped, by the exact string the status gave
   // them. Optimistic: see the note above the component.
@@ -352,6 +363,14 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                 photos.
               </p>
             )}
+            {canSplit && (
+              <p className="mt-1.5 text-[13px] text-ink-secondary">
+                More than one item in these photos? Press{" "}
+                <strong>It&apos;s more than one item</strong> below — the AI
+                sorts the photos into items and writes a listing for each.
+                Saying what they are in the box helps it get the split right.
+              </p>
+            )}
           </div>
         </div>
       </Card>
@@ -512,6 +531,17 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
             <Sparkles aria-hidden />
             {single ? "Write my listing" : `Write ${rows.length} listings`}
           </Button>
+          {/* The way back from the bulk toggle the seller did not tick.
+              Beside the button that writes ONE listing, because that is the
+              moment they notice the pile is two. */}
+          {canSplit && (
+            <Button variant="secondary" size="lg" disabled={busy}
+              onClick={() => onSplit(notes[idOf(rows[0])] || "")}
+              title="Sort these photos into separate items, each with its own listing — nothing is drafted until you've checked the split">
+              <Split aria-hidden />
+              It&apos;s more than one item
+            </Button>
+          )}
           <p className="text-[13px] text-ink-secondary min-w-0">
             {typed
               ? `${typed} of ${rows.length} filled in — the rest work from the photos alone.`
