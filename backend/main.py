@@ -52,7 +52,7 @@ from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      MarketplaceState, PendingItemRequest, PendingMergeRequest,
                      PendingPhotoRequest, PendingSplitRequest, PublishRequest,
                      RefineRequest, SessionOnlyRequest, SplitListingRequest)
-from .services import (barcodes, bg_removal, bulk_actions, claude_ai,
+from .services import (barcodes, beanie, bg_removal, bulk_actions, claude_ai,
                        dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
                        ebay_trading, ebay_video, image_import, images,
@@ -4700,9 +4700,14 @@ def _research_draft(listing: Listing, image_paths: list,
     # overwrite outright — "Fanch Ledan style lithograph" is not a title worth
     # protecting. Anything else only gets a suggestion the seller can take.
     if researched_title and conf in ("medium", "high"):
+        # A Beanie Baby's title is the seller's format, not the lookup's: the
+        # research pass is told so, and this holds it there either way.
+        researched_title = (beanie.house_title(listing, researched_title)
+                            or researched_title)
         if hedged:
             log.info("research: title %r -> %r", listing.title, researched_title)
             listing.title = researched_title
+            beanie.retitle(listing)
         elif researched_title.lower() != (listing.title or "").lower():
             notes.append(f"The lookup suggests this title: “{researched_title}”.")
     maker = str(found.get("maker") or "").strip()

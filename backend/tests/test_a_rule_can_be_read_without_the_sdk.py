@@ -41,6 +41,9 @@ PURE = [
     # it must be assertable in the light job like everything else here.
     *sorted(_SERVICES.glob("experts/*/roster.py")),
     *sorted(_SERVICES.glob("experts/*/__init__.py")),
+    # Not rule text either, but it rewrites the title a Beanie Baby is drafted
+    # with, so it is asserted on in the light job like the rest.
+    _SERVICES / "beanie.py",
 ]
 
 # What a pure module may import. Standard library only, and only the boring
