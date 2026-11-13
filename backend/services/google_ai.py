@@ -36,7 +36,7 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import IdentifyResult, Listing
-from . import barcodes
+from . import barcodes, beanie
 
 API_ROOT = os.getenv(
     "GOOGLE_AI_API_ROOT",
@@ -456,6 +456,9 @@ def identify(image_paths: list[Path], image_names: list[str],
     listing = claude_ai._to_listing(data, image_names)
     # eBay charges extra for subtitles — never auto-fill one.
     listing.subtitle = ""
+    # A Ty Beanie Baby's title is its name and "Beanie Baby Ty" (see
+    # services/beanie) -- the same guard the Claude draft gets.
+    beanie.retitle(listing)
     # Constrain confidence to the known set: it is rendered into the UI, so a
     # free-form (prompt-injected) value must never reach the DOM.
     conf = str(data.get("confidence", "medium")).lower().strip()

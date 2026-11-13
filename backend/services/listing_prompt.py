@@ -399,6 +399,20 @@ Rules:
   and it costs characters the item's own words needed. A number PRINTED ON
   THE ITEM is the opposite and belongs there when you can read it — a model
   or style number, an MPN, a pattern number, a card number.
+  TY BEANIE BABIES ARE TITLED DIFFERENTLY, and this outranks the order and
+  the budget above: it is the seller's own format. A single Ty Beanie Baby's
+  title is its NAME, then the words Beanie Baby Ty, and nothing else —
+  "Princess Beanie Baby Ty", "Peace Beanie Baby Ty", "Garcia Beanie Baby Ty".
+  The name is the one Ty printed on the heart-shaped swing tag and the tush
+  tag, spelled the way Ty spells it, without the trademark sign: just the
+  name, never "Princess the Bear" or "Princess Purple Bear". Put the same
+  name in the Character item specific. The year, colour, tag generation,
+  pellets, "retired" and the condition belong in the item specifics and the
+  description, never in this title. With no tag in the photos, name it from
+  the design only when you are sure which Beanie Baby it is, and put
+  "confirm the name on the swing tag" in missing_info. Teenie Beanie Babies,
+  Beanie Buddies, Beanie Boos and a lot of several Beanie Babies are not
+  this format: title those by the rule above.
 - Description: the longest field in the listing and the one that does the most
   SEO work. eBay indexes description text as well as the title, Google indexes
   the whole listing page, and a buyer still reading is a buyer close to
@@ -598,6 +612,19 @@ LISTING_SCHEMA = listing_schema()
 # itself only until someone edits one copy.
 
 
+# The seller's own format for one vertical, and the one title that does NOT
+# spend the budget. Its own constant because both later-pass rules below carry
+# it: the draft writes "Princess Beanie Baby Ty", and a research or refine
+# pass told only "spend 70-80 characters" would hand the old format back.
+# services/beanie applies the same format to what those passes return.
+BEANIE_TITLE_EXCEPTION = (
+    "The one exception is a single Ty Beanie Baby, which the seller titles "
+    "with its name from the swing tag, then Beanie Baby Ty, and nothing else "
+    "(\"Princess Beanie Baby Ty\"): that format outranks the budget and the "
+    "word order. "
+)
+
+
 # The title rules a SECOND pass has to keep. The whole rule lives in
 # LISTING_SCHEMA above, where the first draft reads it — but research and the
 # art lookup each return a REPLACEMENT title, and main applies it over a hedged
@@ -616,7 +643,8 @@ TITLE_BUDGET_AND_BANS = (
     "punctuation (!!, ***, L@@K), hype (WOW, LOOK, MUST SEE, BEST DEAL), and "
     "nothing about shipping or returns, which the seller's account settles. "
     "Never a SKU, bin or inventory number; a model, style, pattern or card "
-    "number PRINTED ON THE ITEM is the opposite and belongs in the title."
+    "number PRINTED ON THE ITEM is the opposite and belongs in the title. "
+    + BEANIE_TITLE_EXCEPTION
 )
 
 
@@ -646,6 +674,7 @@ REFINE_ORDER_RULE = (
     "for one. And it must stay plain — no ALL-CAPS words, emoji, asterisks, "
     "runs of punctuation, hype (WOW, LOOK, MUST SEE), the seller's own "
     "shipping or returns policies, or a SKU, bin or inventory number. "
+    + BEANIE_TITLE_EXCEPTION +
     "If you rewrite the description, its first "
     "words must stay item-specific — brand, model, what the thing is — and "
     "must never open on one of those general words. Both hold unless the "

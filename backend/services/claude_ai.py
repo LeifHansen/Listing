@@ -21,7 +21,7 @@ from anthropic import Anthropic
 
 from .. import config
 from ..config import log
-from . import barcodes, google_ai, taxonomy
+from . import barcodes, beanie, google_ai, taxonomy
 from .experts import knowledge
 from .experts import registry as _experts
 from .experts.base import Stage as _Stage
@@ -774,6 +774,11 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
     # add it in the editor if it's worth the fee. (refine() keeps whatever
     # the seller typed, so only clear it here at first draft.)
     listing.subtitle = ""
+    # A Ty Beanie Baby is titled "<name> Beanie Baby Ty" -- the seller's own
+    # format. The schema says so; this holds the draft to it when the model
+    # wrote the general 80-character title instead. Also at first draft only,
+    # for the same reason as the subtitle. See services/beanie.
+    beanie.retitle(listing)
     # Constrain confidence to the known set — it's rendered into the UI, so a
     # free-form (prompt-injected) value must never reach the DOM.
     conf = str(data.get("confidence", "medium")).lower().strip()
@@ -1654,6 +1659,11 @@ def fresh_copy(listing: Listing) -> dict:
     description = _text(data.get("description")).strip()
     if not title or not description:
         raise RuntimeError("the AI did not return a new title and description")
+    # A Beanie Baby's title is its name and "Beanie Baby Ty" however fresh the
+    # rest of the copy is -- and when the new title lost the name, the one the
+    # listing already had is still the right one.
+    title = (beanie.house_title(listing, title) or beanie.house_title(listing)
+             or title)
     return {"title": title, "description": description}
 
 
