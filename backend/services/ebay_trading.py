@@ -90,10 +90,6 @@ class TradingError(ValueError):
         self.said = said
         self.codes = list(codes) if codes else ([code] if code else [])
 
-    def has_code(self, wanted: str) -> bool:
-        """Did eBay return this ErrorCode anywhere in the response?"""
-        return wanted in self.codes
-
 
 # eBay's seller-level call-limit error. Documented (developer.ebay.com KB
 # 2137): returned in the response body with Ack=Failure, NOT as an HTTP

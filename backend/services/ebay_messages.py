@@ -478,8 +478,3 @@ def mark_read(token: str, raw_id: str) -> bool:
             continue
     log.info("ebay_messages: couldn't mark %s read (unknown action name)", rid)
     return False
-
-
-def unread_total(conversations: list) -> int:
-    return sum(_as_int(c.get("unread"), 0) for c in conversations or []
-               if isinstance(c, dict))

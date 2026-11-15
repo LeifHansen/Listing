@@ -208,10 +208,6 @@ def test_mark_read_never_raises_on_unknown_action(monkeypatch):
     assert em.mark_read("tok", "c-1") is False
 
 
-def test_unread_total_sums_and_ignores_junk():
-    assert em.unread_total([{"unread": 2}, {"unread": "3"}, {}, None, "x"]) == 5
-
-
 # --- a lost answer on a send is not "it didn't go" --------------------------
 
 def _wire(monkeypatch, outcome):
