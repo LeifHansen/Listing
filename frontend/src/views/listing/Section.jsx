@@ -39,7 +39,7 @@ import { InfoTip } from "@/components/ui/fields";
  * says what is inside ("Qty 3 · Promoted 8%") so a seller never has to open
  * it to learn whether they need to. */
 export function Section({ id, title, hint, state, flagged, expand, collapsible = false,
-                          defaultOpen = true, summary, className, children }) {
+                          defaultOpen = true, summary, children }) {
   const [open, setOpen] = useState(defaultOpen);
   const ref = useRef(null);
 
@@ -97,7 +97,6 @@ export function Section({ id, title, hint, state, flagged, expand, collapsible =
         // A refusal rings the section, not a card: the same red, on the
         // left edge, where the eye lands first.
         flagged && "border-l-2 border-l-error pl-4 -ml-4",
-        className,
       )}
     >
       {collapsible ? (

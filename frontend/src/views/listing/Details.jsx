@@ -36,7 +36,7 @@ const norm = (s) => (s || "").trim().toLowerCase();
 // The trust marker for one specific: ✓ = the AI read it off the item (tag,
 // label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
 // glance; nothing = the seller typed or confirmed it (or it's empty).
-function ConfidenceMark({ row, className }) {
+function ConfidenceMark({ row }) {
   if (!row || !(row.value || "").trim() || !row.confidence) return null;
   const high = row.confidence === "high";
   const label = high
@@ -46,7 +46,7 @@ function ConfidenceMark({ row, className }) {
     <span
       title={label} aria-label={label} tabIndex={0}
       className={cn("inline-flex shrink-0 cursor-help outline-none",
-        high ? "text-green" : "text-warning", className)}
+        high ? "text-green" : "text-warning")}
     >
       {high ? <Check size={13} aria-hidden /> : <AlertTriangle size={13} aria-hidden />}
     </span>
@@ -55,7 +55,7 @@ function ConfidenceMark({ row, className }) {
 
 // One labelled group under the chips. The rule under the heading is what
 // makes the page scannable without boxes.
-function SpecGroup({ title, note, count, children }) {
+function SpecGroup({ title, count, children }) {
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-baseline flex-wrap gap-x-2 gap-y-0.5 pb-1.5 border-b border-line">
@@ -63,7 +63,6 @@ function SpecGroup({ title, note, count, children }) {
         {count != null && (
           <span className="font-display text-[12px] font-semibold text-ink-faint tabular-nums">{count}</span>
         )}
-        {note && <span className="text-[12px] font-normal text-ink-faint">{note}</span>}
       </div>
       {children}
     </section>
