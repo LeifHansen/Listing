@@ -75,7 +75,7 @@ the personal details it was about.
 ## Deleting your account
 
 You can delete your account yourself at any time, in the mobile app or on the
-web at [app.thryftshop.com](https://app.thryftshop.com) (sign in, then
+web at app.thryftshop.com (sign in, then
 **Settings → Delete account**). Your account, your listing drafts and your
 stored marketplace tokens are removed straight away. Your uploaded photos are
 then deleted from our image storage; that part runs just after, so it can take
