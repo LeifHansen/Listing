@@ -25,7 +25,7 @@ import { Button } from "./Button";
  * `items`: [{ label, icon, onSelect, danger, disabled, hint, divider }].
  * An item with `divider` draws a rule above itself. `hint` is a short
  * right-aligned note (a shortcut, a consequence). */
-export function Menu({ items, label = "More actions", align = "right", className,
+export function Menu({ items, label = "More actions", className,
                       size = "icon", variant = "ghost", children }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
@@ -100,8 +100,7 @@ export function Menu({ items, label = "More actions", align = "right", className
             transition={{ duration: 0.12, ease: "easeOut" }}
             className={cn(
               "absolute top-full mt-1.5 z-40 min-w-56 py-1.5",
-              "bg-card border border-line rounded-card shadow-float",
-              align === "right" ? "right-0" : "left-0",
+              "bg-card border border-line rounded-card shadow-float right-0",
             )}
           >
             {items.filter(Boolean).map((item, i) => (
