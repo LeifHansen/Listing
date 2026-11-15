@@ -1445,7 +1445,7 @@ class EbayProvider:
 
     # --- buyer messages (Message API — limited release) -------------------
     #
-    # The five methods of marketplaces.messaging.MessagingProvider. Ids in and
+    # The five methods of marketplaces.messaging.MESSAGING_METHODS. Ids in and
     # out are RAW; the inbox adds the "ebay:" prefix. Everything delegates to
     # services.ebay_messages, which owns the FROM_MEMBERS filter that keeps
     # eBay's own system mail out of a P2P inbox.
