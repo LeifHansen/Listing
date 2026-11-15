@@ -8986,7 +8986,8 @@ def delete_pending_item(job_id: str, req: PendingItemRequest,
               for gi, g in enumerate(groups) if gi != req.gi]
     still_used = {i for g in others for i in g.get("indices") or []}
     dropped = [i for i in mine if i not in still_used]
-    kept = [i for i in range(len(names)) if i not in set(dropped)]
+    gone = set(dropped)
+    kept = [i for i in range(len(names)) if i not in gone]
     moved = {old: new for new, old in enumerate(kept)}
     left = [names[i] for i in kept]
     regrouped = [{**g, "indices": [moved[i] for i in g.get("indices") or []
