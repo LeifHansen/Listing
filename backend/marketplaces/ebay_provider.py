@@ -110,7 +110,11 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
 def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
     """The check itself, run by the one caller that claimed it."""
     try:
-        discovered = ebay_auth.fetch_policies_and_location(access_token)
+        # One read of each list for the whole pass: the defaults and the ids
+        # that exist come out of the same answers (see ebay_auth._once).
+        memo: dict = {}
+        discovered = ebay_auth.fetch_policies_and_location(access_token,
+                                                           memo=memo)
         # Sync from whatever the connected eBay account actually has -- an id
         # that belongs to someone else is replaced, and an EMPTY slot is filled
         # from this account's own default.
@@ -124,7 +128,10 @@ def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
         # that kind -- which is exactly the case `absent` reports and the
         # publish checklist turns into an instruction the seller can act on.
         result = ebay_account.reconcile_account_settings(
-            access_token, acct, discovered, fill_blanks=True)
+            access_token, acct, discovered, fill_blanks=True,
+            policy_ids=lambda t: ebay_auth.policy_ids_on_account(t, memo=memo),
+            location_keys=lambda t: ebay_auth.location_keys_on_account(
+                t, memo=memo))
         changes, conclusive = result.changes, result.conclusive
         # This pass already asked eBay which policies the account has. Keep
         # the answer: it is the only thing that can vet the shipping policy id

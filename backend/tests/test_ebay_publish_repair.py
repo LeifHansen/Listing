@@ -69,11 +69,11 @@ def repair(monkeypatch):
         ebay_account.forget_verified("u1")
         monkeypatch.setattr(ebay_provider.ebay_auth,
                             "fetch_policies_and_location",
-                            lambda _t: dict(ON_NEW_ACCOUNT))
+                            lambda _t, **_kw: dict(ON_NEW_ACCOUNT))
         monkeypatch.setattr(ebay_provider.ebay_auth, "policy_ids_on_account",
-                            lambda _t: answers_policies)
+                            lambda _t, **_kw: answers_policies)
         monkeypatch.setattr(ebay_provider.ebay_auth, "location_keys_on_account",
-                            lambda _t: answers_location)
+                            lambda _t, **_kw: answers_location)
         monkeypatch.setattr(ebay_provider.db, "save_ebay_account",
                             lambda uid, **kw: saved.update(kw))
         monkeypatch.setattr(ebay_provider.db, "stamp_ebay_account",
