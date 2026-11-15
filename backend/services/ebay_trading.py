@@ -1255,7 +1255,10 @@ def store_categories(token: str) -> list[dict]:
     store = _find(root, "Store")
     if store is None:
         raise NoStore(_NO_STORE_MESSAGE)
-    cats = _custom_categories(_find(store, "CustomCategories") or store)
+    # An Element's truth is its child count (and that test is deprecated):
+    # a CustomCategories with nothing in it falls back to the Store, as before.
+    custom = _find(store, "CustomCategories")
+    cats = _custom_categories(custom if custom is not None and len(custom) else store)
     log.info("trading: GetStore -> %d store categories", len(cats))
     return cats
 

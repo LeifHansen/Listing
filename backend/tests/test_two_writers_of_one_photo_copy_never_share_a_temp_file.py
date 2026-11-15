@@ -51,7 +51,8 @@ def test_a_failed_write_leaves_the_old_copy_and_no_temp_file(tmp_path, monkeypat
     before = dst.read_bytes()
 
     def boom(self, fp, *args, **kwargs):
-        open(fp, "wb").write(b"half a jpeg")
+        with open(fp, "wb") as half:
+            half.write(b"half a jpeg")
         raise OSError("disk full")
 
     monkeypatch.setattr(Image.Image, "save", boom)
