@@ -156,7 +156,7 @@ export function joinItemNotes(parts) {
     .slice(0, MAX_ITEM_NOTES_CHARS);
 }
 
-export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
+export function AiNotesStep({ items, values, onChange, onSubmit,
                               onDeletePhoto, onDeleteItem, onMergeItems,
                               onSplit }) {
   const notes = values || {};
@@ -174,7 +174,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
   const [picked, setPicked] = useState(() => new Set());
   const [merging, setMerging] = useState(false);
   const pickedRows = rows.filter((it) => picked.has(idOf(it)));
-  const canMerge = !!onMergeItems && !busy && rows.length > 1;
+  const canMerge = !!onMergeItems && rows.length > 1;
   const single = rows.length === 1;
   // One card holding more than one photo can be two items. One photo cannot.
   const canSplit = !!onSplit && single
@@ -309,7 +309,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
   const submit = async () => {
     // Not while a merge is out: its answer moves notes between items, and
     // the boxes this would read are the ones from before it did.
-    if (busy || merging) return;
+    if (merging) return;
     // Behind the deletes, so the answer is never the thing that races them:
     // submitting takes the job out of its pause, and a delete still in the
     // air would land on a job that has moved on and be refused. Resolved
@@ -380,7 +380,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
         const isPicked = picked.has(idOf(item));
         // Locked while the merge it is part of is out: the line in it is
         // about to be carried into another card (see mergePicked).
-        const locked = busy || (merging && isPicked);
+        const locked = merging && isPicked;
         return (
           <Card key={idOf(item)}
             className={cn("flex flex-col gap-3.5",
@@ -429,7 +429,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
                 )}
                 {/* Not on the last one: an empty batch is a stopped batch,
                     and the screen already has a button for that. */}
-                {onDeleteItem && !busy && rows.length > 1 && item.photos?.length > 0 && (
+                {onDeleteItem && rows.length > 1 && item.photos?.length > 0 && (
                   <button
                     type="button"
                     onClick={() => dropItem(idOf(item))}
@@ -526,8 +526,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
           </div>
         )}
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="primary" size="lg" onClick={submit} loading={busy}
-            disabled={merging}>
+          <Button variant="primary" size="lg" onClick={submit} disabled={merging}>
             <Sparkles aria-hidden />
             {single ? "Write my listing" : `Write ${rows.length} listings`}
           </Button>
@@ -535,7 +534,7 @@ export function AiNotesStep({ items, values, onChange, busy = false, onSubmit,
               Beside the button that writes ONE listing, because that is the
               moment they notice the pile is two. */}
           {canSplit && (
-            <Button variant="secondary" size="lg" disabled={busy}
+            <Button variant="secondary" size="lg"
               onClick={() => onSplit(notes[idOf(rows[0])] || "")}
               title="Sort these photos into separate items, each with its own listing — nothing is drafted until you've checked the split">
               <Split aria-hidden />
