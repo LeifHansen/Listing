@@ -348,6 +348,24 @@ def session_prefix(session_id: str) -> str:
     return f"sessions/{storage.safe_session_name(session_id)}/"
 
 
+def _delete_under(client, prefix: str) -> int:
+    """Delete every object under `prefix` with `client`; how many went.
+    Raises whatever the client raises — the two callers below decide what a
+    failure means."""
+    removed = 0
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=config.R2_BUCKET, Prefix=prefix):
+        keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        if not keys:
+            continue
+        # delete_objects caps at 1000 keys per call, which is also the
+        # paginator's default page size, so a page always fits.
+        client.delete_objects(Bucket=config.R2_BUCKET,
+                              Delete={"Objects": keys, "Quiet": True})
+        removed += len(keys)
+    return removed
+
+
 def delete_prefix(prefix: str) -> int:
     """Delete every object under `prefix`; returns how many were removed.
 
@@ -361,18 +379,7 @@ def delete_prefix(prefix: str) -> int:
         client = _get_client()
         if client is None:
             return 0
-        removed = 0
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=config.R2_BUCKET, Prefix=prefix):
-            keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-            if not keys:
-                continue
-            # delete_objects caps at 1000 keys per call, which is also the
-            # paginator's default page size, so a page always fits.
-            client.delete_objects(Bucket=config.R2_BUCKET,
-                                  Delete={"Objects": keys, "Quiet": True})
-            removed += len(keys)
-        return removed
+        return _delete_under(client, prefix)
     except Exception as exc:  # noqa: BLE001 - never break the request
         log.warning(f"objstore: delete_prefix({prefix}) failed: {exc}")
         return 0
@@ -416,16 +423,7 @@ def delete_prefix_strict(prefix: str) -> int:
                 f"not reachable ({_error or 'no client'})")
         return 0
     try:
-        removed = 0
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=config.R2_BUCKET, Prefix=prefix):
-            keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-            if not keys:
-                continue
-            client.delete_objects(Bucket=config.R2_BUCKET,
-                                  Delete={"Objects": keys, "Quiet": True})
-            removed += len(keys)
-        return removed
+        return _delete_under(client, prefix)
     except Exception as exc:  # noqa: BLE001 - re-raised as our own type
         log.warning(f"objstore: delete_prefix_strict({prefix}) failed: {exc}")
         raise ObjectStoreUnavailable(
