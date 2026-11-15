@@ -525,15 +525,6 @@ def _budget_for(photos: int) -> float:
     return max(_TOTAL_BUDGET, _PER_PHOTO * photos)
 
 
-def detect_rotations(paths: list[Path],
-                     should_stop: Optional[Callable[[], bool]] = None
-                     ) -> dict[str, int]:
-    """{filename: clockwise degrees needed} for the photos whose ITEM lies
-    sideways or on its head — `screen`'s turns on their own, for callers that
-    want nothing else."""
-    return screen(paths, should_stop=should_stop).rotations
-
-
 def screen(paths: list[Path],
            should_stop: Optional[Callable[[], bool]] = None) -> Screened:
     """One look at `paths`: which photos need turning, and which are close-ups
