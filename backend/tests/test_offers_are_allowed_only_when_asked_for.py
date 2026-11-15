@@ -134,7 +134,7 @@ def test_the_publish_reads_the_sellers_own_switch(monkeypatch, listing):
 def test_a_seller_who_never_chose_gets_no_offers(monkeypatch):
     """Silence is not a request to negotiate."""
     monkeypatch.setattr(listing_sync.db, "get_prefs", lambda _uid: {})
-    assert listing_sync.offers_enabled("u1") is False
+    assert listing_sync.offers_terms("u1")["enabled"] is False
 
 
 def test_an_unreadable_preference_never_turns_offers_on(monkeypatch):
@@ -144,27 +144,27 @@ def test_an_unreadable_preference_never_turns_offers_on(monkeypatch):
         raise RuntimeError("connection reset by peer")
 
     monkeypatch.setattr(listing_sync.db, "get_prefs", _boom)
-    assert listing_sync.offers_enabled("u1") is False
+    assert listing_sync.offers_terms("u1")["enabled"] is False
 
 
 def test_an_explicit_yes_is_honoured(monkeypatch):
     monkeypatch.setattr(listing_sync.db, "get_prefs",
                         lambda _uid: {"allow_offers": 1})
-    assert listing_sync.offers_enabled("u1") is True
+    assert listing_sync.offers_terms("u1")["enabled"] is True
 
 
 def test_an_explicit_no_is_honoured(monkeypatch):
     monkeypatch.setattr(listing_sync.db, "get_prefs",
                         lambda _uid: {"allow_offers": 0})
-    assert listing_sync.offers_enabled("u1") is False
+    assert listing_sync.offers_terms("u1")["enabled"] is False
 
 
 def test_an_anonymous_publish_never_allows_offers(monkeypatch):
     """There is nobody whose switch it would be."""
-    assert listing_sync.offers_enabled(None) is False
-    assert listing_sync.offers_enabled("") is False
-    assert listing_sync.publish_best_offer(None) is False
-    assert listing_sync.publish_best_offer({}) is False
+    assert listing_sync.offers_terms(None)["enabled"] is False
+    assert listing_sync.offers_terms("")["enabled"] is False
+    assert listing_sync.publish_best_offer_terms(None)["enabled"] is False
+    assert listing_sync.publish_best_offer_terms({})["enabled"] is False
 
 
 def test_a_revise_never_opens_a_live_listing_to_offers(monkeypatch, listing):

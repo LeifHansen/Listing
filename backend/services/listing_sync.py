@@ -1376,37 +1376,33 @@ def publish_policies(listing: Listing, creds: dict) -> dict:
             "return_policy_id": creds.get("return_policy_id")}
 
 
-def offers_enabled(uid: Optional[str]) -> bool:
-    """Account default: accept Best Offer on every NEW listing, no minimum.
-
-    The "Allow offers" switch in Settings, read at publish time so it covers
-    every listing this app creates without touching the drafts themselves.
-
-    OFF unless the seller saved it on, and off again when the preference
-    cannot be read. Neither is timidity about a free feature: offers change
-    what the listing IS to a buyer — the price stops being the price, and the
-    seller signs up to answer messages about it — and an outage is not a
-    decision. Same reasoning as auto_promote (marketplaces/ebay_provider.py),
-    which is a fee; the failure here is cheaper but it is still the app
-    listing an item on terms the seller did not choose.
-
-    Deliberately NOT applied on a revise. The switch says "new listings", and
-    flipping it must not go back through a live store silently opening
-    hundreds of existing listings to negotiation.
-    """
-    return offers_terms(uid)["enabled"]
-
-
 def offers_terms(uid: Optional[str]) -> dict:
     """The seller's Best Offer defaults for a NEW listing, in one read:
     {enabled, auto_accept_pct, auto_decline_pct}.
 
-    Same fail-closed contract as the switch alone -- nobody, an absent
-    preference and an unreadable one are all "off, no limits". The limits
-    are percentages of the asking price; 0 means that limit is not set, so
-    with both at 0 the listing goes up exactly as "Allow offers" always
-    did: every offer reaches the seller. They are read together with the
-    switch so a publish cannot see one half of the setting and not the other.
+    `enabled` is the "Allow offers" switch in Settings: accept Best Offer on
+    every new listing. Read at publish time so it covers every listing this
+    app creates without touching the drafts themselves.
+
+    OFF unless the seller saved it on, and off again when the preference
+    cannot be read -- nobody, an absent preference and an unreadable one are
+    all "off, no limits". Neither is timidity about a free feature: offers
+    change what the listing IS to a buyer — the price stops being the price,
+    and the seller signs up to answer messages about it — and an outage is
+    not a decision. Same reasoning as auto_promote
+    (marketplaces/ebay_provider.py), which is a fee; the failure here is
+    cheaper but it is still the app listing an item on terms the seller did
+    not choose.
+
+    Deliberately NOT applied on a revise. The switch says "new listings", and
+    flipping it must not go back through a live store silently opening
+    hundreds of existing listings to negotiation.
+
+    The limits are percentages of the asking price; 0 means that limit is not
+    set, so with both at 0 the listing goes up exactly as "Allow offers"
+    always did: every offer reaches the seller. They are read together with
+    the switch so a publish cannot see one half of the setting and not the
+    other.
     """
     off = {"enabled": False, "auto_accept_pct": 0.0, "auto_decline_pct": 0.0}
     if not uid:
@@ -1454,11 +1450,11 @@ def international_shipping_enabled(uid: Optional[str]) -> bool:
     """Has this seller switched eBay International Shipping on for new
     listings?
 
-    Same contract as offers_enabled, for the same reason: the switch changes
-    who a listing is sold to. With it on, eBay shows the listing to buyers
-    abroad and the seller posts the sale to eBay's US hub; eBay carries it
-    from there. That is a commitment the seller makes, so silence and an
-    unreadable preference are both a no.
+    Same contract as the "Allow offers" switch (offers_terms), for the same
+    reason: the switch changes who a listing is sold to. With it on, eBay
+    shows the listing to buyers abroad and the seller posts the sale to eBay's
+    US hub; eBay carries it from there. That is a commitment the seller makes,
+    so silence and an unreadable preference are both a no.
 
     A REVISE never carries it. The switch says "new listings", and flipping
     it must not walk back through a live store opting hundreds of listings in
@@ -1469,25 +1465,21 @@ def international_shipping_enabled(uid: Optional[str]) -> bool:
                       "international shipping")
 
 
-def publish_best_offer(creds: Optional[dict]) -> bool:
-    """Whether a publish made with `creds` goes out with Best Offer on.
+def publish_best_offer_terms(creds: Optional[dict]) -> dict:
+    """The Best Offer terms a publish made with `creds` carries -- the
+    switch and the two limits, from the account's own preferences.
 
     The companion of publish_policies: it reads the account's own switch off
     the same creds dict, so create_on_ebay and the verifier below cannot
     disagree about what the real publish sends.
     """
-    return publish_best_offer_terms(creds)["enabled"]
-
-
-def publish_best_offer_terms(creds: Optional[dict]) -> dict:
-    """The Best Offer terms a publish made with `creds` carries -- the
-    switch and the two limits, from the account's own preferences."""
     return offers_terms(str((creds or {}).get("_uid") or ""))
 
 
 def publish_international_shipping(creds: Optional[dict]) -> bool:
     """Whether a publish made with `creds` opts the listing into eBay
-    International Shipping. Same shape as publish_best_offer, same reason."""
+    International Shipping. Same shape as publish_best_offer_terms, same
+    reason."""
     return international_shipping_enabled(
         str((creds or {}).get("_uid") or ""))
 
