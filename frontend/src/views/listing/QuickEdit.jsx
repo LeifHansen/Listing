@@ -15,7 +15,7 @@ import { ShippingPolicySelect, useFulfillmentPolicies } from "./ShippingPolicySe
 import { blockedReason, outcomeUnknown } from "./publishShared";
 // eBay's title ceiling; the server refuses anything longer rather than
 // cutting a title the seller typed (main._quick_edit_value).
-import { TITLE_MAX } from "./blockers";
+import { TITLE_MAX, marketLabel } from "./blockers";
 
 /* A listing's "Quick edit" panel — the fields a seller changes most, right
  * under the card, without opening the editor.
@@ -86,8 +86,6 @@ function quickEditFields(item) {
 }
 
 const text = (v) => (v == null ? "" : String(v));
-const marketLabel = (key) => (key === "ebay"
-  ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1));
 
 // A listing, in the shape the inputs hold: numbers as the strings typed.
 function valuesOf(l) {

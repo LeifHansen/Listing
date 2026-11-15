@@ -416,12 +416,16 @@ export function blockersFor(listing, targets,
   return out;
 }
 
+// One marketplace key in words: "eBay", "Etsy", "Depop".
+export function marketLabel(key) {
+  return key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 // "eBay", "Etsy", "eBay and Etsy" — the marketplaces a publish is going to,
 // in words, for every sentence that used to say "eBay" unconditionally.
 export function marketNames(targets) {
   const keys = targets && targets.length ? targets : ["ebay"];
-  const label = (k) => (k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1));
-  const names = keys.map(label);
+  const names = keys.map(marketLabel);
   return names.length > 1
     ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
     : names[0];
