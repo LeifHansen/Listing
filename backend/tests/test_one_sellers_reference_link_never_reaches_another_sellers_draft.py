@@ -42,6 +42,16 @@ def store(monkeypatch):
     importlib.reload(db)
     db._get_engine()
     yield db
+    if db._engine is not None:
+        db._engine.dispose()
+    db._engine = None
+    db._initialized = False
+    # Restore the environment BEFORE reloading config: monkeypatch was set up
+    # first, so it would otherwise undo the env only after this reload, and
+    # config would keep this test's DATABASE_URL (and DATA_DIR) for every
+    # later test on the worker -- a scratch database leaking into tests that
+    # assume none, such as the sweep cooldown's.
+    monkeypatch.undo()
     importlib.reload(config)
 
 
