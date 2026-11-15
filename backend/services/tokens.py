@@ -249,24 +249,26 @@ def insufficient_message(res: dict) -> str:
 _STRIPE_API = "https://api.stripe.com/v1"
 
 
-def _stripe_post(path: str, data: dict) -> dict:
-    resp = httpx.post(f"{_STRIPE_API}{path}", data=data,
-                      auth=(config.STRIPE_SECRET_KEY, ""), timeout=30)
+def _stripe_body(resp: httpx.Response) -> dict:
+    """A Stripe response's JSON, or a RuntimeError carrying Stripe's own
+    message for a 4xx/5xx."""
     body = resp.json()
     if resp.status_code >= 400:
         msg = (body.get("error") or {}).get("message", f"HTTP {resp.status_code}")
         raise RuntimeError(f"Stripe error: {msg}")
     return body
+
+
+def _stripe_post(path: str, data: dict) -> dict:
+    return _stripe_body(httpx.post(f"{_STRIPE_API}{path}", data=data,
+                                   auth=(config.STRIPE_SECRET_KEY, ""),
+                                   timeout=30))
 
 
 def _stripe_get(path: str) -> dict:
-    resp = httpx.get(f"{_STRIPE_API}{path}",
-                     auth=(config.STRIPE_SECRET_KEY, ""), timeout=30)
-    body = resp.json()
-    if resp.status_code >= 400:
-        msg = (body.get("error") or {}).get("message", f"HTTP {resp.status_code}")
-        raise RuntimeError(f"Stripe error: {msg}")
-    return body
+    return _stripe_body(httpx.get(f"{_STRIPE_API}{path}",
+                                  auth=(config.STRIPE_SECRET_KEY, ""),
+                                  timeout=30))
 
 
 def create_checkout(user_id: str, pack_id: str, base_url: str) -> str:
