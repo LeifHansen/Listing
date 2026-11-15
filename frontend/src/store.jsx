@@ -634,12 +634,19 @@ export function AppProvider({ children }) {
   }, [user, loadNotifications]);
   const markNotificationsRead = useCallback(async (ids) => {
     // Optimistic: the badge clears instantly, the server catches up.
-    setNotifications((n) => ({
-      ...n,
-      items: n.items.map((i) => (
-        !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
-      unread: ids ? Math.max(0, n.unread - ids.length) : 0,
-    }));
+    // Only what was unread comes off the badge: opening a notification that
+    // was already read used to take one off anyway, until the next poll.
+    setNotifications((n) => {
+      const newlyRead = ids
+        ? n.items.filter((i) => ids.includes(i.id) && !i.read).length
+        : n.unread;
+      return {
+        ...n,
+        items: n.items.map((i) => (
+          !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
+        unread: Math.max(0, n.unread - newlyRead),
+      };
+    });
     try {
       await postJson("/api/notifications/read", ids ? { ids } : { all: true });
     } catch (e) { /* the next poll re-syncs */ }
