@@ -293,7 +293,8 @@ Ordered by what it costs a seller.
       `support@thryftshop.com`; the app's About, Privacy, Terms and Settings
       publish a personal Gmail. Pick one (on the company domain), confirm it
       receives mail, and update `frontend/public/{about,privacy-policy,terms}.html`,
-      `SettingsView.jsx`, `TESTFLIGHT_CHECKLIST.md`. Counsel review of the
+      `SettingsView.jsx`, and the store listings' support contact
+      (`docs/APP_STORE.md`). Counsel review of the
       two legal texts, a retention schedule and a legal address are the
       non-code half of the same item.
 - [ ] **Decide the deploy outage.** Every merge takes production down for
@@ -369,8 +370,8 @@ Ordered by what it costs a seller.
   runbook: topology, secrets by name, deploy/rollback, backups, playbooks
   for disk full / R2 degraded / eBay quota) and write a short
   `CONTRIBUTING.md` (branch → PR → four gates → merge is the deploy; the
-  no-skip rule; where a new env var goes). Merge `TESTFLIGHT_CHECKLIST.md`
-  into `MOBILE.md`; move `SMART_LIST.md` under `docs/design/`.
+  no-skip rule; where a new env var goes). Move `SMART_LIST.md` under
+  `docs/design/`.
 - Route-split the admin screens out of the 515 KB main chunk; the Google
   Fonts stylesheet blocks first paint; the native shell is hard-wired to
   the `.fly.dev` host, so that hostname cannot be retired without a release.

@@ -1364,9 +1364,10 @@ errors on a DB problem. Tables are auto-created on first use.
    `/api/admin/diagnostics` shows `objstore_missing` when partially
    configured, and `/api/ready` says `object_storage.configured` without a
    token.
-7. **Mobile** ✅ — the web build wrapped in Capacitor for iOS (see
-   [`MOBILE.md`](MOBILE.md) and the TestFlight checklist), talking to the
-   same `/api/*` endpoints with a bearer token.
+7. **Mobile** ✅ — the web build bundled into Capacitor apps for iOS and
+   Android (see [`MOBILE.md`](MOBILE.md) to build and ship them, and
+   [`docs/APP_STORE.md`](docs/APP_STORE.md) for the store listings), talking
+   to the same `/api/*` endpoints with a bearer token.
 8. **Item Identifier** — reverse image search (Google Lens via SerpApi)
    confirms art prints and maker marks; a full cross-checked identify pass
    for every item is still ahead.

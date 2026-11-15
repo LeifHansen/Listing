@@ -190,7 +190,7 @@ it on the next tick (within a minute) through the same path.
 ### Mobile
 
 Nothing native. The Capacitor shell bundles the same React build, so the
-section, chips and card ship to iOS with the next `ios-prepare.sh` build. The
+section, chips and card ship to the apps with the next `npm run native:*` build. The
 Dashboard card sits above the fixed bottom nav like the others
 (`pb-28 md:pb-10`).
 
