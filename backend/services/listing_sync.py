@@ -486,6 +486,23 @@ def keeps_grace(record: dict) -> bool:
     return bool((record.get("listing") or {}).get("images"))
 
 
+def _utc_instant(raw) -> Optional[datetime]:
+    """An ISO-8601 timestamp as an AWARE datetime, or None if unreadable.
+
+    eBay writes its times as "2026-07-30T18:04:11.000Z", and every time this
+    module reads is UTC, so a value that names no zone is taken as UTC rather
+    than left naive -- see `_started_at` for what a naive one costs.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _ended_since(record: dict) -> Optional[datetime]:
     """When this record ended, as an aware datetime, or None if unreadable.
 
@@ -498,21 +515,16 @@ def _ended_since(record: dict) -> Optional[datetime]:
     listing = record.get("listing") or {}
     raw = str(listing.get("ended_at") or "").strip()
     if raw:
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            log.info("sync: %s has an unreadable ended_at (%r)",
-                     record.get("id"), raw)
+        parsed = _utc_instant(raw)
+        if parsed is not None:
+            return parsed
+        log.info("sync: %s has an unreadable ended_at (%r)",
+                 record.get("id"), raw)
     stamp = record.get("updated_at")
     if isinstance(stamp, datetime):
         return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
-    if isinstance(stamp, str) and stamp.strip():
-        try:
-            parsed = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
+    if isinstance(stamp, str):
+        return _utc_instant(stamp)
     return None
 
 
@@ -680,23 +692,18 @@ def _started_at(data: dict) -> Optional[datetime]:
     """An imported listing's eBay start time, as an aware datetime.
 
     This is what the row's updated_at becomes, so "most recent first" means
-    most recently listed rather than most recently touched by a sync."""
-    raw = str(data.get("ebay_start_time") or "").strip()
-    if not raw:
-        return None
-    try:  # eBay sends "2026-07-30T18:04:11.000Z"
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    # "Aware" was the contract and the Z was the only thing enforcing it. The
-    # value goes into a DateTime(timezone=True) column, and Postgres reads a
-    # NAIVE datetime written there as being in the session's timezone -- the
-    # same silent offset as the sessions_valid_from trap, arriving from the
-    # value side instead of the column side. eBay's times are UTC; anything
-    # that reaches here without a zone came through this app's own storage,
-    # where they are UTC too. duplicates._listed_at and recommender._age_days
-    # already do exactly this with the same values.
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    most recently listed rather than most recently touched by a sync.
+
+    "Aware" was the contract and the Z was the only thing enforcing it. The
+    value goes into a DateTime(timezone=True) column, and Postgres reads a
+    NAIVE datetime written there as being in the session's timezone -- the
+    same silent offset as the sessions_valid_from trap, arriving from the
+    value side instead of the column side. eBay's times are UTC; anything
+    that reaches here without a zone came through this app's own storage,
+    where they are UTC too. duplicates._listed_at and recommender._age_days
+    already do exactly this with the same values.
+    """
+    return _utc_instant(data.get("ebay_start_time"))
 
 
 def _warn_if_capped(items, what: str, user_id: str) -> None:
