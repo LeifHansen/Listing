@@ -878,6 +878,15 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
                     "capped, duplicates may survive this run",
                     user_id, _KNOWN_LIMIT)
+    # The ended records that have run out of road go now, before the indexes
+    # below are built to match this run's items: a record that is about to be
+    # removed must not be the one an active listing gets merged into. Swept
+    # from `all_known` rather than `known` — a mirror stamped with an account
+    # the seller has since disconnected is exactly the stale card this is
+    # for, and nothing else will ever come back for it.
+    cleared = sweep_ended_records(all_known, user_id)
+    for rid in cleared:
+        known.pop(rid, None)
     # Match on the eBay item id, not just on the mirror id: a listing this app
     # published is already here under its session id, and keying the sync on
     # "ebay-<item>" alone imported it again as a separate card on every sync —
@@ -890,18 +899,6 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # but never got an answer for is reclaimed instead of imported as a
     # second card. See _index_by_publish_key.
     by_key = _index_by_publish_key(known.values())
-    # The ended records that have run out of road go now, before the indexes
-    # above are used to match this run's items: a record that is about to be
-    # removed must not be the one an active listing gets merged into. Swept
-    # from `all_known` rather than `known` — a mirror stamped with an account
-    # the seller has since disconnected is exactly the stale card this is
-    # for, and nothing else will ever come back for it.
-    cleared = sweep_ended_records(all_known, user_id)
-    for rid in cleared:
-        known.pop(rid, None)
-    if cleared:
-        owned = _index_by_item(known.values())
-        by_key = _index_by_publish_key(known.values())
     # Records already written by an earlier listing in this run. See the
     # first-claim-wins guard in the save loop.
     claimed: set[str] = set()
