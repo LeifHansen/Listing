@@ -16,6 +16,7 @@ import { ShopMode } from "@/views/ShopMode";
 import { SettingsView } from "@/views/SettingsView";
 import { AdminView } from "@/views/AdminView";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { useNativeBack } from "@/lib/nativeShell";
 
 // The buyer inbox is fetched the first time it is opened, not with the app:
 // it is behind a deployment flag that is off by default, and its nav entry
@@ -77,6 +78,14 @@ function SetupWarning({ children }) {
 
 function Main() {
   const { view, setView, openSettings, health, activeBulk, clearBulk, isSuperadmin } = useApp();
+  // Android's back button, once no dialog or open listing took it: any
+  // other screen goes back to the dashboard (and the dashboard lets the app
+  // go to the background; see lib/nativeShell).
+  useNativeBack(() => {
+    if (view === "dashboard") return false;
+    setView("dashboard");
+    return true;
+  });
   const [search, setSearch] = useState("");
   // Tapping a nav item means "take me to the top of that screen". Without
   // this the browser keeps the scroll offset across the swap, so leaving a

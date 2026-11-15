@@ -5,6 +5,7 @@ import {
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
   Rocket, RefreshCw, Copy, Split,
 } from "lucide-react";
+import { useNativeBack } from "@/lib/nativeShell";
 import { cn } from "@/lib/utils";
 import { isDraft } from "@/lib/listingsView";
 import { useApp } from "@/store";
@@ -270,6 +271,12 @@ export function Workflow() {
   // since the editor opens where you already are (see store.openListing).
   // A draft is saved on the way out (see `leave`); a live listing asks.
   const back = () => leave(() => setSession(null));
+  // Android's back button is this same Back, ahead of the app's own "go to
+  // the dashboard" (lib/nativeShell): the draft saves, a live listing asks.
+  useNativeBack(() => {
+    back();
+    return true;
+  }, 10);
 
   // The header's ⋯ menu: the actions a seller takes once a month, which
   // used to be five buttons across the header and four more in the bar.

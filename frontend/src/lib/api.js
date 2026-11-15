@@ -1,7 +1,7 @@
 import {
   ensureAiConsent, grantAiConsent, hasAiConsent,
 } from "@/lib/aiConsent";
-import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
+import { API_BASE, apiUrl, storedToken, tokenPurchasesAllowed, tokenReady } from "@/lib/platform";
 import { noteRequestId } from "@/lib/clientErrors";
 import {
   decodeAppliesOrientation, drawOriented, fileHead, isJpeg, jpegOrientation,
@@ -108,6 +108,11 @@ function unknownOutcome(err, method) {
 // failures and were the two most likely to be live. 45 + 5x30, rounded up.
 export const PUBLISH_TIMEOUT_MS = 240000;
 
+// The out-of-tokens sentence without its "— or buy a token pack…" clause.
+export function withoutPurchasePrompt(detail) {
+  return String(detail).replace(/\s*[—-]+\s*or buy\b[^.]*\./i, ".");
+}
+
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
@@ -196,6 +201,10 @@ export async function api(path, opts = {}) {
     // 402 the server maps Anthropic-credit exhaustion to): let the app shell
     // open the buy-tokens dialog on top of whatever toast the caller shows.
     if (res.status === 402 && /token/i.test(String(detail))) {
+      // A build that may not sell tokens must not tell the seller to buy
+      // them either (see tokenPurchasesAllowed): keep when the free ones
+      // come back, drop the invitation (services/tokens.insufficient_message).
+      if (!tokenPurchasesAllowed()) detail = withoutPurchasePrompt(detail);
       try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
     }
     // The session is gone: expired, or cancelled from another device by the
