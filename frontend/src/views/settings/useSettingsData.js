@@ -52,17 +52,20 @@ export function useSettingsData() {
   }, []);
 
   // ---- policies ----------------------------------------------------------
-  const [data, setData] = useState(policiesData);
+  // The store's copy, the one the listing editor reads -- not a second one
+  // kept here. Two copies meant every write had to update this one and
+  // throw the other away, so the editor re-asked eBay for an answer this
+  // screen already held, and a handling-time change never reached it at all.
+  const data = policiesData;
   const [loading, setLoading] = useState(false);
-  // Did THIS screen's load succeed? `data` cannot answer that — it is seeded
-  // from the store cache, which the listing editor fills.
+  // Did THIS screen's load succeed? `data` cannot answer that — it is the
+  // store cache, which the listing editor fills too.
   const [loadedHere, setLoadedHere] = useState(false);
   const [policiesError, setPoliciesError] = useState("");
   const loadPolicies = useCallback(async () => {
     setLoading(true);
     try {
       const d = await api("/api/ebay/policies");
-      setData(d);
       setPoliciesData(d);
       setLoadedHere(true);
       setPoliciesError("");
@@ -87,11 +90,12 @@ export function useSettingsData() {
     policies: loadedHere ? data?.policies : undefined,
   }), [loading, policiesError, loadedHere, data]);
 
-  // A default policy. The server merges, so one field at a time is fine.
+  // A default policy. The server merges, so one field at a time is fine, and
+  // the cache is patched with it: that one field is all the save changed, so
+  // the editor's publish summary reads the new default without re-asking.
   const savePolicy = useCallback(async (field, id) => {
     const r = await postJson("/api/ebay/policies", { [field]: id });
-    setData((d) => (d ? { ...d, selected: { ...(d.selected || {}), [field]: id } } : d));
-    setPoliciesData(null); // the publish step re-reads its summary next time
+    setPoliciesData((d) => (d ? { ...d, selected: { ...(d.selected || {}), [field]: id } } : d));
     return r;
   }, [setPoliciesData]);
 
@@ -99,23 +103,22 @@ export function useSettingsData() {
   // and then everything that describes the location is re-read.
   const saveZip = useCallback(async (postal) => {
     const r = await postJson("/api/ebay/policies", { ship_from_postal: postal.trim() });
-    setPoliciesData(null);
     await loadPolicies();
     return r;
-  }, [loadPolicies, setPoliciesData]);
+  }, [loadPolicies]);
 
-  // Handling time lives on the eBay policy; the local copy is patched with
-  // the answer so the select shows it without another round trip.
+  // Handling time lives on the eBay policy; the cache is patched with the
+  // answer so the select shows it without another round trip.
   const saveHandlingTime = useCallback(async (days) => {
     const r = await patchJson("/api/ebay/handling-time", { days });
-    setData((d) => {
+    setPoliciesData((d) => {
       if (!d) return d;
       const fulfillment = (d.policies?.fulfillment || []).map((p) => (
         p.id === r.policy_id ? { ...p, handling_days: r.handling_days } : p));
       return { ...d, policies: { ...d.policies, fulfillment } };
     });
     return r;
-  }, []);
+  }, [setPoliciesData]);
 
   // ---- overview ----------------------------------------------------------
   const [overview, setOverview] = useState(null);
@@ -137,7 +140,6 @@ export function useSettingsData() {
   }, [user, ebay.connected, loadOverview]);
 
   const resetPolicies = useCallback(() => {
-    setData(null);
     setLoadedHere(false);
     setPoliciesData(null);
     setOverview(null);

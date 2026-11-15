@@ -35,7 +35,7 @@ function paymentTerms(policy) {
  * policies yet, the three ways to get them.
  */
 export function ReturnsPaymentSection() {
-  const { ebay, setPoliciesData } = useApp();
+  const { ebay } = useApp();
   const { toast } = useToast();
   const {
     data, loading, policies, loadPolicies, savePolicy, prefs, loadOverview,
@@ -66,14 +66,13 @@ export function ReturnsPaymentSection() {
           { kind: "success" });
       }
       setReviewing(false);
-      setPoliciesData(null);
       loadPolicies();
     } catch (e) {
       toast(e.message, { kind: "error" });
     } finally {
       setCreating(false);
     }
-  }, [loadPolicies, setPoliciesData, toast]);
+  }, [loadPolicies, toast]);
 
   if (!ebay.connected) {
     return (
