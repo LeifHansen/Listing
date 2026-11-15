@@ -13,6 +13,9 @@ import { isDraft, isLive } from "@/lib/listingsView";
 import { ConditionPicker } from "./ConditionPicker";
 import { ShippingPolicySelect, useFulfillmentPolicies } from "./ShippingPolicySelect";
 import { blockedReason, outcomeUnknown } from "./publishShared";
+// eBay's title ceiling; the server refuses anything longer rather than
+// cutting a title the seller typed (main._quick_edit_value).
+import { TITLE_MAX } from "./blockers";
 
 /* A listing's "Quick edit" panel — the fields a seller changes most, right
  * under the card, without opening the editor.
@@ -38,10 +41,6 @@ import { blockedReason, outcomeUnknown } from "./publishShared";
  * carries exactly the fields that were sent, and a stale one overwrites
  * whatever eBay has now.
  */
-
-// eBay's own ceiling; the server refuses anything longer rather than cutting
-// a title the seller typed (main._quick_edit_value).
-export const TITLE_MAX = 80;
 
 // The id the toggle's aria-controls points at, shared so the card and the
 // panel it opens cannot disagree about it.
@@ -76,7 +75,7 @@ export function canQuickEdit(item) {
  * size or colour variations is refused whole by eBay's revise, so the only
  * thing left to change from here is what the seller paid, which never goes
  * to eBay. */
-export function quickEditFields(item) {
+function quickEditFields(item) {
   const l = item?.listing || {};
   if (isLive(item) && l.has_variations) return ["purchase_price"];
   const fmt = listingFormat(l);

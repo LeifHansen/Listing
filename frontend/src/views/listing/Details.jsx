@@ -36,7 +36,7 @@ const norm = (s) => (s || "").trim().toLowerCase();
 // The trust marker for one specific: ✓ = the AI read it off the item (tag,
 // label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
 // glance; nothing = the seller typed or confirmed it (or it's empty).
-export function ConfidenceMark({ row, className }) {
+function ConfidenceMark({ row, className }) {
   if (!row || !(row.value || "").trim() || !row.confidence) return null;
   const high = row.confidence === "high";
   const label = high

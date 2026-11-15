@@ -58,7 +58,7 @@ import { Field, Textarea } from "@/components/ui/fields";
 // Mirrors listing_prompt.ITEM_NOTES_MAX_CHARS. Enforced here as well as on
 // the server so the box stops taking characters it is about to drop, rather
 // than silently truncating a line the seller watched themselves type.
-export const MAX_ITEM_NOTES_CHARS = 600;
+const MAX_ITEM_NOTES_CHARS = 600;
 
 // One item's photos, as a row of thumbs. The paused status carries up to
 // eight URLs and the true count, so a pile of twelve shots says so instead of

@@ -35,7 +35,7 @@ import { Select } from "@/components/ui/fields";
 // PublishCard asks through here too. Cleared when it settles, so a later ask
 // (a reconnect, a retry after a failure) goes out fresh.
 let policiesInFlight = null;
-export function loadPolicies() {
+function loadPolicies() {
   if (!policiesInFlight) {
     policiesInFlight = api("/api/ebay/policies")
       .finally(() => { policiesInFlight = null; });
@@ -56,7 +56,7 @@ export function useFulfillmentPolicies() {
   };
 }
 
-export function policyLabel(p) {
+function policyLabel(p) {
   return `${p.name}${p.summary ? ` · ${p.summary}` : ""}`;
 }
 

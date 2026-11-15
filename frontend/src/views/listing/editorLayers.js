@@ -25,14 +25,14 @@
 export const RESTORE = "restore";  // bring the original back through the mask
 export const ERASE = "erase";      // paint white over whatever is there
 
-export function makeCanvas(width, height) {
+function makeCanvas(width, height) {
   const c = document.createElement("canvas");
   c.width = Math.max(1, Math.round(width));
   c.height = Math.max(1, Math.round(height));
   return c;
 }
 
-export function cloneCanvas(src) {
+function cloneCanvas(src) {
   const c = makeCanvas(src.width, src.height);
   c.getContext("2d").drawImage(src, 0, 0);
   return c;
@@ -53,7 +53,7 @@ export function layersFrom(source) {
 }
 
 // Opaque everywhere: with no strokes yet, the cutout is what shows.
-export function resetMask(mask) {
+function resetMask(mask) {
   const ctx = mask.getContext("2d");
   ctx.globalCompositeOperation = "source-over";
   ctx.fillStyle = "#fff";

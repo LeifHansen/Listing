@@ -200,7 +200,7 @@ export function publishTally(res, fallback) {
 // Every issue a publish attempt raised, in both shapes it can arrive in: a
 // single-marketplace result carries them at the top, a multi-marketplace one
 // keeps a set per marketplace under `results`.
-export function allIssues(res) {
+function allIssues(res) {
   return [
     ...(res?.issues || []),
     ...Object.values(res?.results || {}).flatMap((r) => r?.issues || []),

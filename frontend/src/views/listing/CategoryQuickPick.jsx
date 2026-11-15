@@ -14,7 +14,7 @@ import { CategorySuggestList } from "./CategorySuggestList";
    /api/category-suggestions endpoint as the editor's picker; choosing one
    hands {category_id, category_suggestion} to the parent, which owns
    persistence. */
-export function CategoryQuickPick({ listing, onPick, saving }) {
+function CategoryQuickPick({ listing, onPick, saving }) {
   const l = listing || {};
   const [open, setOpen] = useState(false);
   const [sugg, setSugg] = useState(null); // null | {loading} | {items} | {error}
