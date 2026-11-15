@@ -19,7 +19,7 @@ import uuid as _uuid
 from typing import Optional, Sequence
 
 from sqlalchemy import (DateTime, Index, JSON, String, and_, create_engine,
-                        delete, func, or_, select, text)
+                        delete, func, or_, select, text, update)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -2854,17 +2854,19 @@ def mark_notifications_read(user_id: str,
         if eng is None or not user_id:
             return 0
         with Session(eng) as s:
-            q = select(Notification).where(Notification.user_id == user_id,
+            # One UPDATE, rather than loading every unread row into the
+            # session to stamp each in Python and flush it back.
+            q = update(Notification).where(Notification.user_id == user_id,
                                            Notification.read_at.is_(None))
             if ids is not None:
                 if not ids:
                     return 0
                 q = q.where(Notification.id.in_(list(ids)[:200]))
-            rows = s.execute(q).scalars().all()
-            for row in rows:
-                row.read_at = _now()
+            changed = s.execute(
+                q.values(read_at=_now())
+                .execution_options(synchronize_session=False)).rowcount
             s.commit()
-            return len(rows)
+            return int(changed or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: mark_notifications_read failed: {exc}")
         return 0
