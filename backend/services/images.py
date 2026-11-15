@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +46,22 @@ from ..config import log
 from ..ebay_errors import PHOTO_MIN_SIDE
 from ..storage import natural_key
 from . import artwork, cutout_api
+
+
+def _save_atomic(img: Image.Image, dst: Path, **save_args) -> None:
+    """Save a JPEG through a temp file and an atomic rename, so a reader (or
+    a resume) never sees a torn file. The temp name is unique per process
+    AND thread: two requests writing the same photo's copy at once would
+    otherwise interleave into one temp file and rename a corrupt result into
+    place, where a cache keeps it until the photo is next edited."""
+    tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.{threading.get_ident():x}.tmp")
+    try:
+        img.save(tmp, "JPEG", **save_args)
+        os.replace(tmp, dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
 
 # Phone uploads over flaky connections arrive missing their last few bytes
 # surprisingly often ("image file is truncated (N bytes not processed)").
@@ -470,13 +487,7 @@ def _keep_as_shot(dst: Path, img: Image.Image) -> None:
     try:
         out = dst.parent.parent / _AS_SHOT / dst.name
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(f".{out.name}.{os.getpid():x}.tmp")
-        try:
-            img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
-            os.replace(tmp, out)  # atomic: a racing reader never sees a torn file
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        _save_atomic(img, out, quality=JPEG_QUALITY, optimize=True)
     except Exception as exc:  # noqa: BLE001 - a cache is never worth a photo
         log.info("as-shot copy skipped for %s: %s", dst.name, exc)
 
@@ -593,13 +604,7 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     # treats an existing output as done — that is what makes an interrupted
     # batch resumable — so a torn JPEG left by a machine that died mid-save
     # must never be where a resume would adopt it.
-    tmp = dst.with_name(f".{dst.name}.{os.getpid():x}.tmp")
-    try:
-        img.save(tmp, "JPEG", quality=JPEG_QUALITY, optimize=True)
-        os.replace(tmp, dst)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    _save_atomic(img, dst, quality=JPEG_QUALITY, optimize=True)
     # AFTER the working copy, never before: as_shot() prefers this file only
     # while it is at least as new as the photo beside it, which is what makes
     # a later edit in the studio win automatically.
@@ -886,9 +891,7 @@ def vision_copy(path: Path, side: int = 0) -> Path:
         with Image.open(src) as img:
             img = _flatten(img)
             img.thumbnail((side, side), Image.LANCZOS)
-            tmp = dst.with_name(dst.name + ".tmp")
-            img.save(tmp, "JPEG", quality=85)
-            os.replace(tmp, dst)  # atomic: a racing reader never sees a torn file
+            _save_atomic(img, dst, quality=85)
         return dst
     except Exception as exc:  # noqa: BLE001 - a copy is an optimization only
         log.info("vision copy skipped for %s: %s", path.name, exc)
