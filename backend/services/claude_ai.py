@@ -2476,16 +2476,6 @@ def fill_missing_aspects(image_paths: list[Path], listing: Listing,
     text = "".join(b.text for b in resp.content if b.type == "text")
     return _validate_specifics(_extract_json(text), named)
 
-# ---------------------------------------------------------------------------
-# Maker / manufacturer identification — a double-layer check.
-#
-# The generic identify pass rarely commits to a maker (it's told never to
-# guess), so Brand/Maker/Manufacturer often ship empty. This dedicated pass
-# behaves like a reverse-image lookup: layer 1 HUNTS for maker evidence in the
-# photos and names a candidate; layer 2 independently tries to KNOCK IT DOWN.
-# Only a candidate that survives both layers is written to the listing —
-# accuracy over coverage, since a wrong maker is worse than a blank one.
-# ---------------------------------------------------------------------------
 
 # --- research: look the item UP, instead of remembering it ------------------
 #
@@ -2826,6 +2816,17 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
              data.get("confidence"))
     return data
 
+
+# ---------------------------------------------------------------------------
+# Maker / manufacturer identification — a double-layer check.
+#
+# The generic identify pass rarely commits to a maker (it's told never to
+# guess), so Brand/Maker/Manufacturer often ship empty. This dedicated pass
+# behaves like a reverse-image lookup: layer 1 HUNTS for maker evidence in the
+# photos and names a candidate; layer 2 independently tries to KNOCK IT DOWN.
+# Only a candidate that survives both layers is written to the listing —
+# accuracy over coverage, since a wrong maker is worse than a blank one.
+# ---------------------------------------------------------------------------
 
 _MAKER_HUNT_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
