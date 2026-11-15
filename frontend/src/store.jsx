@@ -1826,11 +1826,13 @@ export function AppProvider({ children }) {
   }, [toast, loadTokens]);
 
   // Any AI call that 402s for tokens pops the buy dialog (see lib/api.js).
+  // Opening it is enough: TokensDialog re-reads the balance as it opens, and
+  // reading it here as well was the same /api/tokens request twice.
   useEffect(() => {
-    const onNeeded = () => { loadTokens(); setTokensOpen(true); };
+    const onNeeded = () => setTokensOpen(true);
     window.addEventListener("tokens:needed", onNeeded);
     return () => window.removeEventListener("tokens:needed", onNeeded);
-  }, [loadTokens]);
+  }, []);
 
   // Balance changes with login state; it also refreshes when the dialog opens.
   // loadTokens writes state only after its fetch resolves, so there is no
