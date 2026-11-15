@@ -860,6 +860,20 @@ def mutate_listing_data(
         return None
 
 
+def _page_after(before: tuple[_dt.datetime, str], ts_col, id_col):
+    """The rows that follow `before` -- the `(timestamp, id)` of the previous
+    page's last row -- in `(timestamp DESC, id DESC)` order. The keyset
+    condition behind every "load older" in this module.
+
+    Spelled out rather than as a row-value comparison, which older SQLite
+    builds do not accept. `id` breaks the ties: timestamps collide readily
+    (an import writes a whole store in one pass), and a cursor that cannot
+    separate two rows with the same instant either repeats them or skips them.
+    """
+    ts, last_id = before
+    return or_(ts_col < ts, and_(ts_col == ts, id_col < last_id))
+
+
 def list_listings(limit: int = 50, user_id: Optional[str] = None,
                   statuses: Optional[tuple[str, ...]] = None,
                   before: Optional[tuple[_dt.datetime, str]] = None,
@@ -927,15 +941,8 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
                 # there are more, and skip rows across a keyset cursor.
                 q = q.where(ListingRecord.status != SCANNED)
             if before is not None:
-                # Spelled out rather than as a row-value comparison, which
-                # older SQLite builds do not accept. `id` breaks the ties:
-                # timestamps collide readily (an import writes a whole store
-                # in one pass), and a cursor that cannot separate two rows
-                # with the same instant either repeats them or skips them.
-                ts, last_id = before
-                q = q.where(or_(ListingRecord.updated_at < ts,
-                                and_(ListingRecord.updated_at == ts,
-                                     ListingRecord.id < last_id)))
+                q = q.where(_page_after(before, ListingRecord.updated_at,
+                                        ListingRecord.id))
             q = q.order_by(ListingRecord.updated_at.desc(),
                            ListingRecord.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -2959,10 +2966,8 @@ def admin_audit_list(limit: int = 50,
         with Session(eng) as s:
             q = select(AdminAuditLog)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(AdminAuditLog.created_at < ts,
-                                and_(AdminAuditLog.created_at == ts,
-                                     AdminAuditLog.id < last_id)))
+                q = q.where(_page_after(before, AdminAuditLog.created_at,
+                                        AdminAuditLog.id))
             q = q.order_by(AdminAuditLog.created_at.desc(),
                            AdminAuditLog.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -3085,10 +3090,8 @@ def error_events_list(limit: int = 50,
         with Session(eng) as s:
             q = select(ErrorEvent)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(ErrorEvent.last_seen < ts,
-                                and_(ErrorEvent.last_seen == ts,
-                                     ErrorEvent.id < last_id)))
+                q = q.where(_page_after(before, ErrorEvent.last_seen,
+                                        ErrorEvent.id))
             if since_hours:
                 cutoff = _now() - _dt.timedelta(hours=int(since_hours))
                 q = q.where(ErrorEvent.last_seen >= cutoff)
@@ -3218,10 +3221,8 @@ def admin_list_users(limit: int = 50,
                     User.display_name.icontains(q, autoescape=True),
                     User.id == q))
             if before is not None:
-                ts, last_id = before
-                query = query.where(or_(User.created_at < ts,
-                                        and_(User.created_at == ts,
-                                             User.id < last_id)))
+                query = query.where(_page_after(before, User.created_at,
+                                                User.id))
             query = query.order_by(User.created_at.desc(),
                                    User.id.desc()).limit(limit)
             rows = s.execute(query).scalars().all()
@@ -3498,10 +3499,8 @@ def admin_ledger(limit: int = 50,
             if user_id:
                 q = q.where(TokenLedger.user_id == user_id)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(TokenLedger.created_at < ts,
-                                and_(TokenLedger.created_at == ts,
-                                     TokenLedger.id < last_id)))
+                q = q.where(_page_after(before, TokenLedger.created_at,
+                                        TokenLedger.id))
             q = q.order_by(TokenLedger.created_at.desc(),
                            TokenLedger.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -3551,10 +3550,8 @@ def admin_list_listings(limit: int = 50,
             if user_id:
                 query = query.where(ListingRecord.user_id == user_id)
             if before is not None:
-                ts, last_id = before
-                query = query.where(or_(ListingRecord.updated_at < ts,
-                                        and_(ListingRecord.updated_at == ts,
-                                             ListingRecord.id < last_id)))
+                query = query.where(_page_after(before, ListingRecord.updated_at,
+                                                ListingRecord.id))
             query = query.order_by(ListingRecord.updated_at.desc(),
                                    ListingRecord.id.desc()).limit(limit)
             # ->> hands back TEXT on Postgres and a real number on SQLite's
