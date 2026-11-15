@@ -176,6 +176,30 @@ export function pushOperation(history, before, after) {
   history.redo.length = 0;
 }
 
+// Let go of a layer stack and its history, all at once.
+//
+// A canvas holds its pixels until it is garbage collected, and WebKit — the
+// engine inside the iOS shell — caps the canvas memory one page may hold.
+// The studio stays mounted between photos, so a closed photo's stack, and
+// the two full-size canvases per operation in its history, sat there until a
+// collector got round to them. Zeroing a canvas frees its pixels now. Only
+// for a stack nothing will read again — which is safe to do whole, because
+// a history snapshot never shares a canvas with the live stack: snapshots
+// are clones, both ways.
+export function releaseLayers(layers, history) {
+  const canvases = layers
+    ? [layers.original, layers.cutout, layers.mask, layers.paint] : [];
+  for (const entry of [...(history?.undo || []), ...(history?.redo || [])]) {
+    if (entry.kind === "operation") {
+      canvases.push(entry.before.original, entry.before.cutout,
+                    entry.after.original, entry.after.cutout);
+    }
+  }
+  for (const c of canvases) {
+    if (c) { c.width = 0; c.height = 0; }
+  }
+}
+
 // Restore a snapshot into `layers`/`strokes` in place. Returns the strokes.
 export function applySnapshot(layers, snap) {
   layers.width = snap.width;

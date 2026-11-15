@@ -12,7 +12,8 @@ import { useApp } from "@/store";
 import { cn, mediaUrl } from "@/lib/utils";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
-  layersFrom, pushOperation, pushStroke, replay, rotateQuarter, snapshot,
+  layersFrom, pushOperation, pushStroke, releaseLayers, replay, rotateQuarter,
+  snapshot,
 } from "./editorLayers";
 
 /* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
@@ -57,6 +58,8 @@ function canvasBlob(canvas, type = "image/jpeg", q = 0.92) {
   return new Promise((r) => canvas.toBlob(r, type, q));
 }
 
+// Every studio request. Session and name go as form fields (not in the URL
+// path) so nothing falls through to the static handler and 405s.
 async function studioCall(path, sessionId, name, blob, timeoutMs) {
   const fd = new FormData();
   fd.append("session_id", sessionId);
@@ -83,7 +86,7 @@ function loadImage(src) {
   });
 }
 
-export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }) {
+export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   // Which photo is open RIGHT NOW. This dialog is one long-lived instance
   // whose `name` prop changes (NewListing renders it unkeyed), so an in-flight
   // request holds the name it started on while the canvas has already moved
@@ -268,6 +271,8 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
       // Same-origin so the canvas isn't tainted and toBlob() works.
       const img = await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
       if (nameRef.current !== startedOn) return false;
+      // Revert and Restore original load over a stack that is still here.
+      releaseLayers(layersRef.current, historyRef.current);
       layersRef.current = layersFrom(img);
       strokesRef.current = [];
       historyRef.current = createHistory();
@@ -423,26 +428,25 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cropRect]);
 
-  // Load the newly-opened photo onto the canvas, then run whatever the caller
-  // asked for on open (Remove BG, or arm the crop tool). The tool/crop reset
-  // that used to head this effect now happens during render (see prevName
-  // above); everything left here is genuinely async work against the canvas
-  // and the API, so it has to stay in an effect.
+  // Load the newly-opened photo onto the canvas. The tool/crop reset that
+  // used to head this effect now happens during render (see prevName above);
+  // what is left is async work against the canvas and the API, so it has to
+  // stay in an effect. (A photo left before it loaded is not painted — see
+  // load.)
+  //
+  // Closing the studio, or moving to another photo, lets go of this one's
+  // layer stack and history (see releaseLayers): the dialog stays mounted
+  // between photos, so otherwise they outlive the photo they were for.
   useEffect(() => {
     if (!name) return undefined;
-    let left = false;
-    (async () => {
-      // A photo left before it loaded gets neither its pixels painted nor
-      // the action it was opened for run against whatever is on the canvas.
-      const landed = await load();
-      if (left || !landed) return;
-      if (initialAction === "removebg") removeBg();
-      else if (initialAction === "manualcrop" || initialAction === "crop") {
-        clearOverlay();
-        setTool("crop");
-      }
-    })();
-    return () => { left = true; };
+    load();
+    return () => {
+      releaseLayers(layersRef.current, historyRef.current);
+      layersRef.current = null;
+      strokesRef.current = [];
+      historyRef.current = createHistory();
+      syncHistory();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
 
@@ -571,10 +575,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     }))) return;
     setRestoring(true);
     try {
-      const fd = new FormData();
-      fd.append("session_id", sessionId);
-      fd.append("name", name);
-      await api("/api/image/restore-original", { method: "POST", body: fd });
+      await studioCall("/api/image/restore-original", sessionId, name);
       await load();      // repaint from the file the server just rewrote
       onSaved();
       toast("Put back the photo as you shot it.", { kind: "success" });
@@ -598,13 +599,7 @@ export function ImageEditor({ sessionId, name, initialAction, onClose, onSaved }
     if (!blob) { toast("Couldn't export the edited image.", { kind: "error" }); return; }
     setSaving(true);
     try {
-      const fd = new FormData();
-      // session/name as form fields (not URL path) so nothing falls through
-      // to the static handler and 405s.
-      fd.append("session_id", sessionId);
-      fd.append("name", name);
-      fd.append("file", new File([blob], name, { type: "image/jpeg" }));
-      await api("/api/edit-image", { method: "POST", body: fd });
+      await studioCall("/api/edit-image", sessionId, name, blob);
       onSaved();
       onClose();
     } catch (e) {

@@ -206,7 +206,8 @@ export function Workflow() {
   const w = useListingForm();
   // Ctrl/⌘+Enter publishes; see useEditorShortcuts.
   useEditorShortcuts(w);
-  // { name } — the photo open in the studio (clean up, remove background, crop).
+  // The name of the photo open in the studio (clean up, remove background,
+  // crop), or null.
   const [editing, setEditing] = useState(null);
   // The split dialog (see SplitListingDialog); `key` remounts it with fresh
   // ticks on every open rather than the last split's.
@@ -459,7 +460,7 @@ export function Workflow() {
                 it back means re-shooting or re-sending up to 150MB. */}
             <PhotosCard
               w={w}
-              onEdit={(name) => setEditing({ name })}
+              onEdit={setEditing}
               onDelete={(name) => w.deleteImage(name, confirm)}
               onRemoveVideo={(name) => w.removeVideo(name, confirm)}
             />
@@ -497,10 +498,9 @@ export function Workflow() {
 
       <ImageEditor
         sessionId={w.sessionId}
-        name={editing?.name}
-        initialAction={editing?.action}
+        name={editing}
         onClose={() => setEditing(null)}
-        onSaved={() => editing && w.bumpImageVersion(editing.name)}
+        onSaved={() => w.bumpImageVersion(editing)}
       />
     </motion.div>
   );
