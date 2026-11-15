@@ -1611,40 +1611,6 @@ def _cover_remaining_specifics(listing: Listing, image_paths: list,
     return added
 
 
-def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[int]:
-    """Best-effort: fill eBay's category item specifics (required + recommended)
-    from the photos and merge them in without overwriting anything already set.
-    Returns how many were added, or None when the enrichment DIDN'T RUN
-    (unconfigured, no category, no photos, or it failed) — callers use that to
-    decide whether the client-side autofill fallback still has work to do.
-    NEVER raises — a listing must still save and publish if this fails.
-
-    This runs server-side during identify (single + bulk) so listings come
-    SEO-ready even on the bulk 'list live now' path, which publishes straight
-    after identify and would otherwise reach eBay with only the generic
-    specifics from the first vision pass (the 'specifics not populating' bug)."""
-    if not (config.taxonomy_ready() and config.anthropic_ready()):
-        return None
-    if not listing.category_id:
-        return None
-    try:
-        aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
-        paths = [p for p in image_paths if p.is_file()]
-        if not aspects or not paths:
-            return None
-        filled = claude_ai.fill_aspects(paths, listing, aspects,
-                                        tag_text=_tag_text_for(paths, aspects))
-    except Exception as exc:  # noqa: BLE001 - enrichment is optional
-        log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
-        return None
-    added = _merge_filled_specifics(listing, filled, aspects)
-    if added:
-        log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
-    added += _cover_remaining_specifics(listing, paths, aspects)
-    _pair_aspects(listing, aspects)
-    return added
-
-
 # Aspect names that mean "who made this". A wrong maker is worse than a blank
 # one, so these only get filled by the double-layer check below.
 _MAKER_ASPECT_NAMES = {"brand", "maker", "manufacturer"}
@@ -1755,39 +1721,6 @@ def _apply_maker(listing: Listing, found: dict, brand_missing: bool,
                                        for w in ("brand", "maker", "manufacturer"))]
     log.info("maker id: '%s' confirmed (%s) — evidence: %s",
              maker, found.get("confidence"), (found.get("evidence") or "")[:120])
-
-
-def _fill_maker(listing: Listing, image_paths: list) -> bool:
-    """Best-effort maker/manufacturer identification (double-layer check).
-
-    The generic identify pass is told never to guess, so Brand / Maker /
-    Manufacturer are rarely filled. When they're missing, run the dedicated
-    two-layer ID in claude_ai.identify_maker (hunt, then adversarial verify —
-    like a reverse-image lookup with a second opinion) and only write a maker
-    both layers agree on. NEVER raises. Returns True if anything was set."""
-    if not config.anthropic_ready():
-        return False
-    brand_missing, unfilled = _maker_targets(listing)
-    if not (brand_missing or unfilled):
-        return False  # maker already known — don't burn two vision calls
-    try:
-        paths = [p for p in image_paths if p.is_file()]
-        found = claude_ai.identify_maker(paths, listing)
-    except Exception as exc:  # noqa: BLE001 - enrichment is optional
-        log.info("maker id skipped: %s", exc)
-        return False
-    if not found:
-        return False
-    _apply_maker(listing, found, brand_missing, unfilled)
-    return True
-
-
-def _identify_chain() -> str:
-    """Which post-identify enrichment chain runs: 'v2' (default) consolidates
-    tag reading + specifics + the maker hunt into one vision call (plus a
-    conditional maker verify); 'v1' is the original multi-call chain, kept
-    wired as an instant rollback (IDENTIFY_CHAIN=v1)."""
-    return os.getenv("IDENTIFY_CHAIN", "v2").strip().lower() or "v2"
 
 
 def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
@@ -1912,9 +1845,12 @@ def _specifics_were_filled(added: Optional[int]) -> bool:
 
 def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
                     progress=None) -> Optional[int]:
-    """Post-identify enrichment (item specifics + maker), routed by
-    IDENTIFY_CHAIN. `progress(phase)` (optional) reports stage names for job
-    heartbeats. Returns specifics added, or None when enrichment didn't run.
+    """Post-identify enrichment: the category's item specifics and the maker,
+    in one consolidated vision call (see _enrich_listing_v2). It runs
+    server-side during identify, single and bulk, so a draft comes SEO-ready
+    rather than carrying only the first vision pass's generic specifics.
+    `progress(phase)` (optional) reports stage names for job heartbeats.
+    Returns specifics added, or None when enrichment didn't run.
 
     Stamps `listing.enriched_at` whenever the chain actually RAN — including
     the run that added nothing, which is the one that matters. "The AI has
@@ -1924,16 +1860,8 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
     no photos, no taxonomy — `added is None`) leaves it alone, because that
     listing still has the fill ahead of it.
     """
-    if _identify_chain() == "v1":
-        if progress:
-            progress("specifics")
-        added = _fill_category_specifics(listing, image_paths)
-        if progress:
-            progress("maker")
-        _fill_maker(listing, image_paths)
-    else:
-        added = _enrich_listing_v2(listing, image_paths, tags or [],
-                                   progress=progress)
+    added = _enrich_listing_v2(listing, image_paths, tags or [],
+                               progress=progress)
     if added is not None:
         listing.enriched_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds")
@@ -9400,8 +9328,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _resolve_category(result.listing)
         _assign_store_category(result.listing, uid)
         # Fill the category's item specifics (and hunt the maker) so the draft
-        # is SEO-ready — one consolidated call on chain v2, the original
-        # multi-call chain on IDENTIFY_CHAIN=v1.
+        # is SEO-ready, in one consolidated call.
         added = _enrich_listing(result.listing, [opt_dir / n for n in names],
                                 tags=result.tags, progress=_beat)
         # Tell the editor whether the server-side fill actually FILLED
