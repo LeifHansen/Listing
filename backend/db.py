@@ -3362,13 +3362,12 @@ def admin_platform_kpis(days: int = 30) -> dict:
             signup_stamps = [row for row in s.execute(
                 select(User.created_at).where(User.created_at >= since)
             ).scalars() if row is not None]
-            active: set[str] = set()
-            active.update(uid for uid in s.execute(
-                select(ListingRecord.user_id.distinct())
+            active: set[str] = set(s.execute(
+                select(ListingRecord.user_id).distinct()
                 .where(ListingRecord.updated_at >= since)
                 .where(ListingRecord.user_id.is_not(None))).scalars())
-            active.update(uid for uid in s.execute(
-                select(TokenLedger.user_id.distinct())
+            active.update(s.execute(
+                select(TokenLedger.user_id).distinct()
                 .where(TokenLedger.created_at >= since)).scalars())
             by_status = {status: int(count or 0) for status, count in s.execute(
                 select(ListingRecord.status, func.count())
