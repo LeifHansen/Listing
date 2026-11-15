@@ -225,9 +225,10 @@ def snapshot(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
         owner = job.get("_uid")
         if owner and owner != uid:
             return None
-        copy = json.loads(json.dumps(job))  # deep copy, safe to hand out
-    # Every underscore key is internal bookkeeping (_uid, _rev), not API.
-    return {k: v for k, v in copy.items() if not k.startswith("_")}
+        # Every underscore key is internal bookkeeping (_uid, _rev), not API,
+        # so it is left out before the copy rather than copied and dropped.
+        public = {k: v for k, v in job.items() if not k.startswith("_")}
+        return json.loads(json.dumps(public))  # deep copy, safe to hand out
 
 
 def internal(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
