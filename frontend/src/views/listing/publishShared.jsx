@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
-import { CheckCircle2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { api, postJson, PUBLISH_TIMEOUT_MS } from "@/lib/api";
 import { readLocal, writeLocal } from "@/lib/localPrefs";
 import { cn } from "@/lib/utils";
@@ -220,6 +220,26 @@ export function blocksEveryListing(res) {
 // and show without being asked, when a publish came back refused.
 export function issuesFor(res, target) {
   return allIssues(res).filter((i) => i.target === target && i.level !== "warn");
+}
+
+// ...and how a card shows them: each refusal's title and fix, in one red box
+// at the top of the section. `children` follows the list, inside the box.
+export function RefusalNotes({ issues, children }) {
+  if (!issues.length) return null;
+  return (
+    <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
+      {issues.map((issue, i) => (
+        <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
+          <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
+          <span className="text-[13px] text-ink flex-1 min-w-0">
+            <strong className="font-bold">{issue.title}</strong>
+            {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
+          </span>
+        </div>
+      ))}
+      {children}
+    </div>
+  );
 }
 
 // What to TELL the seller when a publish did not go live.

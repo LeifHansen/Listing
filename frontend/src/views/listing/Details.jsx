@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { specificRowIndex } from "./specifics";
 import { Section } from "./Section";
-import { issuesFor } from "./publishShared";
+import { RefusalNotes, issuesFor } from "./publishShared";
 
 /* Details -- the item specifics, as chips.
  *
@@ -503,19 +503,7 @@ export function DetailsCard({ w }) {
     >
       <div className="flex flex-col gap-4">
         {/* What eBay said, where the chips are. */}
-        {refused.length > 0 && (
-          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
-            {refused.map((issue, i) => (
-              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
-                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
-                <span className="text-[13px] text-ink flex-1 min-w-0">
-                  <strong className="font-bold">{issue.title}</strong>
-                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        <RefusalNotes issues={refused} />
         {missingRequired > 0 && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-warning/40 bg-warning-soft px-3.5 py-2.5">
             <AlertTriangle size={16} className="text-warning shrink-0" aria-hidden />
