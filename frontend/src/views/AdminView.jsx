@@ -1,15 +1,23 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SectionHeader } from "@/components/ui/Card";
-import { AdminOverview } from "@/views/admin/AdminOverview";
-import { AdminUsers } from "@/views/admin/AdminUsers";
-import { AdminBilling } from "@/views/admin/AdminBilling";
-import { AdminListings } from "@/views/admin/AdminListings";
-import { AdminCompliance } from "@/views/admin/AdminCompliance";
-import { AdminSystem } from "@/views/admin/AdminSystem";
-import { AdminAudit } from "@/views/admin/AdminAudit";
-import { AdminErrors } from "@/views/admin/AdminErrors";
+import { Skeleton } from "@/components/ui/Skeleton";
+
+// The panels are fetched the first time their tab opens, not with the app.
+// Only a superadmin ever sees this screen, so shipping all eight to every
+// seller's phone on every load was most of a chunk-size warning for nobody.
+// The header and the tab strip stay in the main bundle, so the screen is
+// never blank while a panel loads.
+const panel = (load, name) => lazy(() => load().then((m) => ({ default: m[name] })));
+const AdminOverview = panel(() => import("@/views/admin/AdminOverview"), "AdminOverview");
+const AdminUsers = panel(() => import("@/views/admin/AdminUsers"), "AdminUsers");
+const AdminBilling = panel(() => import("@/views/admin/AdminBilling"), "AdminBilling");
+const AdminListings = panel(() => import("@/views/admin/AdminListings"), "AdminListings");
+const AdminCompliance = panel(() => import("@/views/admin/AdminCompliance"), "AdminCompliance");
+const AdminSystem = panel(() => import("@/views/admin/AdminSystem"), "AdminSystem");
+const AdminAudit = panel(() => import("@/views/admin/AdminAudit"), "AdminAudit");
+const AdminErrors = panel(() => import("@/views/admin/AdminErrors"), "AdminErrors");
 
 // The operator console. Tabs, not routes — the app has no router, and the
 // pill strip is the same pattern the listings manager uses. Every tab
@@ -60,7 +68,9 @@ export function AdminView() {
         ))}
       </div>
 
-      <Panel />
+      <Suspense fallback={<Skeleton className="h-40 w-full" />}>
+        <Panel />
+      </Suspense>
     </div>
   );
 }

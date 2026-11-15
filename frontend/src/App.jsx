@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle } from "lucide-react";
 import { AppProvider, useApp } from "@/store";
@@ -13,9 +13,15 @@ import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ManageView } from "@/views/ManageView";
 import { ShopMode } from "@/views/ShopMode";
-import { MessagesView } from "@/views/MessagesView";
 import { SettingsView } from "@/views/SettingsView";
 import { AdminView } from "@/views/AdminView";
+import { Skeleton } from "@/components/ui/Skeleton";
+
+// The buyer inbox is fetched the first time it is opened, not with the app:
+// it is behind a deployment flag that is off by default, and its nav entry
+// only appears once eBay messaging is switched on.
+const MessagesView = lazy(() => import("@/views/MessagesView")
+  .then((m) => ({ default: m.MessagesView })));
 
 // Every screen the nav can reach. A `view` that is not in here renders the
 // dashboard rather than nothing: the main area used to be a chain of
@@ -142,7 +148,12 @@ function Main() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, ease: "easeOut" }}
         >
-          {screenFor(view, isSuperadmin, { search })}
+          {/* Only a screen fetched on first use (the inbox) ever waits here,
+              and only once; every nav-bar screen is in the main bundle and
+              mounts on the commit that asks for it. */}
+          <Suspense fallback={<Skeleton className="h-40 w-full" />}>
+            {screenFor(view, isSuperadmin, { search })}
+          </Suspense>
         </motion.main>
       </div>
       <BottomNav />

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, AlertTriangle, ArrowRightLeft, RefreshCcw,
@@ -28,7 +28,11 @@ import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
 import { canQuickEdit, QuickEditPanel } from "@/views/listing/QuickEdit";
-import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
+
+// Fetched when the seller first opens it, not with the app: only a seller
+// with Etsy connected can, and most of them only now and then.
+const CrosspostWizard = lazy(() => import("@/views/crosspost/CrosspostWizard")
+  .then((m) => ({ default: m.CrosspostWizard })));
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. It IS the Manage tab now (ManageView wraps it with the page
@@ -761,7 +765,9 @@ export function ListingsView({ search = "" }) {
         </div>
       )}
       {crosspostOpen && (
-        <CrosspostWizard items={selectedLive} onClose={() => setCrosspostOpen(false)} />
+        <Suspense fallback={null}>
+          <CrosspostWizard items={selectedLive} onClose={() => setCrosspostOpen(false)} />
+        </Suspense>
       )}
 
       {profit && (
