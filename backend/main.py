@@ -3018,6 +3018,20 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     return out
 
 
+def _marketplace_targets(names) -> list[str]:
+    """The marketplaces a publish request names: trimmed, lowercased, each
+    once and in the order given."""
+    return [k for k in dict.fromkeys((key or "").strip().lower()
+                                     for key in names) if k]
+
+
+def _marketplace_label(key: str) -> str:
+    """A marketplace's name as the seller reads it ("eBay", "Etsy"), or its
+    key for one this deployment does not offer."""
+    provider = marketplaces.get(key)
+    return provider.label if provider else key
+
+
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     return ebay_provider.preflight_issues(deps.uid(request), listing, mode)
@@ -3036,8 +3050,7 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     fan-out would have accepted, since it only runs the providers it was
     given.
     """
-    targets = [k for k in dict.fromkeys(
-        (key or "").strip().lower() for key in req.marketplaces) if k]
+    targets = _marketplace_targets(req.marketplaces)
     mode = req.mode or "live"
     # No selection at all = the legacy single-eBay client.
     ebay_targeted = not targets or "ebay" in targets
@@ -6698,10 +6711,6 @@ def _quick_edit_targets(listing: Listing) -> list[str]:
 
 def _quick_edit_sentence(outcomes: dict) -> str:
     """One line for the toast: where the change landed, and where it didn't."""
-    def _label(key: str) -> str:
-        provider = marketplaces.get(key)
-        return provider.label if provider else key
-
     if list(outcomes) == ["ebay"]:
         outcome = outcomes["ebay"]
         # The provider's own sentence either way: on success it is
@@ -6710,13 +6719,13 @@ def _quick_edit_sentence(outcomes: dict) -> str:
         # from `issues` where it can (publishShared.blockedReason).
         return outcome.message or ("Your eBay listing has been updated." if outcome.ok
                                    else "eBay didn't take the change.")
-    done = [_label(k) for k, o in outcomes.items() if o.ok]
+    done = [_marketplace_label(k) for k, o in outcomes.items() if o.ok]
     missed = [(k, o) for k, o in outcomes.items() if not o.ok]
     parts = []
     if done:
         parts.append("Updated on " + " and ".join(done) + ".")
     for key, outcome in missed:
-        parts.append(f"{_label(key)} didn't take it: "
+        parts.append(f"{_marketplace_label(key)} didn't take it: "
                      f"{outcome.message or 'no reason given'}")
     return " ".join(parts) or "Nothing was updated."
 
@@ -12200,12 +12209,8 @@ def _publish_body(outcomes: dict, mode: str) -> dict:
     failed = [k for k, o in outcomes.items() if not o.ok]
     dry = [k for k, o in outcomes.items() if o.dry_run]
 
-    def _label(key: str) -> str:
-        p = marketplaces.get(key)
-        return p.label if p else key
-
     def _names(keys: list[str]) -> str:
-        labels = [_label(k) for k in keys]
+        labels = [_marketplace_label(k) for k in keys]
         return " and ".join(part for part in
                             [", ".join(labels[:-1]), labels[-1]] if part)
 
@@ -12289,11 +12294,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _restore_server_state(req.session_id, req.listing, prev_rec)
     storage.save_listing(req.session_id, req.listing)
 
-    targets: list[str] = []
-    for key in req.marketplaces:
-        key = (key or "").strip().lower()
-        if key and key not in targets:
-            targets.append(key)
+    targets = _marketplace_targets(req.marketplaces)
 
     if not targets or targets == ["ebay"]:
         # Legacy path — byte-identical responses; the provider already
