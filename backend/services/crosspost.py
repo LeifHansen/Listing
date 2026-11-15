@@ -1,8 +1,8 @@
 """eBay → Etsy: what can be answered for the seller, and what cannot.
 
 A listing imported from an eBay store is written in eBay's vocabulary. Most
-of what Etsy wants is already there or can be worked out (mapping_etsy and
-field_map say which), and three things cannot be: who made the item, when,
+of what Etsy wants is already there or can be worked out (mapping_etsy says
+which), and three things cannot be: who made the item, when,
 and whether it is a craft supply. Etsy allows only handmade, vintage (20+
 years) and supplies, so those are an attestation, not a field — the
 crosspost asks once per batch and this module applies the answer, letting
