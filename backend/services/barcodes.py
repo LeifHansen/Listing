@@ -25,8 +25,6 @@ stop being tested because the image stack is not installed.
 """
 from __future__ import annotations
 
-import re
-
 from ..config import log
 from ..models import ItemSpecific, Listing
 
@@ -40,21 +38,6 @@ _GTIN_LENGTHS = (8, 12, 13, 14)
 # carries ISMN music publications; both are "ISBN" as far as eBay's aspect
 # names are concerned.
 _BOOKLAND = ("978", "979")
-
-# One group of digits as a barcode prints them. A code is transcribed either
-# whole ("036000291452") or in the groups the symbology itself sets it in
-# ("0 36000 29145 2"), and an ISBN normally arrives hyphenated, so `find`
-# below reassembles consecutive groups rather than matching one greedy run —
-# a greedy run would swallow two adjacent codes into a 24-digit string that
-# is neither of them.
-_GROUP = re.compile(r"\d+[Xx]?")
-# What may sit BETWEEN two groups of one code. Anything else — a letter, a
-# comma, a newline — ends the code, whatever follows it.
-_SEPARATORS = frozenset(" \t-\u2010\u2011\u2012\u2013\u2014\u2015.\u00b7")
-# How many groups one code may be split into, and how wide a gap may be.
-# "0 36000 29145 2" is four groups; an ISBN sets as five.
-_MAX_GROUPS = 5
-_MAX_GAP = 2
 
 # How long a candidate may be before it is not a mistyped identifier but a
 # phone number, a date range or a paragraph of digits.
@@ -193,46 +176,6 @@ def search_terms(raw: str) -> str:
     if valid_isbn10(code):
         return isbn13(code) or code
     return code if valid_gtin(code) else ""
-
-
-def find(text: str) -> list[dict]:
-    """Every identifier in `text` that proves itself, in the order read.
-
-    Written for the tag transcript: a page of prose with a barcode's digits
-    somewhere in it, beside the prices, sizes, RN numbers and care symbols
-    that live on the same label. The check digit is what separates them — a
-    run of digits that is not a GTIN fails it — so nothing here has to
-    understand the sentence it was found in. Each entry is
-    {"value", "kind", "symbology"}; duplicates collapse.
-    """
-    text = str(text or "")
-    groups = list(_GROUP.finditer(text))
-    out: list[dict] = []
-    seen: set[str] = set()
-    consumed = -1                      # last group index already inside a hit
-    for i in range(len(groups)):
-        if i <= consumed:
-            continue
-        joined = ""
-        for j in range(i, min(i + _MAX_GROUPS, len(groups))):
-            if j > i:
-                gap = text[groups[j - 1].end():groups[j].start()]
-                if not gap or len(gap) > _MAX_GAP or set(gap) - _SEPARATORS:
-                    break
-            joined += groups[j].group(0)
-            if len(joined) > max(_GTIN_LENGTHS):
-                break
-            name = kind(joined)
-            if not name:
-                continue
-            code = normalize(joined)
-            consumed = j               # these groups are spoken for
-            if code not in seen:
-                seen.add(code)
-                out.append({"value": code, "kind": name,
-                            "symbology": symbology(code)})
-            break                      # a code is a code; stop extending it
-    return out
 
 
 def looks_like_a_code(raw: str) -> bool:
