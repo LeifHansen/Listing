@@ -6,6 +6,7 @@ import {
   Rocket, RefreshCw, Copy, Split,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isDraft } from "@/lib/listingsView";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -90,7 +91,7 @@ function PublishedScreen({ w }) {
   // Drafts set aside with Skip (on the draft's own card) never come back as
   // "next" — not even after publishing more drafts.
   const draftsLeft = (listingsState.items || [])
-    .filter((it) => (it.status === "draft" || it.status === "dry_run")
+    .filter((it) => isDraft(it)
       && it.id !== w.sessionId && !skippedDraftIds.has(it.id))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
   const next = draftsLeft[0];
@@ -531,8 +532,7 @@ function ListHome({ search }) {
   // Whether the strip below will draw anything. DraftsStrip renders null with
   // nothing to show, which is right — the uploader above IS the empty state —
   // but a page that just stops has no floor, so an empty one gets a line.
-  const hasDrafts = (listingsState.items || []).some(
-    (i) => i.status === "draft" || i.status === "dry_run");
+  const hasDrafts = (listingsState.items || []).some(isDraft);
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show"
