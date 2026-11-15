@@ -9,12 +9,34 @@ seller edit it anywhere but the tool that made it.
 
 What is left here is the part that was never about the Inventory API: turning
 a session's photos into the public URLs eBay fetches, and the legacy SKU that
-old Promoted Listings ads are still keyed by.
+old Promoted Listings ads are still keyed by -- plus the few transport rules
+every outbound client shares (the eBay REST and Trading clients, and the Etsy
+and Depop ones beside them).
 """
 from __future__ import annotations
 
+import httpx
+
 from .. import config, objstore, storage
 from ..models import Listing
+
+# Transport failures that prove the request never reached the other side: no
+# connection was ever established, so no bytes were delivered and nothing there
+# could have acted on it. Everything NOT in this list is treated as unknown --
+# including exception types nobody here anticipated. That default is the whole
+# point: being wrong in the "nothing happened" direction is how a live listing
+# ends up with no record of itself, while being wrong the other way costs one
+# unnecessary look at the seller's listings.
+#
+# One definition for every client that writes to somebody else's system: the
+# eBay Trading and Message clients, Etsy and Depop each carried a copy.
+NEVER_SENT = (
+    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
+    httpx.ConnectTimeout,      # gave up before the connection was made
+    httpx.PoolTimeout,         # never even got a connection out of the pool
+    httpx.UnsupportedProtocol,
+    httpx.InvalidURL,
+)
 
 
 def rest_headers(token: str) -> dict:

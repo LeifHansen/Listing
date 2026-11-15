@@ -36,6 +36,7 @@ from ..config import log
 from ..models import (MAX_VIDEOS, SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS,
                       ItemSpecific, Listing)
 from . import ebay_video, taxonomy
+from .ebay import NEVER_SENT
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -206,21 +207,6 @@ _WRITE_CALLS = frozenset({
     "RelistFixedPriceItem", "AddItems", "ReviseItems",
 })
 
-# Transport failures that prove the request never reached eBay: no connection
-# was ever established, so no bytes were delivered and nothing there could
-# have acted on it. Everything NOT in this list is treated as unknown --
-# including exception types nobody here anticipated. That default is the
-# whole point: being wrong in the "nothing happened" direction is how a live
-# listing ends up with no record of itself, while being wrong the other way
-# costs one unnecessary look at the seller's eBay listings.
-_NEVER_SENT = (
-    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
-    httpx.ConnectTimeout,      # gave up before the connection was made
-    httpx.PoolTimeout,         # never even got a connection out of the pool
-    httpx.UnsupportedProtocol,
-    httpx.InvalidURL,
-)
-
 # What the seller is told when a write's outcome is unknown. Deliberately does
 # NOT say "nothing was changed" -- that is the one sentence that cannot be
 # justified here, and it is the sentence that produces a duplicate when they
@@ -369,7 +355,7 @@ def _call(call: str, token: str, body: str) -> ET.Element:
     try:
         resp = httpx.post(_endpoint(), headers=_headers(call, token),
                           content=xml.encode("utf-8"), timeout=_TIMEOUT)
-    except _NEVER_SENT as exc:
+    except NEVER_SENT as exc:
         # No connection was made, so eBay never saw this. Safe to call a
         # failure even for a write.
         raise Unreachable(f"Couldn't reach eBay: {exc}") from exc
