@@ -1736,7 +1736,7 @@ def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
 
 def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
                        progress=None) -> Optional[int]:
-    """Chain v2 enrichment: ONE consolidated vision call fills the category's
+    """The enrichment: ONE consolidated vision call fills the category's
     item specifics AND hunts the maker, with zoomed crops of the tags the
     identify pass located passed inline as ground truth (no separate locate or
     transcribe round-trips). The adversarial maker verify still runs as its
@@ -8071,7 +8071,7 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         _assign_store_category(listing, ctx.uid)
         # Fill item specifics (and the maker) up front so the draft the
         # seller reviews carries real specifics, not just the generic
-        # first pass — one consolidated call on chain v2.
+        # first pass — one consolidated call.
         _enrich_listing(listing, paths, tags=result.tags)
         # A note the fill just answered must not outlive it: it is
         # what the dashboard's "Fill in details" reads, and a fresh
