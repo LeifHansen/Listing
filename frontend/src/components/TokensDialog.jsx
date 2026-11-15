@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Coins, Sparkles, Check, History } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
-import { useApp, postJson } from "@/store";
+import { api, postJson } from "@/lib/api";
+import { useApp } from "@/store";
 import { isNative, openExternal } from "@/lib/platform";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";

@@ -94,10 +94,6 @@ const NO_LISTINGS = {
 // seller they have no saved views.
 const NO_SAVED_VIEWS = { items: [], loaded: false, saving: false };
 
-// What the eBay callback's ?why= means, in words a seller can act on. The
-// backend picks the bucket from eBay's own error code; "eBay connection
-// failed. Please try again." was the whole message before, which is advice
-// that cannot work for two of these three.
 // How long a mirror rebuild stays good enough to skip.
 //
 // An import is one eBay GetItem per listing, against a default allowance of
@@ -163,6 +159,10 @@ export function markAutoSynced(userId, now = Date.now()) {
   writeLocal(autoSyncKey(userId), String(now));
 }
 
+// What the eBay callback's ?why= means, in words a seller can act on. The
+// backend picks the bucket from eBay's own error code; "eBay connection
+// failed. Please try again." was the whole message before, which is advice
+// that cannot work for two of these three.
 const EBAY_CONNECT_ERRORS = {
   expired: "That eBay connection link expired or was already used. Start it again from Settings.",
   config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
@@ -731,9 +731,8 @@ export function AppProvider({ children }) {
 
   const openMessages = useCallback((id) => {
     setView("messages");
-    setActiveConversationId(id || null);
-    if (id) { loadThread(id); markConversationRead(id); }
-  }, [loadThread, markConversationRead]);
+    openConversation(id);
+  }, [openConversation]);
 
   const sendMessage = useCallback(async (id, text) => {
     const body = (text || "").trim();
@@ -1920,9 +1919,9 @@ export function AppProvider({ children }) {
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     listingFilters, setListingFilters, clearListingFilters,
-    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    savedViews, saveListingView, deleteListingView,
     applyListingView,
-    health, loadHealth,
+    health,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     clearSignedInState,
     isSuperadmin,
@@ -1932,9 +1931,9 @@ export function AppProvider({ children }) {
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
-    messages, loadMessages, threads, loadThread, sendMessage,
+    messages, loadMessages, threads, sendMessage,
     activeConversationId, openConversation, openMessages,
-    markConversationRead, messageSource, setMessageSource,
+    messageSource, setMessageSource,
     policiesData, setPoliciesData,
     storeCategoriesData, setStoreCategoriesData,
     draftSelection, setDraftSelection,
@@ -1949,13 +1948,13 @@ export function AppProvider({ children }) {
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, user, authOpen, authMode, openAuth,
     settingsSection, openSettings, clearSettingsSection,
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,
     listingFilters, setListingFilters, clearListingFilters,
-    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    savedViews, saveListingView, deleteListingView,
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     bgRemoval, loadBgRemovalStatus,
@@ -1964,9 +1963,9 @@ export function AppProvider({ children }) {
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
-    messages, loadMessages, threads, loadThread, sendMessage,
+    messages, loadMessages, threads, sendMessage,
     activeConversationId, openConversation, openMessages,
-    markConversationRead, messageSource,
+    messageSource,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
@@ -1986,5 +1985,3 @@ export function useApp() {
   if (!ctx) throw new Error("useApp must be used inside <AppProvider>");
   return ctx;
 }
-
-export { postJson };
