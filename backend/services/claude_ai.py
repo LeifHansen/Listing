@@ -2821,31 +2821,13 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
 # Maker / manufacturer identification — a double-layer check.
 #
 # The generic identify pass rarely commits to a maker (it's told never to
-# guess), so Brand/Maker/Manufacturer often ship empty. This dedicated pass
-# behaves like a reverse-image lookup: layer 1 HUNTS for maker evidence in the
-# photos and names a candidate; layer 2 independently tries to KNOCK IT DOWN.
-# Only a candidate that survives both layers is written to the listing —
-# accuracy over coverage, since a wrong maker is worse than a blank one.
+# guess), so Brand/Maker/Manufacturer often ship empty. Layer 1 is the
+# enrichment chain's own read of the tags and photos (main._enrich_listing),
+# which names a candidate with its evidence; layer 2, verify_maker below,
+# independently tries to KNOCK IT DOWN. Only a candidate that survives both
+# is written to the listing — accuracy over coverage, since a wrong maker is
+# worse than a blank one.
 # ---------------------------------------------------------------------------
-
-_MAKER_HUNT_SCHEMA = """
-Return ONLY a JSON object (no markdown fences):
-{
-  "maker": "the exact maker/manufacturer/brand name, or \\"\\" if none is identifiable",
-  "evidence": "concise: what in the photos supports this (logo, tag text, stamp, hallmark, signature, model plate, distinctive design)",
-  "confidence": "low|medium|high"
-}
-Rules:
-- Inspect EVERY photo closely for maker evidence: logos, embossed or printed
-  marks, sewn tags, labels, stamps, hallmarks, signatures, serial/model
-  plates, packaging text, and distinctive design signatures (typography,
-  colorways, stitching, hardware, patterns) you recognize.
-- Work like a reverse-image search: match what you actually see against known
-  makers in this product category.
-- Name the MOST SPECIFIC maker the evidence supports (e.g. "Fenton" not
-  "a glass maker"; "Pyrex" not "vintage glassware").
-- If the photos genuinely show no identifiable maker, return "" — never guess.
-"""
 
 _MAKER_VERIFY_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
@@ -2896,37 +2878,6 @@ def verify_maker(image_paths: list[Path], listing: Listing,
     if verdict != "confirm" or vconf not in ("medium", "high"):
         return None
     return {"maker": maker, "evidence": evidence, "confidence": vconf}
-
-
-def identify_maker(image_paths: list[Path], listing: Listing) -> Optional[dict]:
-    """Double-layer maker/manufacturer identification from the photos.
-
-    Layer 1 hunts for a maker candidate with evidence; layer 2 (verify_maker)
-    independently verifies it. Returns {"maker", "evidence", "confidence"}
-    only when the verifier confirms with at least medium confidence; None
-    otherwise. Raises on API errors — the caller treats this enrichment as
-    best-effort."""
-    if not image_paths:
-        return None
-    client = _client()
-    imgs = [_image_block(p) for p in image_paths[:8]]
-    context = (f"Item: {listing.title}\n"
-               f"Category: {listing.category_suggestion or 'unknown'}")
-
-    hunt = client.messages.create(
-        model=config.VISION_MODEL,
-        max_tokens=700,
-        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
-            "You are an expert product identifier and appraiser hunting for the "
-            "maker of this item.\n\nCONTEXT:\n" + context + "\n" + _MAKER_HUNT_SCHEMA)}]}],
-    )
-    _log_usage("maker_hunt", hunt)
-    data = _extract_json("".join(b.text for b in hunt.content if b.type == "text"))
-    maker = str(data.get("maker", "")).strip()
-    evidence = str(data.get("evidence", "")).strip()
-    if not maker or len(maker) > 65:
-        return None
-    return verify_maker(image_paths, listing, maker, evidence)
 
 
 # --- distilling a reference link -------------------------------------------
