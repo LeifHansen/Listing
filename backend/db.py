@@ -2516,7 +2516,7 @@ def plan_spend(free_quota: int, free_used: int, purchased: int,
     Lives here, beside token_spend, because token_spend is its only caller and
     a debit rule with two implementations is a debit rule with none: this was a
     copy in services/tokens.py that the billing tests exercised while the row
-    lock below ran its own inline version. Re-exported as tokens.plan_spend.
+    lock below ran its own inline version.
     """
     free_remaining = max(0, free_quota - max(0, free_used))
     if amount <= 0:

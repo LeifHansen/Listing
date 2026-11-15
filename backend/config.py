@@ -504,11 +504,6 @@ EBAY_MEDIA_BASE = ("https://apim.sandbox.ebay.com/commerce/media/v1_beta"
                    if _SANDBOX else
                    "https://apim.ebay.com/commerce/media/v1_beta")
 
-# Scopes needed to create listings, read/fetch business policies, run Promoted
-# Listings, and read the connected seller's identity (so we can show WHICH eBay
-# account is linked). sell.marketing was added later: a seller who connected
-# before it must reconnect once to grant it (their existing refresh token only
-# carries the scopes they originally approved).
 # The commit this image was built from, stamped in by the Dockerfile's
 # GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
 BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
@@ -523,6 +518,11 @@ BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
 # this was moved to protect.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# Scopes needed to create listings, read/fetch business policies, run Promoted
+# Listings, and read the connected seller's identity (so we can show WHICH eBay
+# account is linked). sell.marketing was added later: a seller who connected
+# before it must reconnect once to grant it (their existing refresh token only
+# carries the scopes they originally approved).
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
