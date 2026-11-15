@@ -58,7 +58,6 @@ function stub(aspects, over = {}) {
     toggleSpecificValue: () => {},
     confirmSpecific: () => {},
     confirmAllSpecifics: () => {},
-    autofillSpecifics: () => {},
     ...over,
   };
 }

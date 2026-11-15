@@ -135,7 +135,6 @@ describe("autosave", () => {
       await act(async () => { get().form.set("title", "Edited live"); });
       await tick(AUTOSAVE_DELAY_MS * 3);
       expect(patches(calls), JSON.stringify(session)).toHaveLength(0);
-      expect(get().form.autosaveOn).toBe(false);
       expect(get().form.saveStatus).toBe("off");
       act(() => root.unmount());
       host.remove();
@@ -246,7 +245,8 @@ describe("autosave", () => {
     await act(async () => { await get().form.flushSave(); });
     expect(patches(calls)).toHaveLength(1);
     expect(patches(calls)[0].body).toEqual({ description: "Typed and left" });
-    expect(get().form.dirty).toBe(false);
+    // Nothing left unsaved: "dirty" outranks "saved" in the header's word.
+    expect(get().form.saveStatus).toBe("saved");
   });
 });
 

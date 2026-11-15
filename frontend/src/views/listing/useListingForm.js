@@ -156,7 +156,7 @@ function payloadOf(form, base) {
 export function useListingForm() {
   const {
     session, setSession, health, loadListings, invalidateListings,
-    openListings, patchListing, activeBulk,
+    openListings, patchListing, activeBulk, etsyOptions,
   } = useApp();
   const { toast } = useToast();
 
@@ -211,7 +211,6 @@ export function useListingForm() {
   // buttons still work. ("Unsaved" is not a state: it is derived from the
   // diff, see pendingChanges.)
   const [saveState, setSaveState] = useState("idle");
-  const [lastSavedAt, setLastSavedAt] = useState(null);
   // Only the seller's own edits start the timer. Opening a listing normalises
   // a few values on the way into the form (a blank row dropped, a number
   // parsed) and a diff of that against the server would save a listing
@@ -280,7 +279,6 @@ export function useListingForm() {
       retryStep.current = 0;
       if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
       setSaveState("idle");
-      setLastSavedAt(null);
     }
   }, [sessionId, session]);
 
@@ -525,47 +523,17 @@ export function useListingForm() {
   // answered with the bytes of an earlier edit, the tile's turn came off over
   // that picture, and the seller watched the photo rotate and then rotate
   // straight back while the file on the server stayed turned. A version is
-  // now the rotated file's own timestamp when the server sends one, a fresh
-  // clock reading when it does not, and the first load of an open uses a
-  // base taken when the editor opened — none of them can repeat.
+  // now a fresh clock reading (bumped when the studio saves), and the first
+  // load of an open uses a base taken when the editor opened — neither can
+  // repeat.
   const [imageBase] = useState(() => Date.now());
   const [imageVersions, setImageVersions] = useState({});
-  const bumpImageVersion = useCallback((name, version) => {
+  const bumpImageVersion = useCallback((name) => {
     if (!name) return;
-    setImageVersions((m) => {
-      const prev = m[name] || imageBase;
-      // Unique is the property, not increasing: the tile only ever asks
-      // "is this the version the turn was applied to?". The server's value
-      // is the file's own timestamp on ITS clock, which may sit behind this
-      // one, and is still a value no load of this photo has used.
-      const next = Number.isFinite(version) && version !== prev
-        ? version : Math.max(prev + 1, Date.now());
-      return { ...m, [name]: next };
-    });
+    setImageVersions((m) => ({
+      ...m, [name]: Math.max((m[name] || imageBase) + 1, Date.now()),
+    }));
   }, [imageBase]);
-
-  // One-tap 90° clockwise rotate; only the rotated tile refreshes.
-  //
-  // RETHROWS after the toast. The listing card turns its photo the moment the
-  // button is pressed and undoes that turn if the rotate fails (see
-  // useOptimisticTurn) — and
-  // swallowing the error here meant the undo never ran. The photo stayed
-  // turned on screen while the saved file was untouched, and since a failed
-  // rotate also bumps no version, nothing else came along to correct it: the
-  // seller was left looking at an orientation that did not exist, on a tile
-  // that would keep it until the editor was reopened.
-  const rotateImage = useCallback(async (name) => {
-    try {
-      const res = await postJson("/api/rotate-image", { session_id: sessionId, name });
-      bumpImageVersion(name, res?.version);
-      // The saved file changed, so every card showing this listing is now
-      // showing a photo that no longer exists. See store.invalidateListings.
-      invalidateListings();
-    } catch (e) {
-      toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
-      throw e;
-    }
-  }, [sessionId, bumpImageVersion, invalidateListings, toast]);
 
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
@@ -1255,7 +1223,6 @@ export function useListingForm() {
           setSaved(listing);
           retryStep.current = 0;
           setSaveState("saved");
-          setLastSavedAt(Date.now());
         }
         // The card in the grid, without a refetch: a refetch per keystroke
         // re-sorts the drafts under the editor and re-reads the whole store.
@@ -1336,7 +1303,6 @@ export function useListingForm() {
   // the chips, Etsy's own rules (its category, who/when made, its three
   // profiles) join the list, judged against the shop's settings the store
   // holds — so "Ready to publish" means ready for all of them.
-  const { etsyOptions } = useApp();
   const blockers = useMemo(
     () => blockersFor(collect(), chipTargets, {
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
@@ -1409,19 +1375,17 @@ export function useListingForm() {
     publish, publishResult, runPreflight, dismissPublishResult,
     fixTarget, setFixTarget, fixLevel,
     refine,
-    autofillSpecifics,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData,
-    categoryMeta, loadCategoryMeta,
+    categoryMeta,
     getSpecific, getSpecificValues, upsertSpecific,
     toggleSpecificValue,
-    deleteImage, rotateImage, reorderImages, addImages, addingPhotos, addingStatus,
+    deleteImage, reorderImages, addImages, addingPhotos, addingStatus,
     videos, addVideo, removeVideo, addingVideo,
     imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
-    // Autosave: the one-word status for the header, when the last save
-    // landed, whether anything on screen is unsaved, and a way to send it
-    // now (Done and the publish path use it).
-    saveStatus, lastSavedAt, dirty, flushSave, autosaveOn,
+    // Autosave: the one-word status for the header, and a way to send what
+    // is unsaved now (Done and the publish path use it).
+    saveStatus, flushSave,
   };
 }

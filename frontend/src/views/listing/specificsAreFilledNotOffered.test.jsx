@@ -51,7 +51,6 @@ function stub(over = {}) {
     getSpecificValues: () => [],
     set: () => {},
     upsertSpecific: () => {},
-    autofillSpecifics: () => {},
     ...over,
   };
 }
