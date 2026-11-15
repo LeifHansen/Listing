@@ -9,7 +9,7 @@ import { Card } from "@/components/ui/Card";
 import { Field, InfoTip, Input } from "@/components/ui/fields";
 import { TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
-import { hasSalePrice, salePrice, saleDiscount, soldUnits } from "@/lib/sales";
+import { hasSalePrice, saleDiscount, saleProceeds, soldUnits } from "@/lib/sales";
 
 /* SoldArchive — what the editor becomes once a listing has sold.
  *
@@ -103,11 +103,10 @@ export function SoldArchive({ w }) {
     price: w.form.price === "" ? null : Number(w.form.price),
     purchase_price: w.form.purchase_price === "" ? null : Number(w.form.purchase_price),
   };
-  const each = salePrice(record);
   const units = soldUnits(record);
   const known = hasSalePrice(record);
   const discount = saleDiscount(record);
-  const proceeds = each == null ? null : each * units;
+  const proceeds = saleProceeds(record);
   const cost = record.purchase_price;
   const profit = (proceeds != null && cost != null) ? proceeds - cost * units : null;
   const soldOn = dateLong(listing.sold_at);
