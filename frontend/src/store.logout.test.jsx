@@ -167,7 +167,7 @@ describe("logout", () => {
     expect(app.session).toBe(null);
     expect(app.policiesData).toBe(null);
     expect(app.metricsById).toEqual({});
-    expect(app.storeSync.lastSynced).toBe(null);
+    expect(app.storeSync.error).toBe(null);
     expect(app.activeBulk).toBe(null);
     expect(app.bulkRetry).toBe(null);
     expect(localStorage.getItem("thryft-bulk")).toBe(null);

@@ -76,7 +76,7 @@ const NO_MESSAGES = {
   message: "", loaded: false,
 };
 const NO_STORE_SYNC = {
-  syncing: false, lastSynced: null, error: null, progress: null,
+  syncing: false, error: null, progress: null,
   // Whether the last sweep actually covered the store — it SAMPLES on a
   // big one, and the list it samples is a capped read, so the oldest live
   // listings may never reach it. The Dashboard's green tick is a
@@ -899,7 +899,6 @@ export function AppProvider({ children }) {
         error: "",
         authed: !!res.authed,
         dbConfigured: !!(res.db && res.db.configured),
-        dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
         // The server says when the page is not the whole store. Every count,
         // tab, dashboard group and bulk checkbox below is built on `items`,
@@ -1134,13 +1133,13 @@ export function AppProvider({ children }) {
       // may well land after this, and overwriting it here would reset an
       // honest "we couldn't cover it all" back to a clean tick.
       setStoreSync((s) => ({
-        ...s, syncing: false, lastSynced: Date.now(), error: null,
+        ...s, syncing: false, error: null,
         progress: null,
       }));
       return res;
     } catch (e) {
       setStoreSync({
-        syncing: false, lastSynced: null, error: e.message, progress: null,
+        syncing: false, error: e.message, progress: null,
       });
       // Failed for a reason worth retrying: let a later deliberate sync (or the
       // next app load) start a fresh one instead of latching "already synced".
