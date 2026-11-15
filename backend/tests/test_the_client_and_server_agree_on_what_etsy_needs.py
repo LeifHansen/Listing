@@ -37,4 +37,6 @@ def test_the_vocabularies_are_copied_exactly():
     assert re.findall(r'"([a-z_]+)"', who_made) == list(mapping_etsy.WHO_MADE)
     assert f"ETSY_ALL_CAPS_WORD_LIMIT = {mapping_etsy.ALL_CAPS_WORD_LIMIT};" in js
     assert f"ETSY_MIN_PRICE = {mapping_etsy.PRICE_FLOOR:.2f};" in js
-    assert f"ETSY_MAX_PHOTOS = {mapping_etsy.MAX_PHOTOS};" in js
+    # No photo-count pin: the server trims an Etsy upload to its first
+    # mapping_etsy.MAX_PHOTOS rather than refusing it, so the browser has no
+    # rule to mirror (its unread ETSY_MAX_PHOTOS was removed).
