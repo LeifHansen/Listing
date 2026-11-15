@@ -1592,9 +1592,6 @@ def refine(listing: Listing, prompt: str) -> Listing:
 # The price, the specifics, the condition and the category are the facts the
 # seller already sold this item under, and a relist that moved any of them
 # would be a different listing rather than the same one with fresh words.
-FRESH_COPY_FIELDS = ("title", "description")
-
-
 def fresh_copy(listing: Listing) -> dict:
     """A new title and description for a listing that is being relisted.
 
