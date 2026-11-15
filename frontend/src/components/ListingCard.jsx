@@ -321,7 +321,7 @@ function turnStyle(spin, square) {
 // `metrics` (optional) shows eBay views/watchers for a live listing, and
 // lights the card green when it carries a bid or a pending offer.
 // `selectable` puts a checkbox on the card: ticking it reports through
-// `onSelect` and shows through `selected`, which is what powers the bulk
+// `onSelect(id)` and shows through `selected`, which is what powers the bulk
 // actions in Drafts (publish / merge / delete selected). It is a tick box,
 // not a mode — the card goes on opening when the card is clicked.
 // `onRotate(id, name)` puts a rotate button on the photo: one tap turns the
@@ -953,7 +953,7 @@ export const ListingCard = memo(function ListingCard({
           <input
             type="checkbox"
             checked={!!selected}
-            onChange={() => onSelect?.()}
+            onChange={() => onSelect?.(item.id)}
             aria-label={`Select "${l.title || item.title || "this listing"}"`}
             className="size-4 accent-(--brand-blue) cursor-pointer"
           />

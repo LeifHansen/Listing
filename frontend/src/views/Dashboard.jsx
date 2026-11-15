@@ -788,7 +788,8 @@ export function Dashboard() {
      POST /api/listings/enrich is still there for a caller that genuinely
      means "these ids, capped" — nothing in the app does. */
 
-  const askDelete = async (item) => {
+  // Stable, for the memo'd ListingCard (see the same handler in ListingsView).
+  const askDelete = useCallback(async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (await confirm({
       title: "Delete this listing?",
@@ -796,7 +797,7 @@ export function Dashboard() {
       confirmLabel: "Delete",
       danger: true,
     })) deleteListing(item.id);
-  };
+  }, [confirm, deleteListing]);
 
   // Only listings actually made IN the app count as "created today".
   // Imported rows (id "ebay-...") get their created_at at sync time — and

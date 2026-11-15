@@ -541,7 +541,7 @@ export function ListingsView({ search = "" }) {
               showEbayChip={otherMarketplaces}
               selectable={selectable && isLive(item)}
               selected={!!liveSelection[item.id]}
-              onSelect={() => toggleLive(item.id)}
+              onSelect={toggleLive}
               /* Everything the grid can still change: live listings, drafts
                  and finds. A sale or an ended listing opens the editor, as
                  it always has — eBay does not revise a finished item. */

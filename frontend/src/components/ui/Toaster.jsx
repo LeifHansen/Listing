@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckCircle2, AlertTriangle, Info, X, XCircle } from "lucide-react";
@@ -52,8 +52,13 @@ export function ToastProvider({ children }) {
     if (resolver.current) { resolver.current(value); resolver.current = null; }
   };
 
+  // Both functions are stable, so the value is too. A fresh object here made
+  // every toast shown or dismissed re-render every component that can raise
+  // one -- the app shell and nearly every screen.
+  const value = useMemo(() => ({ toast, confirm }), [toast, confirm]);
+
   return (
-    <ToastContext.Provider value={{ toast, confirm }}>
+    <ToastContext.Provider value={value}>
       {children}
       {/* On a phone the BOTTOM of the screen is spoken for twice over: the
           fixed nav lives there, and so does the editor's publish bar. A toast
