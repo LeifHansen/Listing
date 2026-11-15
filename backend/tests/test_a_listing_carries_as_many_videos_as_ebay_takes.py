@@ -149,8 +149,6 @@ def test_the_model_caps_videos_at_what_ebay_allows():
     it. Past MAX_VIDEOS eBay ignores the extras instead of refusing them."""
     listing = Listing(videos=[{"file": f"video_{i}.mp4"} for i in range(5)])
     assert len(listing.videos) == MAX_VIDEOS
-    assert MAX_VIDEOS == ebay_video.MAX_VIDEOS_PER_LISTING, (
-        "two copies of eBay's limit that can disagree")
 
 
 def test_a_video_entry_that_names_no_video_is_dropped():

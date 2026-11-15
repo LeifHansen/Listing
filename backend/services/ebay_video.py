@@ -52,17 +52,13 @@ _TIMEOUT = 30
 _UPLOAD_TIMEOUT = 600
 
 # eBay's own ceilings, and the reason each is enforced here rather than left
-# to eBay:
+# to eBay. (The count -- ONE video per listing -- is models.MAX_VIDEOS, held
+# at the model because every write path lands on it. It is not a guess
+# dressed up as a constant: eBay's seller help says "you can only add one
+# video per listing", and a second one is not rejected so much as ignored,
+# which is the worst kind of failure -- the seller sees an upload succeed and
+# a listing without their video.)
 #
-# MAX_VIDEOS_PER_LISTING -- eBay allows ONE video per listing. The plumbing
-# either side of this carries a LIST (models.Listing.videos, the <VideoID>
-# elements in the Trading request, which the schema does repeat), so the day
-# eBay raises the limit this number is the change. It is not a guess dressed
-# up as a constant: eBay's seller help says "you can only add one video per
-# listing", and a second one is not rejected so much as ignored, which is the
-# worst kind of failure -- the seller sees an upload succeed and a listing
-# without their video.
-MAX_VIDEOS_PER_LISTING = 1
 # 150MB exactly (157,286,400 bytes) -- eBay's documented maximum, and the
 # `size` createVideo is told has to match the bytes uploaded afterwards.
 MAX_VIDEO_BYTES = 150 * 1024 * 1024
