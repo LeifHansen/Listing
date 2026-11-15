@@ -65,8 +65,9 @@ _MAX_SIDE = int(os.getenv("BG_API_MAX_SIDE", "2048") or 2048)
 # Total attempts per photo. Big batches WILL trip a per-minute rate limit and
 # the odd network blip; those retry with backoff instead of failing the photo.
 # Hard failures (bad key, no plan, out of images) never retry -- they would
-# fail identically every time.
-_TRIES = int(os.getenv("BG_API_TRIES", "4") or 4)
+# fail identically every time. At least one: zero would make no request at
+# all and then read the response that never came.
+_TRIES = max(1, int(os.getenv("BG_API_TRIES", "4") or 4))
 
 # One cutout answers in a second or three; 30s is generous for a slow day.
 # The studio's client deadline (frontend MODEL_TIMEOUT_MS) is sized to outlast
