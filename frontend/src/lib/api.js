@@ -275,6 +275,12 @@ export function patchJson(path, body) {
 // the client polls instead of a single long request that a gateway or the
 // browser would time out ("server taking too long to respond"). If we give up
 // waiting, the server keeps working and saves the draft anyway.
+// No answer at all (a dropped connection, a timeout), a server error or a
+// rate limit: worth asking again. Anything else is the server's answer.
+function transientFailure(e) {
+  return e?.status == null || e.status >= 500 || e.status === 429;
+}
+
 export async function pollJob(jobId, {
   intervalMs = 1500, timeoutMs = 240000, onUpdate, stopWhen,
 } = {}) {
@@ -296,7 +302,20 @@ export async function pollJob(jobId, {
   let deadline = Date.now() + timeoutMs;
   let lastSeen = "";
   for (;;) {
-    const j = await api(`/api/bulk/status/${jobId}`);
+    let j;
+    try {
+      j = await api(`/api/bulk/status/${jobId}`);
+    } catch (e) {
+      // A status read that failed is not a job that failed: the work goes on
+      // on the server either way. A phone changing networks, or the minute a
+      // deploy restarts the machine, used to end the wait with "Couldn't …"
+      // while the job carried on. So a dropped connection or a server error
+      // is asked again until the same stage deadline; an answer the server
+      // gave on purpose (no such job, the session is gone) ends it.
+      if (!transientFailure(e) || Date.now() > deadline) throw e;
+      await new Promise((r) => setTimeout(r, intervalMs));
+      continue;
+    }
     if (onUpdate) {
       try { onUpdate(j); } catch { /* display-only */ }
     }
