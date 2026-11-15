@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/store";
+import { isDraft } from "@/lib/listingsView";
 import { BrandMark, BRAND_LOGO } from "@/components/BrandMark";
 
 // Selling is two jobs, so it is two tabs. "Sell" used to be one screen with
@@ -138,8 +139,7 @@ export function Sidebar() {
   // changes is not news. A badge there would have to mean something needs
   // doing, which is a different count than "everything you have".
   const counts = {
-    new: listingsState.items.filter(
-      (i) => i.status === "draft" || i.status === "dry_run").length,
+    new: listingsState.items.filter(isDraft).length,
     messages: messages.unread,
   };
 

@@ -7,6 +7,7 @@ import {
   normalizeSavedViews, removeSavedView,
 } from "@/lib/listingFilters";
 import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
+import { isDraft } from "@/lib/listingsView";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -1608,7 +1609,6 @@ export function AppProvider({ children }) {
     const ids = activeBulk?.done ? activeBulk.itemIds : null;
     if (!ids || !ids.length || !listingsState.loaded) return;
     const byId = new Map(listingsState.items.map((it) => [it.id, it]));
-    const isDraft = (it) => it.status === "draft" || it.status === "dry_run";
     if (ids.some((id) => byId.has(id) && isDraft(byId.get(id)))) return;
     if (!ids.some((id) => byId.has(id))) return;  // nothing landed: keep the way back
     clearBulk();

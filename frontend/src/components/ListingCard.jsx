@@ -14,7 +14,7 @@ import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
 import { quickEditPanelId } from "@/views/listing/QuickEdit";
-import { buyerWaiting, keptWhenEnded } from "@/lib/listingsView";
+import { buyerWaiting, isDraft, isLive, keptWhenEnded } from "@/lib/listingsView";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -353,7 +353,7 @@ export const ListingCard = memo(function ListingCard({
 }) {
   const list = layout === "list";
   const l = item.listing || {};
-  const draft = item.status === "draft" || item.status === "dry_run";
+  const draft = isDraft(item);
   // No "N to review" chip here any more. It counted the item specifics the
   // AI had inferred rather than read, and every one of them was already on
   // the draft and already publishable — so the number named no work, only a
@@ -364,30 +364,30 @@ export const ListingCard = memo(function ListingCard({
   // has stood behind it, and the AI's doubts about the first draft are not
   // a fact about the listing that is selling.
   const confidence = draft ? l.ai_confidence : "";
-  const isLive = item.status === "published" || item.status === "live";
-  const hasMetrics = isLive && metrics
+  const live = isLive(item);
+  const hasMetrics = live && metrics
     && (metrics.views != null || metrics.watchers != null);
   // Buyers waiting on an answer. Live listings only — an offer on anything
   // else is settled history. `> 0` is deliberately the whole test: the count
   // is ABSENT, not zero, when eBay couldn't be asked (see services/metrics),
   // so a missing number draws nothing rather than "no offers".
-  const offers = isLive && metrics && metrics.offers > 0 ? metrics.offers : 0;
+  const offers = live && metrics && metrics.offers > 0 ? metrics.offers : 0;
   // Bids on an auction, on the same terms: live only, and absent-is-unknown.
-  const bids = isLive && metrics && metrics.bids > 0 ? metrics.bids : 0;
+  const bids = live && metrics && metrics.bids > 0 ? metrics.bids : 0;
   // When that auction stops taking them, from the same read — so the same
   // rule again: live only, and a card with no answer shows no clock rather
   // than a deadline it made up. eBay reports this for auctions and nothing
   // else (backend/services/ebay_trading._auction_ends_at), which is what
   // keeps a Buy It Now from counting down to its own renewal date.
-  const endsAt = (isLive && metrics && metrics.ends_at) || "";
+  const endsAt = (live && metrics && metrics.ends_at) || "";
   // Whether eBay has COUNTED the bids, as opposed to not having been asked:
   // the chip says "No bids" for the first and nothing for the second.
-  const bidsKnown = isLive && !!metrics && metrics.bids != null;
+  const bidsKnown = live && !!metrics && metrics.bids != null;
   // A live auction carries everything the status, format and bid chips said
   // on one chip, with its clock (see AuctionChip). Its format is the usual
   // sign; a bid count or a deadline is proof enough on its own, since eBay
   // reports either for auctions and nothing else.
-  const liveAuction = isLive
+  const liveAuction = live
     && (isAuctionFormat(l.listing_format) || bids > 0 || !!endsAt);
   // What that chip reads off the overlay -- which a live auction can be
   // drawn without, before eBay has been asked.
@@ -459,7 +459,7 @@ export const ListingCard = memo(function ListingCard({
   if (thumb !== failedFor) { setFailedFor(thumb); setImgFailed(false); }
   // Origin — created here vs. imported from eBay — only where the distinction
   // matters (the listing exists on eBay). Hover for exactly what each allows.
-  const showOrigin = isLive || item.status === "ended" || item.status === "sold";
+  const showOrigin = live || item.status === "ended" || item.status === "sold";
 
   // The turn goes on a box around the <img>, not on the <img>: the image
   // animates its own transform for the hover zoom, and a turn coming off

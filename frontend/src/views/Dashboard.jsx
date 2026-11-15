@@ -23,7 +23,7 @@ import { ListingsIllustration, WelcomeIllustration } from "@/components/ui/illus
 import { cn, formatMoney } from "@/lib/utils";
 import { DEFAULT_CURRENCY, DEFAULT_SOLD_RANGE, SOLD_RANGES, currencyOf,
          salesSummary } from "@/lib/sales";
-import { isDraft, keptWhenEnded, listingsView, recentListings, storeTotal }
+import { isDraft, isLive, keptWhenEnded, listingsView, recentListings, storeTotal }
   from "@/lib/listingsView";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
@@ -805,8 +805,8 @@ export function Dashboard() {
   // claim the user "created" a pile of listings they never touched.
   const todays = items.filter(
     (i) => isToday(i.created_at) && !String(i.id).startsWith("ebay-"));
-  const drafts = items.filter((i) => i.status === "draft" || i.status === "dry_run");
-  const live = items.filter((i) => i.status === "published" || i.status === "live");
+  const drafts = items.filter(isDraft);
+  const live = items.filter(isLive);
   const inventory = items.filter((i) => i.status === "unlisted");
   // Ended and still here, which after the automatic removal means one of the
   // seller's own inside its grace period — something they can still relist.

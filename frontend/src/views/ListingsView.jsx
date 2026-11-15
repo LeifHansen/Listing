@@ -524,18 +524,17 @@ export function ListingsView({ search = "" }) {
           >
             <ListingCard className={list ? undefined : "h-full"} layout={listingsLayout}
               item={item} onOpen={openListing} onDelete={askDelete}
-              onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
+              onEnd={isLive(item) ? askEnd : undefined}
               ending={endingId === item.id}
               /* Draft and live cards: a sold record offers Relist from its
                  archive instead, and a find was never a listing to copy. */
-              onDuplicate={(isDraft(item) || item.status === "published"
-                || item.status === "live" || item.status === "ended")
+              onDuplicate={(isDraft(item) || isLive(item) || item.status === "ended")
                 ? duplicateListing : undefined}
               /* Drafts only, like the category and format controls below: a
                  live listing's photos are the copy eBay already took. */
               onRotate={isDraft(item) ? rotateListingPhoto : undefined}
               skipped={skippedDraftIds.has(item.id)}
-              stale={(item.status === "published" || item.status === "live")
+              stale={isLive(item)
                 && dayAge(item.created_at) >= STALE_DAYS}
               metrics={metricsById[item.id]}
               showEbayChip={otherMarketplaces}
