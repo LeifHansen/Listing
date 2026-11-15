@@ -348,11 +348,30 @@ def session_prefix(session_id: str) -> str:
     return f"sessions/{storage.safe_session_name(session_id)}/"
 
 
+class _KeysRefused(Exception):
+    """A bulk delete that answered, but refused some of its keys."""
+
+    def __init__(self, prefix: str, removed: int, refused: list[dict]):
+        self.removed = removed
+        first = refused[0]
+        super().__init__(
+            f"{len(refused)} object(s) under {prefix} were not deleted "
+            f"(first: {first.get('Key')}: {first.get('Code')} {first.get('Message')})")
+
+
 def _delete_under(client, prefix: str) -> int:
     """Delete every object under `prefix` with `client`; how many went.
     Raises whatever the client raises — the two callers below decide what a
-    failure means."""
+    failure means.
+
+    A bulk delete can SUCCEED while refusing some of its keys: with Quiet it
+    answers only the failures, in `Errors`. Counting every key sent as gone
+    let an erasure that left photos behind report itself complete, and the
+    deletion queue then dropped the debt for good. Every page is still
+    attempted; refusals raise _KeysRefused at the end, carrying the count of
+    what did go."""
     removed = 0
+    refused: list[dict] = []
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=config.R2_BUCKET, Prefix=prefix):
         keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
@@ -360,9 +379,13 @@ def _delete_under(client, prefix: str) -> int:
             continue
         # delete_objects caps at 1000 keys per call, which is also the
         # paginator's default page size, so a page always fits.
-        client.delete_objects(Bucket=config.R2_BUCKET,
-                              Delete={"Objects": keys, "Quiet": True})
-        removed += len(keys)
+        resp = client.delete_objects(Bucket=config.R2_BUCKET,
+                                     Delete={"Objects": keys, "Quiet": True})
+        errors = (resp or {}).get("Errors") or []
+        refused.extend(errors)
+        removed += len(keys) - len(errors)
+    if refused:
+        raise _KeysRefused(prefix, removed, refused)
     return removed
 
 
@@ -380,6 +403,9 @@ def delete_prefix(prefix: str) -> int:
         if client is None:
             return 0
         return _delete_under(client, prefix)
+    except _KeysRefused as exc:
+        log.warning(f"objstore: delete_prefix({prefix}): {exc}")
+        return exc.removed
     except Exception as exc:  # noqa: BLE001 - never break the request
         log.warning(f"objstore: delete_prefix({prefix}) failed: {exc}")
         return 0
