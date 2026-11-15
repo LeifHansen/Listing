@@ -36,6 +36,58 @@ def _condition_bucket(condition: Optional[str]) -> Optional[str]:
     return "NEW" if condition.strip().upper() in _NEW_CONDITIONS else "USED"
 
 
+def _search_params(query: str, category_id: Optional[str],
+                   condition: Optional[str], gtin: Optional[str],
+                   buying_options: str, limit: int) -> dict:
+    """The search both comp sources run: Browse and Marketplace Insights take
+    the same filter syntax and the same product-or-keywords choice, and differ
+    only in which buying options count as a comp.
+
+    eBay's Browse filter spec requires `priceCurrency` to be paired with a
+    `price` filter; sending it alone 400s. We don't range-filter, so omit it
+    — the marketplace header already scopes results to the US/USD site.
+    """
+    filters = ["buyingOptions:{%s}" % buying_options]
+    bucket = _condition_bucket(condition)
+    if bucket:
+        filters.append("conditions:{%s}" % bucket)
+    params = {"limit": str(limit), "filter": ",".join(filters)}
+    if gtin:
+        params["gtin"] = str(gtin)
+    else:
+        params["q"] = query
+    if category_id:
+        params["category_ids"] = str(category_id)
+    return params
+
+
+def _buy_api_headers() -> dict:
+    """Headers for the Buy APIs, on the application token."""
+    return {
+        "Authorization": f"Bearer {_app_token()}",
+        "Accept": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
+    }
+
+
+def _spread(prices: list[float]) -> dict:
+    """The median and the quartile range of a set of comp prices.
+
+    Under four prices there is no distribution to take quartiles of, so the
+    range is simply the cheapest to the dearest."""
+    prices = sorted(prices)
+    if len(prices) >= 4:
+        q1, _, q3 = statistics.quantiles(prices, n=4)
+    else:
+        q1, q3 = prices[0], prices[-1]
+    return {
+        "estimate": round(statistics.median(prices), 2),
+        "low": round(q1, 2),
+        "high": round(q3, 2),
+        "count": len(prices),
+    }
+
+
 def active_comps(query: str, category_id: Optional[str] = None,
                  condition: Optional[str] = None, limit: int = 50,
                  gtin: Optional[str] = None) -> Optional[dict]:
@@ -51,29 +103,11 @@ def active_comps(query: str, category_id: Optional[str] = None,
     """
     if not config.taxonomy_ready():
         return None
-    # eBay's Browse filter spec requires `priceCurrency` to be paired with a
-    # `price` filter; sending it alone 400s. We don't range-filter, so omit it
-    # — the marketplace header already scopes results to the US/USD site.
-    filters = ["buyingOptions:{FIXED_PRICE}"]
-    bucket = _condition_bucket(condition)
-    if bucket:
-        filters.append("conditions:{%s}" % bucket)
-    params = {"limit": str(limit), "filter": ",".join(filters)}
-    if gtin:
-        params["gtin"] = str(gtin)
-    else:
-        params["q"] = query
-    if category_id:
-        params["category_ids"] = str(category_id)
-
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/buy/browse/v1/item_summary/search",
-        params=params,
-        headers={
-            "Authorization": f"Bearer {_app_token()}",
-            "Accept": "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
-        },
+        params=_search_params(query, category_id, condition, gtin,
+                              "FIXED_PRICE", limit),
+        headers=_buy_api_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -97,11 +131,6 @@ def active_comps(query: str, category_id: Optional[str] = None,
     if not prices:
         return None
 
-    prices.sort()
-    if len(prices) >= 4:
-        q1, _, q3 = statistics.quantiles(prices, n=4)
-    else:
-        q1, q3 = prices[0], prices[-1]
     return {
         "source": "active_comps",
         # The label reaches the seller, and the difference matters to them:
@@ -111,10 +140,7 @@ def active_comps(query: str, category_id: Optional[str] = None,
         "label": ("Live asking prices for this exact product (barcode match)"
                   if gtin else "Live asking prices on eBay"),
         "sold_data": False,
-        "estimate": round(statistics.median(prices), 2),
-        "low": round(q1, 2),
-        "high": round(q3, 2),
-        "count": len(prices),
+        **_spread(prices),
         "sample": sample,
         "search_url": ("https://www.ebay.com/sch/i.html?_nkw="
                        + quote_plus(gtin or query) + "&LH_BIN=1"),
@@ -174,27 +200,12 @@ def sold_comps(query: str, category_id: Optional[str] = None,
     """
     if not insights_enabled():
         return None
-    filters = ["buyingOptions:{FIXED_PRICE|AUCTION}"]
-    bucket = _condition_bucket(condition)
-    if bucket:
-        filters.append("conditions:{%s}" % bucket)
-    params = {"limit": "50", "filter": ",".join(filters)}
-    if gtin:
-        params["gtin"] = str(gtin)
-    else:
-        params["q"] = query
-    if category_id:
-        params["category_ids"] = str(category_id)
-
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/buy/marketplace_insights/v1_beta"
         f"/item_sales/search",
-        params=params,
-        headers={
-            "Authorization": f"Bearer {_app_token()}",
-            "Accept": "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
-        },
+        params=_search_params(query, category_id, condition, gtin,
+                              "FIXED_PRICE|AUCTION", 50),
+        headers=_buy_api_headers(),
         timeout=30,
     )
     if resp.status_code in (401, 403):
@@ -238,20 +249,12 @@ def parse_sold(data, query: str, gtin: Optional[str] = None) -> Optional[dict]:
     if not prices:
         return None
 
-    prices.sort()
-    if len(prices) >= 4:
-        q1, _, q3 = statistics.quantiles(prices, n=4)
-    else:
-        q1, q3 = prices[0], prices[-1]
     return {
         "source": "sold_comps",
         "label": ("What this exact product actually sold for (barcode match)"
                   if gtin else "What comparable items actually sold for"),
         "sold_data": True,
-        "estimate": round(statistics.median(prices), 2),
-        "low": round(q1, 2),
-        "high": round(q3, 2),
-        "count": len(prices),
+        **_spread(prices),
         "sample": sample,
         "search_url": ("https://www.ebay.com/sch/i.html?_nkw="
                        + quote_plus(gtin or query) + "&LH_Sold=1&LH_Complete=1"),
