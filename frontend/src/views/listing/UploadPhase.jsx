@@ -295,11 +295,13 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // The revokes below happen out here, never inside a setFiles updater: an
+  // updater has to be pure (see addFiles), and React runs it twice over in
+  // development.
   const removeFile = (i) => {
-    setFiles((cur) => {
-      URL.revokeObjectURL(cur[i].url);
-      return cur.filter((_, j) => j !== i);
-    });
+    const gone = files[i].url;
+    URL.revokeObjectURL(gone);
+    setFiles((cur) => cur.filter((f) => f.url !== gone));
   };
 
   const togglePick = (url) => {
@@ -318,13 +320,10 @@ export function UploadPhase({ defaultOpen = false }) {
   };
 
   const removePicked = () => {
-    setFiles((cur) => {
-      const kept = cur.filter((f) => !picked.has(f.url));
-      // Revoke only what actually left: a URL still on screen must keep
-      // working, and a revoked one renders as a broken tile.
-      cur.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
-      return kept;
-    });
+    // Revoke only what actually left: a URL still on screen must keep
+    // working, and a revoked one renders as a broken tile.
+    files.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
+    setFiles((cur) => cur.filter((f) => !picked.has(f.url)));
     endSelecting();
   };
 
