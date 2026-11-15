@@ -1441,9 +1441,8 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
-  // Turn one of a saved listing's photos 90° clockwise, from its card. The
-  // same server call the editor's tile makes (see useListingForm.rotateImage),
-  // for the seller who can see from the grid that a photo is sideways and
+  // Turn one of a saved listing's photos 90° clockwise, from its card (the
+  // studio's Rotate makes the same server call), for the seller who can see from the grid that a photo is sideways and
   // used to have to open the full editor to turn it. Resolves with the
   // rotated file's own version -- the cache-buster no load of this photo has
   // used, which is what the card needs to show the new bytes -- and RETHROWS

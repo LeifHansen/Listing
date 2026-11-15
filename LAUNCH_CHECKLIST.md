@@ -174,6 +174,34 @@ build, the smoke walk and the reach check):
       `backend/services/claude_ai.py`; `tests/test_the_models_answer_is_checked_for_shape.py`,
       `tests/test_what_the_seller_types_and_what_the_web_says_are_bounded.py`.
 
+From the full-code review of 2026-11-15 (six areas reviewed in parallel,
+behaviour-preserving, then merged; every gate green, including the smoke
+walk):
+
+- [x] **An erasure R2 partly refused counted as finished.** `delete_objects`
+      reports per-key refusals in `Errors`, which nothing read; the queue
+      dropped the debt with photos still in the bucket. `backend/objstore.py`;
+      `tests/test_an_erasure_that_failed_is_not_finished.py`.
+- [x] **Identify failed with a 502, after the photos were paid for,** when the
+      model sent `identifiers` as an object. `backend/services/barcodes.py`.
+- [x] **Two writers of one photo's vision copy shared a temp file** and could
+      cache a corrupt copy. `backend/services/images.py`.
+- [x] `BG_API_TRIES=0` failed every cutout. `backend/services/cutout_api.py`.
+- [x] **Five tests failed in about two runs of five**: four fixtures reloaded
+      config before monkeypatch restored the environment, leaking a scratch
+      `DATABASE_URL` into later tests on the worker; one asserted a job slot
+      free before the worker's `finally` ran.
+- [x] Editor: the studio's layer canvases are released; the uploader's object
+      URLs are revoked on unmount; the selling-format buttons are no longer
+      inside a `<label>`; Save and Remove BG wait for the photo to load.
+- [x] Frontend: `ListingCard`'s memo holds (outside the drafts grid);
+      Settings shares the store's policies cache; admin, crosspost and inbox
+      load on first use (main chunk 612 → 503 kB) with a reload-once guard for
+      a tab left open across a deploy.
+- [x] Native apps: one build script for both platforms, CI builds of both,
+      the privacy manifest in the app target, Android links and back button,
+      and the purchase rules per store. `MOBILE.md`, `docs/APP_STORE.md`.
+
 ## Do before launch (code, scoped)
 
 Ordered by what it costs a seller.
@@ -183,7 +211,7 @@ Ordered by what it costs a seller.
       flag, no `beforeunload`, no save-and-stay ("Save Draft" closes the
       editor). Add dirty tracking, guard the exits (sidebar, "Back to batch",
       "Fix this" → Settings, reload), and a save that stays.
-      `frontend/src/views/listing/useListingForm.js`, `NewListing.jsx`, `PublishCard.jsx`.
+      `frontend/src/views/listing/useListingForm.js`, `NewListing.jsx`, `PublishBar.jsx`.
 - [ ] **Bulk queue safety.** Per-card Publish stays live during "Publish
       all", and the loop publishes the snapshot captured at click, so a card
       the seller publishes by hand mid-run goes out twice and an edit typed
@@ -226,11 +254,9 @@ Ordered by what it costs a seller.
       the startup thread in `main._warm_models`.) No `statement_timeout` /
       `lock_timeout` toward Neon either. `backend/objstore.py`, `db.py`.
 - [ ] Smaller, each a few lines: `ImageEditor` Escape/backdrop bypass the
-      AI-busy lock and its layer canvases are never released; object URLs leak
-      when the uploader unmounts; `Field` wraps the selling-format buttons in
-      a `<label>`; `InfoTip` explainers are `title` tooltips and do not exist
-      on touch; `ListingCard`'s memo is defeated by inline callbacks;
-      `SettingsView` keeps its own copy of the policies cache; the deletion
+      AI-busy lock; `InfoTip` explainers are `title` tooltips and do not
+      exist on touch; `DraftsStrip` still hands `ListingCard` inline
+      callbacks, so its memo holds everywhere but the drafts grid; the deletion
       queue has no backoff so 500 permanently failing rows starve newer ones;
       `logarchive` writes two days under a one-day key and keeps `user_id`
       outside erasure scope; `tag_crops` index shifts when a file is missing;
@@ -324,8 +350,9 @@ Ordered by what it costs a seller.
 
 ## After launch (known, not on the critical path)
 
-- Finish splitting `backend/main.py` (13.2k lines; the same owner check,
-  path-traversal guard and truthy parse are re-typed 6–10× each). Started:
+- Finish splitting `backend/main.py` (13k lines; the owner check,
+  path-traversal guard, truthy parse and "Log in first." are one helper each
+  since the 2026-11-15 review). Started:
   `backend/routers/` holds the operator console, sign-in and the inbox, and
   `routers/deps.py` holds the caller's id, the ownership check, the eBay
   credentials, the token charge, the support reference and the background
@@ -360,10 +387,10 @@ Ordered by what it costs a seller.
   is captured and never honoured; `probe_block_scope` fires six Verify calls
   per 240.
 - Auction publishes have no SKU-based recovery for a lost response.
-- Duplicate helpers across services (`_is_scope_error` ×4, `_NEVER_SENT` ×4,
-  `_app_token` ×2, `delete_prefix` vs `_strict`, three `prune_*` walks,
-  `EbayAccount` vs `MarketplaceAccount`); dormant flags `IDENTIFY_CHAIN=v1`
-  and `RESEARCH_PASS` (~130 lines); `scripts/migrate_session_ids.py` and
+- `EbayAccount` vs `MarketplaceAccount` (merging them is a schema change;
+  the other duplicate helpers and the dormant `IDENTIFY_CHAIN=v1` went in the
+  2026-11-15 review, and `RESEARCH_PASS` turned out to be live: it defaults
+  on whenever Google identifies); `scripts/migrate_session_ids.py` and
   `storage.legacy_session_name` (a one-shot whose precondition never
   existed in production — run it dry once to prove 0, then delete).
 - Docs: move the README's operator sections into `docs/OPERATIONS.md` (a

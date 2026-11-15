@@ -2461,7 +2461,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # was granted, so it hands back "" far more often than it hands back a
         # wrong name — and "" is not a name, it is "we don't know". Writing it
         # anyway erased a username the app already had, and a blank username
-        # makes listing_sync.belongs_to scope nothing (every account's listings
+        # makes listing_sync.owns scope nothing (every account's listings
         # look like this one's) while count_foreign_listings reports every
         # labelled record as foreign. db.save_ebay_account skips None, so None
         # is how "leave what's there" is spelled.
@@ -2495,7 +2495,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
             # account's, so syncs and publishes stop treating those listings as
-            # this account's (see services/listing_sync.belongs_to).
+            # this account's (see services/listing_sync.owns).
             #
             # Dropped settings alone say the store changed, not who it was: a
             # policy the seller deleted looks the same, and the previous name
@@ -3598,7 +3598,7 @@ _PREF_FIELDS = {
     "auto_promote": (int, 0, 1),
     # Accept Best Offer on every new listing, with no minimum: eBay sends the
     # seller every offer to accept or decline. OFF unless explicitly saved on
-    # — see services/listing_sync.offers_enabled, which is where the decision
+    # — see services/listing_sync.offers_terms, which is where the decision
     # is actually made, and which also explains why it never touches a listing
     # that is already live.
     "allow_offers": (int, 0, 1),
@@ -4937,7 +4937,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
         # left out (the email needs its own scope and is usually absent), and
         # "" is "we don't know", not a name. Written anyway, pressing "Sync
         # from eBay" erased a username and email the app already had, and a
-        # blank username makes listing_sync.belongs_to scope nothing.
+        # blank username makes listing_sync.owns scope nothing.
         for field, value in (("ebay_username", ident["username"]),
                              ("ebay_email", ident["email"]),
                              ("ebay_user_id", ident.get("user_id"))):

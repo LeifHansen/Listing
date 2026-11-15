@@ -1195,7 +1195,7 @@ Plus 120/$11.99 · Pro 300/$24.99 · Power 1000/$69.99 — $0.12 down to
 $0.07/token as packs grow.
 
 **Why these numbers are profitable.** A full draft runs 3–4 vision calls over
-up to 8 photos (the consolidated `IDENTIFY_CHAIN=v2` chain — it was 4–6 before
+up to 8 photos (the consolidated enrichment chain — it was 4–6 before
 the tag-read, specifics and maker passes were folded together, and the photos
 now ride as ~1092px copies at roughly half the image tokens; the specifics
 **coverage pass** below adds one more, over four photos rather than eight); on the default
@@ -1300,11 +1300,10 @@ Adding marketplace N+1 = one provider module + one import in
 
 ### Field alignment (this app · eBay · Etsy)
 
-One listing record, three vocabularies. `backend/marketplaces/field_map.py`
-is the one place the alignment is written down — the crosspost review reads
-it to say what will be filled and what is still wanted, the client mirrors
-it (`frontend/src/lib/fieldMap.js`, pinned equal by a test), and every
-`etsy_*` target the Etsy preflight can raise has to name a row here. *Filled*
+One listing record, three vocabularies. The table below is how the fields
+line up; the code that carries a listing across is
+`backend/marketplaces/mapping_etsy.py` (and its preflight decides what is
+still wanted). *Filled*
 is how a value crosses from an eBay-shaped listing to Etsy: **shared**
 (copied as-is), **derived** (computed, by the named rule), **manual** (Etsy
 asks something eBay never did — answered once per crosspost batch or on the
@@ -1736,7 +1735,7 @@ cross-post ten items instead of two hundred.
   those is the crosspost's shopping list. Ticking live cards arms the bar.
   Already on Etsy, an auction, variations, or not live: left out with the
   reason, in the browser and again on the server.
-- **What is filled in.** Everything `backend/marketplaces/field_map.py` calls
+- **What is filled in.** Everything the table above calls
   *derived*: the title tidied to Etsy's character rules, the description in
   plain text with the condition written into it, tags from the brand and item
   specifics, materials from the Material specific, and the **category matched
@@ -2067,7 +2066,7 @@ problem:
   read *"1 of 1 · 69 more after this run"*, which is a button that does one
   listing per tap while calling itself Enrich all. The press sends no ids and
   has no cap now: the server works the set out from the same ranking the
-  screen is rendered from (`_finish_all_set`), so the number on the badge is
+  screen is rendered from (`finish_all` in `backend/main.py`), so the number on the badge is
   the number that runs. `POST /api/listings/enrich` is still there — ids in,
   capped, deferring the rest — for a caller that genuinely means a selection.
   Nothing in the app does.
