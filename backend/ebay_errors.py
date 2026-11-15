@@ -1,33 +1,22 @@
 """Turn raw eBay API errors into plain-language fixes the seller can act on.
 
-eBay returns errors like:
-  {"errors":[{"errorId":25002,"message":"...No <Item.Country>...",
-              "parameters":[{"name":"0","value":"Item.Country"}]}]}
+eBay describes an error as a code and a sentence or two, in the shape its
+REST APIs use:
+  {"errorId":25002,"message":"...No <Item.Country>...",
+   "parameters":[{"name":"0","value":"Item.Country"}]}
 
-`from_response()` parses that into a list of "issues", each carrying a
-human title, a concrete fix, and a `target` telling the UI which field to
-highlight (category / price / title / description / specifics / photos /
-location / policies / generic).
+`explain()` turns one of those into an "issue" carrying a human title, a
+concrete fix, and a `target` telling the UI which field to highlight
+(category / price / title / description / specifics / photos / location /
+policies / generic). `from_trading_error()` is the way in for the Trading API,
+which every publish and revise goes through.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Optional
 
 from .models import SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS
-
-
-def _parse(text: str) -> list[dict]:
-    """Pull eBay's `errors` array out of a response body (JSON or not)."""
-    if not text:
-        return []
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        return [{"message": text[:300]}]
-    errs = data.get("errors") if isinstance(data, dict) else None
-    return errs if isinstance(errs, list) else []
 
 
 def _clip(text: str, limit: int = 160) -> str:
@@ -654,28 +643,13 @@ def explain(err: dict) -> dict:
     return issue
 
 
-def from_response(text: str) -> list[dict]:
-    """Parse an eBay error body into a de-duplicated list of issues."""
-    issues, seen = [], set()
-    for err in _parse(text):
-        it = explain(err)
-        key = (it["target"], it["title"])
-        if key not in seen:
-            seen.add(key)
-            issues.append(it)
-    if not issues:
-        issues.append({"target": "generic", "title": "eBay rejected the listing",
-                       "fix": "See the details below.", "error_id": "", "ebay_message": ""})
-    return issues
-
-
 def from_trading_error(exc: Exception) -> list[dict]:
     """Issues for a Trading API failure, using everything the error carries.
 
-    `from_response` only ever sees the headline string. A TradingError also
-    knows eBay's ErrorCode and the response-level <Message> that explains a
-    catch-all rejection, and both change what the seller should be told — so
-    they're fed to `explain` directly rather than being thrown away.
+    The headline string is not all there is. A TradingError also knows eBay's
+    ErrorCode and the response-level <Message> that explains a catch-all
+    rejection, and both change what the seller should be told — so they're
+    fed to `explain` rather than being thrown away.
     """
     code = str(getattr(exc, "code", "") or "")
     detail = str(getattr(exc, "detail", "") or "")
