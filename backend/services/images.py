@@ -174,9 +174,9 @@ def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
 
 
 def _coverage(alpha: Image.Image, size: tuple[int, int]) -> float:
-    """How much of the frame the matte actually keeps, 0-1."""
-    kept = alpha.point(lambda a: 255 if a >= 128 else 0)
-    return sum(kept.histogram()[128:]) / float(size[0] * size[1])
+    """How much of the frame the matte actually keeps, 0-1: the share of
+    pixels at least half opaque, counted straight off the alpha's histogram."""
+    return sum(alpha.histogram()[128:]) / float(size[0] * size[1])
 
 
 def cutout_with_engine(rgb: Image.Image) -> tuple[Image.Image, str]:
@@ -815,18 +815,24 @@ def _draft_to(img: Image.Image, side: int) -> None:
     img.draft(None, (side, side))
 
 
+def _small_upright(path: Path, side: int) -> Image.Image:
+    """`path` no larger than `side` on its longest side, upright per the
+    camera's EXIF and opaque — the copy both AI thumbnails below start from."""
+    with Image.open(path) as img:
+        _draft_to(img, side)
+        img = _flatten(ImageOps.exif_transpose(img))
+        img.thumbnail((side, side), Image.LANCZOS)
+        return img
+
+
 def thumb_jpeg(path: Path, side: int = 512, quality: int = 72) -> bytes:
     """Small JPEG bytes for AI grouping calls — keeps a 40-photo request
     light. Upright per the camera's EXIF and opaque. `quality` goes up for a
     call that has to read a label off the copy."""
     from io import BytesIO
-    with Image.open(path) as img:
-        _draft_to(img, side)
-        img = _flatten(ImageOps.exif_transpose(img))
-        img.thumbnail((side, side), Image.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, "JPEG", quality=quality)
-        return buf.getvalue()
+    buf = BytesIO()
+    _small_upright(path, side).save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
 
 
 def quarter_turns_jpeg(path: Path, side: int = 448) -> dict[int, bytes]:
@@ -834,17 +840,14 @@ def quarter_turns_jpeg(path: Path, side: int = 448) -> dict[int, bytes]:
     JPEGs keyed by degrees — 0 is the photo as the camera meant it. What the
     orientation pass lays side by side when it asks which one is upright."""
     from io import BytesIO
-    with Image.open(path) as img:
-        _draft_to(img, side)
-        img = _flatten(ImageOps.exif_transpose(img))
-        img.thumbnail((side, side), Image.LANCZOS)
-        out: dict[int, bytes] = {}
-        for deg in (0, 90, 180, 270):
-            turned = img.transpose(CW_TRANSPOSE[deg]) if deg else img
-            buf = BytesIO()
-            turned.save(buf, "JPEG", quality=80)
-            out[deg] = buf.getvalue()
-        return out
+    img = _small_upright(path, side)
+    out: dict[int, bytes] = {}
+    for deg in (0, 90, 180, 270):
+        turned = img.transpose(CW_TRANSPOSE[deg]) if deg else img
+        buf = BytesIO()
+        turned.save(buf, "JPEG", quality=80)
+        out[deg] = buf.getvalue()
+    return out
 
 
 # The size vision calls send. Claude reads images in 28px patches and never

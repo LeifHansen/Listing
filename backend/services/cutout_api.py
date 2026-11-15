@@ -159,9 +159,8 @@ def _send_with_retries(name: str, send: Callable, exc_cls: type):
 
 def jpeg_payload(img: Image.Image) -> bytes:
     """The JPEG bytes the engine gets, capped to _MAX_SIDE."""
-    rgb = img.convert("RGB")
+    rgb = img.convert("RGB")  # always a new image, so safe to shrink in place
     if max(rgb.size) > _MAX_SIDE:
-        rgb = rgb.copy()
         rgb.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
     buf = BytesIO()
     rgb.save(buf, "JPEG", quality=92)
