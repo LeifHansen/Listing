@@ -85,7 +85,6 @@ def test_the_metadata_endpoint_is_named_in_the_source():
 def test_a_url_that_is_not_a_plain_https_page_is_refused(url, why):
     with pytest.raises((rf.UnsafeURL, ValueError)):
         rf.check(url)
-    assert rf.safe(url) is None, why
 
 
 def test_a_name_that_resolves_anywhere_private_is_refused(monkeypatch):
@@ -253,7 +252,6 @@ def test_the_shape_check_does_no_dns_at_all(monkeypatch):
     monkeypatch.setattr(rf.socket, "getaddrinfo", _never)
     assert rf.check_shape("https://example.test/page") == \
         "https://example.test/page"
-    assert rf.safe("https://example.test/page")
 
 
 def test_the_shape_check_still_catches_what_a_person_gets_wrong(monkeypatch):

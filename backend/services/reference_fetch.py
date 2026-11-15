@@ -75,8 +75,6 @@ import time
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
-from ..config import log
-
 MAX_REDIRECTS = 3
 MAX_BYTES = 2 * 1024 * 1024        # a reference page, not a download
 TIMEOUT = 15.0
@@ -779,13 +777,3 @@ def unreadable_reason(html: str, text: str = "") -> str:
                 if not (low.strip() or (text or "").strip())
                 else "there was almost no text on it")
     return ""
-
-
-def safe(url: str) -> Optional[str]:
-    """`url` if it is the right shape to fetch, else None. No DNS -- this is
-    the one for a request thread."""
-    try:
-        return check_shape(url)
-    except (UnsafeURL, ValueError) as exc:
-        log.info("reference link refused: %s", exc)
-        return None
