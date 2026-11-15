@@ -119,10 +119,12 @@ iPhone.` / `…for Android.`
 | App Store, iPhone 6.9" | 1–10 screenshots, 1320×2868 portrait | The 6.9" set is scaled for the smaller iPhones. iPad screenshots are needed only for a `universal` build |
 | App Store icon | — | Comes from the build (1024², no transparency: `frontend/assets/icon.png`) |
 | Play phone screenshots | 2–8, 9:16, e.g. 1080×1920 | 4+ at 1080p or more makes the app eligible for more Play placements |
-| Play app icon | 512×512 PNG | `frontend/assets/icon.png` scaled to 512 |
-| Play feature graphic | 1024×500 PNG/JPG | Required. Navy canvas (`#101a2e`), the tag mascot, the wordmark |
+| Play app icon | 512×512 PNG | `frontend/assets/store/play-icon-512.png` |
+| Play feature graphic | 1024×500 PNG/JPG | `frontend/assets/store/play-feature-graphic.png` |
 
-Five screens tell the story, in this order: the dashboard; the camera on an
+Both Play graphics are drawn from the brand's vector art by
+`npm run brand:assets` (`frontend/scripts/brand-icon.mjs`), so they change
+with it. Five screens tell the story, in this order: the dashboard; the camera on an
 item; the AI draft with its specifics filled in; Shop Mode's shelf results;
 a published listing. Take them from a release build on a device (or the
 simulator) signed in to the review account, so no real seller's data is in

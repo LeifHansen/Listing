@@ -141,6 +141,42 @@ function splashSvg({ dark }) {
 </svg>`;
 }
 
+// Google Play's two required listing graphics (the App Store takes its icon
+// from the build). The 512px icon is the app icon itself, scaled; the
+// 1024x500 feature graphic is the mark beside the wordmark on the dark
+// canvas, with everything inside Play's safe middle (it crops the edges in
+// some placements). Brand fonts as the app loads them.
+function playIconSvg() {
+  return iconSvg().replace('width="1024" height="1024"', 'width="512" height="512"');
+}
+
+function featureGraphicHtml() {
+  return `<!doctype html><html><head>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@700&family=Nunito+Sans:wght@700&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; width: 1024px; height: 500px; background: ${CANVAS_DARK}; overflow: hidden; }
+  .wrap { display: flex; align-items: center; height: 500px; padding: 0 96px 0 72px; gap: 40px; box-sizing: border-box; }
+  svg { flex: none; }
+  h1 { margin: 0; font: 700 104px/1 Fredoka, sans-serif; color: ${CREAM}; letter-spacing: -1px; }
+  p { margin: 22px 0 0; font: 700 38px/1.25 "Nunito Sans", sans-serif; color: ${GOLD}; }
+</style></head><body><div class="wrap">
+  <svg xmlns="http://www.w3.org/2000/svg" width="360" height="440" viewBox="-360 -440 720 880">
+    ${mark({ scale: 1.18, tilt: -8 })}
+  </svg>
+  <div><h1>Thryft Shop</h1><p>Snap it. AI writes it.<br>List it.</p></div>
+</div></body></html>`;
+}
+
+async function shootPage(browser, html, width, height, file) {
+  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+  await page.setContent(html, { waitUntil: "networkidle" });
+  await page.evaluate(() => document.fonts.ready);
+  const buf = await page.screenshot({ omitBackground: false });
+  await page.close();
+  await writeFile(file, buf);
+  return buf.length;
+}
+
 async function shoot(browser, svg, size, file) {
   const page = await browser.newPage({
     viewport: { width: size, height: size },
@@ -174,5 +210,13 @@ for (const [name, svg, size] of jobs) {
   console.log(`  ${name.padEnd(16)} ${size}x${size}  ${(bytes / 1024).toFixed(1)}KB`);
 }
 
+const STORE = path.join(OUT, "store");
+await mkdir(STORE, { recursive: true });
+let bytes = await shoot(browser, playIconSvg(), 512, path.join(STORE, "play-icon-512.png"));
+console.log(`  ${"store/play-icon-512.png".padEnd(28)} 512x512  ${(bytes / 1024).toFixed(1)}KB`);
+bytes = await shootPage(browser, featureGraphicHtml(), 1024, 500,
+                        path.join(STORE, "play-feature-graphic.png"));
+console.log(`  ${"store/play-feature-graphic.png".padEnd(28)} 1024x500 ${(bytes / 1024).toFixed(1)}KB`);
+
 await browser.close();
-console.log("\nWrote 3 assets to frontend/assets/.");
+console.log("\nWrote 3 app assets and 2 Play listing graphics to frontend/assets/.");
