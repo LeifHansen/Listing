@@ -1864,15 +1864,6 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
             "moment.") from exc
 
 
-def get_ebay_account_best_effort(user_id: str) -> Optional[dict]:
-    """get_ebay_account for advisory callers — see
-    get_marketplace_account_best_effort."""
-    try:
-        return get_ebay_account(user_id)
-    except StorageUnavailable:
-        return None
-
-
 def record_deletion_notice(notification_id: str, ebay_user_id: str,
                            payload_digest: str) -> str:
     """Durably accept one deletion notice. Returns "new" or "duplicate".
@@ -2195,24 +2186,11 @@ def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
         # None, `publish` takes its dry-run branch, and the seller who pressed
         # Publish is handed ok=True with nothing listed. The provider's own
         # comment already names that outcome for a failed token SAVE; the read
-        # underneath it had the same hole. Advisory callers take
-        # get_marketplace_account_best_effort instead, by name.
+        # underneath it had the same hole.
         log.warning(f"db: get_marketplace_account failed: {exc}")
         raise StorageUnavailable(
             "We couldn't check your marketplace connection just now. Try "
             "again in a moment.") from exc
-
-
-def get_marketplace_account_best_effort(user_id: str,
-                                        marketplace: str) -> Optional[dict]:
-    """get_marketplace_account for callers that only DECORATE a screen with
-    the connection state — a badge, a settings default, a status row. They opt
-    in to None-on-failure by name, so the choice is visible at the call site
-    rather than being every caller's silent default."""
-    try:
-        return get_marketplace_account(user_id, marketplace)
-    except StorageUnavailable:
-        return None
 
 
 def disconnect_marketplace_account(user_id: str, marketplace: str) -> bool:

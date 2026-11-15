@@ -145,10 +145,6 @@ WHY_A_BLANK_IS_SAFE = {
         "the tolerant twin of a strict read; the choice is made at the call site",
     "get_prefs_best_effort":
         "the tolerant twin: pre-filling a draft, never reporting what is saved",
-    "get_ebay_account_best_effort":
-        "the tolerant twin, for panels that hide themselves rather than claim",
-    "get_marketplace_account_best_effort":
-        "the tolerant twin, same reasoning as the eBay one",
     "save_ebay_account_best_effort":
         "returns False, which the caller checks; it never reports a save",
 
