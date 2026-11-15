@@ -5826,17 +5826,13 @@ def _studio_load(request: Request, session_id: str, name: str,
     return Image.open(path)
 
 
-def _data_url(img, fmt: str = "JPEG") -> str:
+def _data_url(img) -> str:
+    """The studio's result as a JPEG data: URL, for the editor to preview."""
     from io import BytesIO
 
     buf = BytesIO()
-    if fmt == "PNG":
-        img.save(buf, "PNG", optimize=True)
-        mime = "image/png"
-    else:
-        img.save(buf, "JPEG", quality=88, optimize=True)
-        mime = "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
+    img.save(buf, "JPEG", quality=88, optimize=True)
+    return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
 @app.post("/api/rotate-image")
@@ -6193,12 +6189,13 @@ def price_suggestions(payload: dict, request: Request) -> dict:
 _STICKY_STATUSES = STICKY_STATUSES
 
 
-def _sticky_status(rec: Optional[dict], default: str = "draft") -> str:
+def _sticky_status(rec: Optional[dict]) -> str:
     """The status to persist on a save/refine: never demote a listing that is
-    already live/sold/ended (see _STICKY_STATUSES). Takes the record the
-    caller already read — each db.get_listing is a cross-region round trip."""
+    already live/sold/ended (see _STICKY_STATUSES), and "draft" otherwise.
+    Takes the record the caller already read — each db.get_listing is a
+    cross-region round trip."""
     cur = (rec or {}).get("status")
-    return cur if cur in _STICKY_STATUSES else default
+    return cur if cur in _STICKY_STATUSES else "draft"
 
 
 def _restore_server_state(session_id: str, listing: Listing,
