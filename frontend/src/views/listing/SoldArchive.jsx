@@ -258,7 +258,11 @@ export function SoldArchive({ w }) {
       </Card>
 
       {/* Got another one? That's a NEW listing — the sold record stays put. */}
-      <div className="sticky bottom-20 md:bottom-4 z-30 pt-1">
+      {/* Clear of the bottom nav the way the publish bar is (PublishBar.jsx
+          explains the 6rem): at bottom-20 the nav's raised centre button sat
+          over "Relist as new listing" on a phone with a home indicator, so a
+          tap there started a new listing instead. */}
+      <div className="sticky bottom-[calc(6rem_+_env(safe-area-inset-bottom))] md:bottom-4 z-30 pt-1">
         <div className="rounded-card border-2 border-success/45 backdrop-blur shadow-float p-3.5 sm:p-4 bg-card/95 flex flex-col gap-3 sm:flex-row sm:items-center">
           <span className="flex items-center gap-3 min-w-0 flex-1">
             <span className="grid place-items-center size-10 rounded-full shrink-0 bg-success-soft text-success">
