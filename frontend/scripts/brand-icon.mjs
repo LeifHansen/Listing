@@ -9,8 +9,9 @@
 // Colours are sampled from thryft-shop-logo-final.png, not guessed:
 //   navy #01254f · cream #fef0da · gold #feba29 · coral #fe5e4d · teal #2cb1b4
 //
-// Run: npm run brand:assets   (then `npx capacitor-assets generate` consumes
-// the output — ios-prepare.sh does both for you.)
+// Run: npm run brand:assets when the art changes, and commit the three PNGs.
+// `npm run native:ios` / `native:android` fan the committed files out into
+// every icon and splash size; they do not redraw them.
 
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";

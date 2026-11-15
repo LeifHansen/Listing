@@ -1,18 +1,20 @@
 {
   "name": "thryft-frontend",
   "private": true,
-  "version": "2.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/*.test.mjs",
     "test:watch": "vitest",
     "lint": "eslint src vitest.config.js eslint.config.js",
     "smoke": "node scripts/smoke.mjs",
     "reach": "node scripts/reach.mjs",
-    "brand:assets": "node scripts/brand-icon.mjs"
+    "brand:assets": "node scripts/brand-icon.mjs",
+    "native:ios": "node scripts/native-prepare.mjs ios",
+    "native:android": "node scripts/native-prepare.mjs android"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
