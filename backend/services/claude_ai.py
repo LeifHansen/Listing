@@ -737,17 +737,8 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
     content: list[dict] = []
     for p in image_paths[:8]:  # cap images per request
         content.append(_image_block(p))
-    content.append(
-        {
-            "type": "text",
-            "text": (
-                "These are the product photos for one listing. Draft it."
-                + _PRICING_STRATEGY_HINTS.get(strategy, "")
-                + identify_notes_block(notes)
-                + item_notes_block(item_notes)
-            ),
-        }
-    )
+    content.append({"type": "text",
+                    "text": _identify_ask(strategy, notes, item_notes)})
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
@@ -768,7 +759,25 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
         raise RuntimeError("the AI response was too long and got cut off; "
                            "try again or use fewer photos")
     text = "".join(b.text for b in resp.content if b.type == "text")
-    data = _extract_json(text)
+    return _identify_result(_extract_json(text), image_names)
+
+
+def _identify_ask(strategy: str = "", notes: str = "",
+                  item_notes: str = "") -> str:
+    """The text under the photos on an identify call, on either backend: the
+    ask, the seller's pricing strategy and the seller's own notes. All of it
+    changes per upload, which is why it rides the user turn and never the
+    cached system prefix."""
+    return ("These are the product photos for one listing. Draft it."
+            + _PRICING_STRATEGY_HINTS.get(strategy, "")
+            + identify_notes_block(notes)
+            + item_notes_block(item_notes))
+
+
+def _identify_result(data: dict, image_names: list[str]) -> IdentifyResult:
+    """The model's identify answer as an IdentifyResult, whichever backend
+    wrote it — the two draft against one schema, so they parse through one
+    path."""
     listing = _to_listing(data, image_names)
     # eBay charges extra for subtitles - never auto-fill one; the seller can
     # add it in the editor if it's worth the fee. (refine() keeps whatever
@@ -2570,6 +2579,51 @@ def research_item(image_paths: list[Path], listing: Listing,
     return _research_item_claude(image_paths, listing, observations=observations)
 
 
+def _research_context(listing: Listing, observations: str = "",
+                      ask: str = "") -> str:
+    """What the research pass is told about the draft it is checking, ending
+    in the schema — the same words on either backend. `ask` is the backend's
+    own sentence about HOW to look it up, and goes just before the schema."""
+    specifics = "; ".join(
+        f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
+        if (s.value or "").strip())
+    return (
+        "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
+        "lookup of any kind. Check it.\n\n"
+        f"Drafted title: {listing.title}\n"
+        f"Drafted brand: {listing.brand or '(none)'}\n"
+        f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
+        f"Category: {listing.category_suggestion or '(unknown)'}\n"
+        f"Specifics: {specifics or '(none)'}\n"
+        f"What the first pass saw: {(observations or '')[:600]}\n\n"
+        "Establish what this actually is and what it is actually worth."
+        + ask + _RESEARCH_SCHEMA)
+
+
+def _with_web_search(client, content: list[dict]):
+    """One user turn under the server-side web-search tool, followed to the
+    end of its loop. The research pass and the art lookup both ask this way,
+    and both are bounded the same: RESEARCH_MAX_SEARCHES searches, and
+    _RESEARCH_MAX_RESUMES resumes of a paused turn."""
+    messages = [{"role": "user", "content": content}]
+    tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+              "max_uses": RESEARCH_MAX_SEARCHES}]
+    resp = client.messages.create(
+        model=config.VISION_MODEL, max_tokens=4096,
+        tools=tools, messages=messages)
+    # A server-tool loop that hits its iteration limit comes back paused,
+    # not finished. Resending the turn resumes it; the API needs no extra
+    # user message and adding one would derail it.
+    resumes = 0
+    while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+        resumes += 1
+        messages = messages + [{"role": "assistant", "content": resp.content}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+    return resp
+
+
 def _research_item_claude(image_paths: list[Path], listing: Listing,
                           observations: str = "") -> Optional[dict]:
     """The web-search research pass on Claude's own server-side search tool."""
@@ -2578,37 +2632,9 @@ def _research_item_claude(image_paths: list[Path], listing: Listing,
     try:
         client = _client()
         imgs = [_image_block(p) for p in image_paths[:4]]
-        specifics = "; ".join(
-            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
-            if (s.value or "").strip())
-        context = (
-            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
-            "lookup of any kind. Check it.\n\n"
-            f"Drafted title: {listing.title}\n"
-            f"Drafted brand: {listing.brand or '(none)'}\n"
-            f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
-            f"Category: {listing.category_suggestion or '(unknown)'}\n"
-            f"Specifics: {specifics or '(none)'}\n"
-            f"What the first pass saw: {(observations or '')[:600]}\n\n"
-            "Establish what this actually is and what it is actually worth."
-            + _RESEARCH_SCHEMA)
-        messages = [{"role": "user", "content": imgs + [{"type": "text",
-                                                         "text": context}]}]
-        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
-                  "max_uses": RESEARCH_MAX_SEARCHES}]
-        resp = client.messages.create(
-            model=config.VISION_MODEL, max_tokens=4096,
-            tools=tools, messages=messages)
-        # A server-tool loop that hits its iteration limit comes back paused,
-        # not finished. Resending the turn resumes it; the API needs no extra
-        # user message and adding one would derail it.
-        resumes = 0
-        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
-            resumes += 1
-            messages = messages + [{"role": "assistant", "content": resp.content}]
-            resp = client.messages.create(
-                model=config.VISION_MODEL, max_tokens=4096,
-                tools=tools, messages=messages)
+        context = _research_context(listing, observations)
+        resp = _with_web_search(client, imgs + [{"type": "text",
+                                                 "text": context}])
         _log_usage("research", resp)
         text = "".join(b.text for b in resp.content if b.type == "text")
         data = _extract_json(text)
@@ -2783,20 +2809,8 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
                else "\nNo reverse image search was available for this photo.\n")
             + knowledge.block(references)
             + _ART_SCHEMA)
-        messages = [{"role": "user", "content": imgs + [{"type": "text",
-                                                         "text": context}]}]
-        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
-                  "max_uses": RESEARCH_MAX_SEARCHES}]
-        resp = client.messages.create(
-            model=config.VISION_MODEL, max_tokens=4096,
-            tools=tools, messages=messages)
-        resumes = 0
-        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
-            resumes += 1
-            messages = messages + [{"role": "assistant", "content": resp.content}]
-            resp = client.messages.create(
-                model=config.VISION_MODEL, max_tokens=4096,
-                tools=tools, messages=messages)
+        resp = _with_web_search(client, imgs + [{"type": "text",
+                                                 "text": context}])
         _log_usage("artwork", resp)
         text = "".join(b.text for b in resp.content if b.type == "text")
         data = _extract_json(text)

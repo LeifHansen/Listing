@@ -196,14 +196,19 @@ def _block(source: str, start: str) -> str:
 
 
 def test_every_first_draft_is_held_to_the_format():
-    """In BOTH identify backends, beside the subtitle they each clear at
-    first draft -- the router is a pure pass-through, and the single route,
-    the bulk worker and the shelf scan all come through one of the two."""
+    """In BOTH identify backends -- the router is a pure pass-through, and the
+    single route, the bulk worker and the shelf scan all come through one of
+    the two. Both parse their answer through claude_ai._identify_result, so
+    the guard sits there once, beside the subtitle it clears at first draft,
+    and each backend must still end in that shared path."""
+    shared = _block(CLAUDE_AI.read_text(), "def _identify_result(")
+    assert "beanie.retitle(listing)" in shared, (
+        "the shared first-draft path no longer holds the Beanie Baby format")
     claude = _block(CLAUDE_AI.read_text(), "def _identify_claude(")
     google = _block((SERVICES / "google_ai.py").read_text(), "def identify(")
     for name, body in (("claude", claude), ("google", google)):
-        assert "beanie.retitle(listing)" in body, (
-            f"the {name} draft is no longer held to the Beanie Baby format")
+        assert "_identify_result(" in body, (
+            f"the {name} draft no longer goes through the shared first-draft path")
 
 
 def test_a_fresh_copy_keeps_the_format():
