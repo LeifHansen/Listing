@@ -8,6 +8,10 @@
  * the iOS shell caps the canvas memory a page may hold. Closing (or moving to
  * another photo) now releases the stack it was editing, and opening a photo
  * again still works from a clean slate.
+ *
+ * Which leaves a window, between opening a photo and its pixels landing,
+ * where there is no stack at all and the canvas is blank. Save in that
+ * window would write the blank canvas over the photo's file, so it waits.
  */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -35,13 +39,18 @@ vi.mock("@/store", () => ({
   }),
 }));
 
-// jsdom never loads an <img>; a photo of 100x80 "arrives" on the next tick.
+// jsdom never loads an <img>; a photo of 100x80 "arrives" on the next tick
+// — or, while `holding`, only when the test lets it.
+let holding = false;
+const held = [];
 class FakeImage {
   set src(v) {
     this._src = v;
     this.naturalWidth = 100;
     this.naturalHeight = 80;
-    setTimeout(() => this.onload?.(), 0);
+    const land = () => this.onload?.();
+    if (holding) held.push(land);
+    else setTimeout(land, 0);
   }
   get src() { return this._src; }
 }
@@ -51,6 +60,8 @@ let host;
 
 beforeEach(() => {
   releaseLayers.mockClear();
+  holding = false;
+  held.length = 0;
   vi.stubGlobal("Image", FakeImage);
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({
     ok: true, status: 200,
@@ -134,5 +145,25 @@ describe("the studio and a photo it has finished with", () => {
     // ...and edits again as before.
     act(() => { tool("Rotate").click(); });
     expect(frame()).toEqual([80, 100]);
+  });
+});
+
+describe("a photo the studio is still loading", () => {
+  it("is not saved over until it has landed", async () => {
+    // jsdom has no encoder; any canvas exports as one small JPEG.
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(
+      (cb) => cb(new Blob(["x"], { type: "image/jpeg" })));
+    const saves = () => fetch.mock.calls
+      .filter(([url]) => String(url).includes("/api/edit-image"));
+    holding = true;
+    await show("img_000.jpg");
+
+    await act(async () => { tool("Save").click(); });
+    expect(saves()).toHaveLength(0);
+
+    await act(async () => { held.forEach((land) => land()); });
+    await act(async () => { tool("Save").click(); });
+    expect(saves()).toHaveLength(1);
+    HTMLCanvasElement.prototype.toBlob.mockRestore();
   });
 });

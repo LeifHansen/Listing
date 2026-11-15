@@ -305,6 +305,9 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       openSettings("bg-removal");
       return;
     }
+    // Not before the photo has landed: the blank canvas would be sent off to
+    // be cut out, and charged for.
+    if (!layersRef.current) return;
     setAiBusy("Removing the background…");
     try {
       const blob = await canvasBlob(canvas);
@@ -590,11 +593,13 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
 
   const save = async () => {
     const canvas = canvasRef.current;
-    if (!canvas || !name) return;
+    // Nothing to save until the photo has landed: the canvas is still blank
+    // (or the last photo's), and writing it would replace this one's file.
+    if (!canvas || !name || !layersRef.current) return;
     // Compose fresh rather than trusting whatever is on screen — Compare
     // paints the original onto this canvas, and a save mid-hold would
     // otherwise write the un-edited photo.
-    if (layersRef.current) compose(layersRef.current, canvas);
+    compose(layersRef.current, canvas);
     const blob = await canvasBlob(canvas);
     if (!blob) { toast("Couldn't export the edited image.", { kind: "error" }); return; }
     setSaving(true);
