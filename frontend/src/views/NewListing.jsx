@@ -5,7 +5,9 @@ import {
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
   Rocket, RefreshCw, Copy, Split,
 } from "lucide-react";
+import { useNativeBack } from "@/lib/nativeShell";
 import { cn } from "@/lib/utils";
+import { isDraft } from "@/lib/listingsView";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -90,7 +92,7 @@ function PublishedScreen({ w }) {
   // Drafts set aside with Skip (on the draft's own card) never come back as
   // "next" — not even after publishing more drafts.
   const draftsLeft = (listingsState.items || [])
-    .filter((it) => (it.status === "draft" || it.status === "dry_run")
+    .filter((it) => isDraft(it)
       && it.id !== w.sessionId && !skippedDraftIds.has(it.id))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
   const next = draftsLeft[0];
@@ -206,7 +208,8 @@ export function Workflow() {
   const w = useListingForm();
   // Ctrl/⌘+Enter publishes; see useEditorShortcuts.
   useEditorShortcuts(w);
-  // { name } — the photo open in the studio (clean up, remove background, crop).
+  // The name of the photo open in the studio (clean up, remove background,
+  // crop), or null.
   const [editing, setEditing] = useState(null);
   // The split dialog (see SplitListingDialog); `key` remounts it with fresh
   // ticks on every open rather than the last split's.
@@ -268,6 +271,12 @@ export function Workflow() {
   // since the editor opens where you already are (see store.openListing).
   // A draft is saved on the way out (see `leave`); a live listing asks.
   const back = () => leave(() => setSession(null));
+  // Android's back button is this same Back, ahead of the app's own "go to
+  // the dashboard" (lib/nativeShell): the draft saves, a live listing asks.
+  useNativeBack(() => {
+    back();
+    return true;
+  }, 10);
 
   // The header's ⋯ menu: the actions a seller takes once a month, which
   // used to be five buttons across the header and four more in the bar.
@@ -459,7 +468,7 @@ export function Workflow() {
                 it back means re-shooting or re-sending up to 150MB. */}
             <PhotosCard
               w={w}
-              onEdit={(name) => setEditing({ name })}
+              onEdit={setEditing}
               onDelete={(name) => w.deleteImage(name, confirm)}
               onRemoveVideo={(name) => w.removeVideo(name, confirm)}
             />
@@ -497,10 +506,9 @@ export function Workflow() {
 
       <ImageEditor
         sessionId={w.sessionId}
-        name={editing?.name}
-        initialAction={editing?.action}
+        name={editing}
         onClose={() => setEditing(null)}
-        onSaved={() => editing && w.bumpImageVersion(editing.name)}
+        onSaved={() => w.bumpImageVersion(editing)}
       />
     </motion.div>
   );
@@ -531,8 +539,7 @@ function ListHome({ search }) {
   // Whether the strip below will draw anything. DraftsStrip renders null with
   // nothing to show, which is right — the uploader above IS the empty state —
   // but a page that just stops has no floor, so an empty one gets a line.
-  const hasDrafts = (listingsState.items || []).some(
-    (i) => i.status === "draft" || i.status === "dry_run");
+  const hasDrafts = (listingsState.items || []).some(isDraft);
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show"

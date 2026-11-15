@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle } from "lucide-react";
 import { AppProvider, useApp } from "@/store";
@@ -13,9 +13,16 @@ import { Dashboard } from "@/views/Dashboard";
 import { NewListing } from "@/views/NewListing";
 import { ManageView } from "@/views/ManageView";
 import { ShopMode } from "@/views/ShopMode";
-import { MessagesView } from "@/views/MessagesView";
 import { SettingsView } from "@/views/SettingsView";
 import { AdminView } from "@/views/AdminView";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useNativeBack } from "@/lib/nativeShell";
+
+// The buyer inbox is fetched the first time it is opened, not with the app:
+// it is behind a deployment flag that is off by default, and its nav entry
+// only appears once eBay messaging is switched on.
+const MessagesView = lazy(() => import("@/views/MessagesView")
+  .then((m) => ({ default: m.MessagesView })));
 
 // Every screen the nav can reach. A `view` that is not in here renders the
 // dashboard rather than nothing: the main area used to be a chain of
@@ -59,8 +66,26 @@ export function screenFor(view, isSuperadmin, props = {}) {
   return <Component {...props} />;
 }
 
+// The amber strip above the screen when the server is missing a key.
+function SetupWarning({ children }) {
+  return (
+    <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">
+      <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
+      <span>{children}</span>
+    </div>
+  );
+}
+
 function Main() {
   const { view, setView, openSettings, health, activeBulk, clearBulk, isSuperadmin } = useApp();
+  // Android's back button, once no dialog or open listing took it: any
+  // other screen goes back to the dashboard (and the dashboard lets the app
+  // go to the background; see lib/nativeShell).
+  useNativeBack(() => {
+    if (view === "dashboard") return false;
+    setView("dashboard");
+    return true;
+  });
   const [search, setSearch] = useState("");
   // Tapping a nav item means "take me to the top of that screen". Without
   // this the browser keeps the scroll offset across the swap, so leaving a
@@ -100,25 +125,19 @@ function Main() {
             perfectly well, and nagging it for ANTHROPIC_API_KEY sent an
             operator to add a key they did not need. */}
         {health._loaded && !health.anthropic_configured && !health.google_ai_configured && (
-          <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">
-            <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-            <span>
-              The AI isn't configured on the server yet (missing GOOGLE_API_KEY
-              and ANTHROPIC_API_KEY) — photo identification won't work until
-              one of them is set.
-            </span>
-          </div>
+          <SetupWarning>
+            The AI isn't configured on the server yet (missing GOOGLE_API_KEY
+            and ANTHROPIC_API_KEY) — photo identification won't work until
+            one of them is set.
+          </SetupWarning>
         )}
 
         {health._loaded && !health.anthropic_configured && health.google_ai_configured && (
-          <div className="mb-4 rounded-card bg-warning-soft border border-warning/30 p-4 text-sm text-ink flex gap-2.5">
-            <AlertTriangle size={17} className="text-warning shrink-0 mt-0.5" aria-hidden />
-            <span>
-              Photo identification is running on Google, but ANTHROPIC_API_KEY
-              isn't set — refine and the item-specifics fills won't work until
-              it is.
-            </span>
-          </div>
+          <SetupWarning>
+            Photo identification is running on Google, but ANTHROPIC_API_KEY
+            isn't set — refine and the item-specifics fills won't work until
+            it is.
+          </SetupWarning>
         )}
 
         {/* No AnimatePresence, and no exit animation, deliberately.
@@ -142,7 +161,12 @@ function Main() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, ease: "easeOut" }}
         >
-          {screenFor(view, isSuperadmin, { search })}
+          {/* Only a screen fetched on first use (the inbox) ever waits here,
+              and only once; every nav-bar screen is in the main bundle and
+              mounts on the commit that asks for it. */}
+          <Suspense fallback={<Skeleton className="h-40 w-full" />}>
+            {screenFor(view, isSuperadmin, { search })}
+          </Suspense>
         </motion.main>
       </div>
       <BottomNav />

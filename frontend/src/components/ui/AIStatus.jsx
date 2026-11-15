@@ -5,11 +5,10 @@ import { cn } from "@/lib/utils";
 import { Card } from "./Card";
 import { BrandMark } from "@/components/BrandMark";
 
-// AIStatusCard — the branded wait state (publishing, saving drafts, AI work).
-// Never a plain spinner: the Thryft Shop mark gently pulsing, a shimmer, and
-// rotating friendly messages make waiting feel magical.
-export function AIStatusCard({ messages, className }) {
-  const list = Array.isArray(messages) ? messages : [messages || "Working some magic…"];
+// One message, or a list of them taking turns every 2.2s: the line the two
+// rotating wait states below are showing right now.
+function useRotatingMessage(messages, fallback) {
+  const list = Array.isArray(messages) ? messages : [messages || fallback];
   const [i, setI] = useState(0);
 
   useEffect(() => {
@@ -17,6 +16,15 @@ export function AIStatusCard({ messages, className }) {
     const t = setInterval(() => setI((n) => (n + 1) % list.length), 2200);
     return () => clearInterval(t);
   }, [list.length]);
+
+  return list[i % list.length];
+}
+
+// AIStatusCard — the branded wait state (publishing, saving drafts, AI work).
+// Never a plain spinner: the Thryft Shop mark gently pulsing, a shimmer, and
+// rotating friendly messages make waiting feel magical.
+export function AIStatusCard({ messages, className }) {
+  const message = useRotatingMessage(messages, "Working some magic…");
 
   return (
     <Card
@@ -30,14 +38,14 @@ export function AIStatusCard({ messages, className }) {
       <div className="min-w-0 flex-1">
         <AnimatePresence mode="wait">
           <motion.p
-            key={list[i % list.length]}
+            key={message}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.25 }}
             className="ai-shimmer-text font-semibold text-[15px] truncate"
           >
-            {list[i % list.length]}
+            {message}
           </motion.p>
         </AnimatePresence>
         <div className="mt-2 h-1.5 rounded-full ai-shimmer w-full max-w-64" />
@@ -50,14 +58,7 @@ export function AIStatusCard({ messages, className }) {
 // unmissable no matter where the page is scrolled (the trigger buttons live
 // at the bottom of a long form).
 export function LoadingOverlay({ messages }) {
-  const list = Array.isArray(messages) ? messages : [messages || "Working…"];
-  const [i, setI] = useState(0);
-
-  useEffect(() => {
-    if (list.length <= 1) return;
-    const t = setInterval(() => setI((n) => (n + 1) % list.length), 2200);
-    return () => clearInterval(t);
-  }, [list.length]);
+  const message = useRotatingMessage(messages, "Working…");
 
   return (
     <div
@@ -71,14 +72,14 @@ export function LoadingOverlay({ messages }) {
         </span>
         <AnimatePresence mode="wait">
           <motion.p
-            key={list[i % list.length]}
+            key={message}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.25 }}
             className="ai-shimmer-text font-bold text-lg"
           >
-            {list[i % list.length]}
+            {message}
           </motion.p>
         </AnimatePresence>
         <div className="h-1.5 rounded-full ai-shimmer w-56" aria-hidden />

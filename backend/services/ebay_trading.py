@@ -36,6 +36,7 @@ from ..config import log
 from ..models import (MAX_VIDEOS, SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS,
                       ItemSpecific, Listing)
 from . import ebay_video, taxonomy
+from .ebay import NEVER_SENT
 
 # Trading API's XML namespace — every element in a response carries it.
 _NS = "urn:ebay:apis:eBLBaseComponents"
@@ -88,10 +89,6 @@ class TradingError(ValueError):
         self.detail = detail
         self.said = said
         self.codes = list(codes) if codes else ([code] if code else [])
-
-    def has_code(self, wanted: str) -> bool:
-        """Did eBay return this ErrorCode anywhere in the response?"""
-        return wanted in self.codes
 
 
 # eBay's seller-level call-limit error. Documented (developer.ebay.com KB
@@ -206,21 +203,6 @@ _WRITE_CALLS = frozenset({
     "RelistFixedPriceItem", "AddItems", "ReviseItems",
 })
 
-# Transport failures that prove the request never reached eBay: no connection
-# was ever established, so no bytes were delivered and nothing there could
-# have acted on it. Everything NOT in this list is treated as unknown --
-# including exception types nobody here anticipated. That default is the
-# whole point: being wrong in the "nothing happened" direction is how a live
-# listing ends up with no record of itself, while being wrong the other way
-# costs one unnecessary look at the seller's eBay listings.
-_NEVER_SENT = (
-    httpx.ConnectError,        # DNS failure, connection refused, TLS refused
-    httpx.ConnectTimeout,      # gave up before the connection was made
-    httpx.PoolTimeout,         # never even got a connection out of the pool
-    httpx.UnsupportedProtocol,
-    httpx.InvalidURL,
-)
-
 # What the seller is told when a write's outcome is unknown. Deliberately does
 # NOT say "nothing was changed" -- that is the one sentence that cannot be
 # justified here, and it is the sentence that produces a duplicate when they
@@ -228,6 +210,12 @@ _NEVER_SENT = (
 _UNKNOWN_MESSAGE = (
     "We lost contact with eBay while sending this, so we can't tell whether "
     "it went through. Check your eBay listings before trying again.")
+
+# What the seller is told when eBay refuses on a call limit, whichever layer
+# said so (an HTTP 429, or a call-limit error inside eBay's XML).
+_RATE_LIMITED_MESSAGE = (
+    "eBay is limiting how often we can talk to your account right "
+    "now. Nothing was changed — this will pick up again shortly.")
 
 
 def _retry_after_seconds(value: str) -> Optional[int]:
@@ -369,7 +357,7 @@ def _call(call: str, token: str, body: str) -> ET.Element:
     try:
         resp = httpx.post(_endpoint(), headers=_headers(call, token),
                           content=xml.encode("utf-8"), timeout=_TIMEOUT)
-    except _NEVER_SENT as exc:
+    except NEVER_SENT as exc:
         # No connection was made, so eBay never saw this. Safe to call a
         # failure even for a write.
         raise Unreachable(f"Couldn't reach eBay: {exc}") from exc
@@ -380,8 +368,7 @@ def _call(call: str, token: str, body: str) -> ET.Element:
         # condition, different layer. Checked BEFORE the unknown-outcome rule:
         # a 429 is eBay declining to process the request, not a lost answer.
         raise RateLimited(
-            "eBay is limiting how often we can talk to your account right "
-            "now. Nothing was changed — this will pick up again shortly.",
+            _RATE_LIMITED_MESSAGE,
             retry_after=_retry_after_seconds(
                 resp.headers.get("Retry-After", "")))
     if resp.status_code >= 500:
@@ -476,9 +463,7 @@ def _failure(call: str, root: ET.Element, errors: list[ET.Element],
     # correct a field would send them after something that is not there.
     if _is_rate_limit(all_codes, f"{headline} {detail}"):
         return RateLimited(
-            "eBay is limiting how often we can talk to your account right "
-            "now. Nothing was changed — this will pick up again shortly.",
-            code=code, detail=detail,
+            _RATE_LIMITED_MESSAGE, code=code, detail=detail,
             retry_after=_rate_limit_wait(f"{headline} {detail}"))
     if code in ("931", "932", "16110", "21917053"):  # auth/token codes
         return TradingError(
@@ -644,6 +629,12 @@ def _is_auction_type(listing_type: str) -> bool:
     everything else on a seller's active list is fixed price."""
     lt = (listing_type or "").lower()
     return lt.startswith("chinese") or lt == "auction"
+
+
+def _is_auction_listing(listing: Listing) -> bool:
+    """Is this listing an auction (with or without Buy It Now) in this app's
+    own vocabulary? The create, the revise and the revise call name all ask."""
+    return (listing.listing_format or "").upper().startswith("AUCTION")
 
 
 def _listing_format(listing_type: str, has_bin: bool) -> str:
@@ -1213,6 +1204,10 @@ class NoStore(TradingError):
     """The account has no eBay Store, so there are no shelves to file into."""
 
 
+_NO_STORE_MESSAGE = ("This eBay account doesn't have a Store, so it has "
+                     "no store categories.")
+
+
 # eBay names a shelf `CustomCategory` at the top of the store and
 # `ChildCategory` everywhere below it — the same type, a different tag per
 # level. Walking only the first drops every nested shelf, which is most of a
@@ -1255,14 +1250,15 @@ def store_categories(token: str) -> list[dict]:
         root = _call("GetStore", token, body)
     except TradingError as exc:
         if _NO_STORE.search(f"{exc} {getattr(exc, 'detail', '')}"):
-            raise NoStore("This eBay account doesn't have a Store, so it has "
-                          "no store categories.") from exc
+            raise NoStore(_NO_STORE_MESSAGE) from exc
         raise
     store = _find(root, "Store")
     if store is None:
-        raise NoStore("This eBay account doesn't have a Store, so it has "
-                      "no store categories.")
-    cats = _custom_categories(_find(store, "CustomCategories") or store)
+        raise NoStore(_NO_STORE_MESSAGE)
+    # An Element's truth is its child count (and that test is deprecated):
+    # a CustomCategories with nothing in it falls back to the Store, as before.
+    custom = _find(store, "CustomCategories")
+    cats = _custom_categories(custom if custom is not None and len(custom) else store)
     log.info("trading: GetStore -> %d store categories", len(cats))
     return cats
 
@@ -1675,7 +1671,7 @@ def build_add_item(listing: Listing, image_urls: list[str],
     lose that because they never touched a toggle.
     """
     fmt = (listing.listing_format or "FIXED_PRICE").upper()
-    is_auction = fmt.startswith("AUCTION")
+    is_auction = _is_auction_listing(listing)
     parts = _item_fields(listing, image_urls)
 
     if is_auction:
@@ -1854,8 +1850,7 @@ def _uuid_form(key: str) -> str:
 def _revise_call_name(listing: Listing) -> str:
     """ReviseFixedPriceItem for Buy It Now, ReviseItem for auctions — eBay
     rejects the wrong one for the listing's format."""
-    return ("ReviseItem" if (listing.listing_format or "").upper().startswith("AUCTION")
-            else "ReviseFixedPriceItem")
+    return "ReviseItem" if _is_auction_listing(listing) else "ReviseFixedPriceItem"
 
 
 # What a revise can actually put in the request. `_item_fields` gates ten
@@ -1942,7 +1937,7 @@ def build_revise_item(listing: Listing, item_id: str,
     dirty = set(listing.dirty_fields) - set(without)
     parts = [f"<ItemID>{_esc(item_id)}</ItemID>"]
     parts.extend(_item_fields(listing, image_urls, only=dirty))
-    is_auction = (listing.listing_format or "").upper().startswith("AUCTION")
+    is_auction = _is_auction_listing(listing)
     if "price" in dirty and listing.price is not None and listing.price > 0:
         # On an auction the editable price is Buy It Now; the start price can't
         # be revised once bids exist, so it's left alone.

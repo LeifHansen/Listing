@@ -64,7 +64,7 @@ async function mount(props) {
   const render = async (p) => {
     await act(async () => {
       root.render(<div className="grid">
-        <ConditionPicker labels {...p} />
+        <ConditionPicker {...p} />
       </div>);
     });
   };
@@ -226,17 +226,5 @@ describe("the ring on what is actually wrong", () => {
     await mount({ conditions: CARDS, condition: "USED_VERY_GOOD",
       descriptors: [{ id: "40001", values: ["400010"] }], onChange: () => {} });
     expect(selects().every((s) => s.dataset.fix === undefined)).toBe(true);
-  });
-});
-
-describe("on a bulk card", () => {
-  it("names each control for a screen reader and in its placeholder", async () => {
-    await mount({ labels: false, conditions: CARDS, condition: "USED_VERY_GOOD",
-      descriptors: [], onChange: () => {} });
-    expect(host.querySelector("label")).toBeNull();
-    const [step1, ladder] = selects();
-    expect(step1.getAttribute("aria-label")).toBe("Condition — Graded or Ungraded?");
-    expect(ladder.getAttribute("aria-label")).toBe("Card Condition");
-    expect(ladder.options[0].textContent).toBe("Card Condition…");
   });
 });

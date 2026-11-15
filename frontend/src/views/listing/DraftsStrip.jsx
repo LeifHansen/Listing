@@ -21,7 +21,7 @@ import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH, blocksEveryListing,
 } from "./publishShared";
-import { blockerLabels, blockersFor, marketNames } from "./blockers";
+import { blockerLabels, blockersFor, marketLabel, marketNames } from "./blockers";
 import {
   liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
   withCelebrating,
@@ -88,7 +88,7 @@ function DraftShipping({ item, className }) {
 function resultSummary(res) {
   if (!res.multi) return null;
   return Object.entries(res.results || {})
-    .map(([key, r]) => `${key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
+    .map(([key, r]) => `${marketLabel(key)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
     .join(" · ");
 }
 
@@ -214,9 +214,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
 
   // Where a publish lands, in words — for the confirm dialog.
   const targetNames = effectiveTargets && effectiveTargets.length > 1
-    ? effectiveTargets
-        .map((k) => k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1))
-        .join(" and ")
+    ? effectiveTargets.map(marketLabel).join(" and ")
     : "your eBay store";
 
   // Publish one saved draft. Returns whether it went live; the caller owns the

@@ -25,14 +25,14 @@
 export const RESTORE = "restore";  // bring the original back through the mask
 export const ERASE = "erase";      // paint white over whatever is there
 
-export function makeCanvas(width, height) {
+function makeCanvas(width, height) {
   const c = document.createElement("canvas");
   c.width = Math.max(1, Math.round(width));
   c.height = Math.max(1, Math.round(height));
   return c;
 }
 
-export function cloneCanvas(src) {
+function cloneCanvas(src) {
   const c = makeCanvas(src.width, src.height);
   c.getContext("2d").drawImage(src, 0, 0);
   return c;
@@ -53,7 +53,7 @@ export function layersFrom(source) {
 }
 
 // Opaque everywhere: with no strokes yet, the cutout is what shows.
-export function resetMask(mask) {
+function resetMask(mask) {
   const ctx = mask.getContext("2d");
   ctx.globalCompositeOperation = "source-over";
   ctx.fillStyle = "#fff";
@@ -174,6 +174,30 @@ export function pushOperation(history, before, after) {
   history.undo.push({ kind: "operation", before, after });
   if (history.undo.length > MAX_HISTORY) history.undo.shift();
   history.redo.length = 0;
+}
+
+// Let go of a layer stack and its history, all at once.
+//
+// A canvas holds its pixels until it is garbage collected, and WebKit — the
+// engine inside the iOS shell — caps the canvas memory one page may hold.
+// The studio stays mounted between photos, so a closed photo's stack, and
+// the two full-size canvases per operation in its history, sat there until a
+// collector got round to them. Zeroing a canvas frees its pixels now. Only
+// for a stack nothing will read again — which is safe to do whole, because
+// a history snapshot never shares a canvas with the live stack: snapshots
+// are clones, both ways.
+export function releaseLayers(layers, history) {
+  const canvases = layers
+    ? [layers.original, layers.cutout, layers.mask, layers.paint] : [];
+  for (const entry of [...(history?.undo || []), ...(history?.redo || [])]) {
+    if (entry.kind === "operation") {
+      canvases.push(entry.before.original, entry.before.cutout,
+                    entry.after.original, entry.after.cutout);
+    }
+  }
+  for (const c of canvases) {
+    if (c) { c.width = 0; c.height = 0; }
+  }
 }
 
 // Restore a snapshot into `layers`/`strokes` in place. Returns the strokes.

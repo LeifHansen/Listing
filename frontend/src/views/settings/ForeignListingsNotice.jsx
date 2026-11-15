@@ -10,7 +10,7 @@ import { useToast } from "@/components/ui/Toaster";
  * Connecting a second eBay account doesn't move the first account's listings
  * anywhere — records belong to the APP user, not the eBay one — so they stay
  * in the app looking exactly like listings of the account now connected. They
- * are excluded from every eBay call (see services/listing_sync.belongs_to),
+ * are excluded from every eBay call (see services/listing_sync.owns),
  * but "excluded" is invisible; without this notice they simply read as "the
  * new account somehow has my old items". */
 export function ForeignListingsNotice() {

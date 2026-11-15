@@ -14,9 +14,7 @@ save leaves "the next publish quietly falling through to a dry run" — but the
 READ underneath it had the same hole and nothing said so.
 
 The rule is the one this branch has applied to every other read: a failure is
-not an answer. These two raise now, with `*_best_effort` variants for the
-advisory callers where an unknown connection state genuinely cannot mislead
-(the same split `list_listings` / `list_listings_best_effort` already uses).
+not an answer. These two raise now.
 """
 from __future__ import annotations
 
@@ -76,16 +74,6 @@ def test_no_database_configured_is_still_none(dbmod, connected, monkeypatch):
     monkeypatch.setattr(dbmod, "_get_engine", lambda: None)
     assert dbmod.get_marketplace_account(connected, "etsy") is None
     assert dbmod.get_ebay_account(connected) is None
-
-
-def test_the_best_effort_readers_absorb_it_for_advisory_callers(
-        dbmod, connected, monkeypatch):
-    """Some callers only decorate a screen with the connection state. They opt
-    IN to None-on-failure by name, so the choice is visible at the call site
-    instead of being everyone's default."""
-    _break(dbmod, monkeypatch)
-    assert dbmod.get_marketplace_account_best_effort(connected, "etsy") is None
-    assert dbmod.get_ebay_account_best_effort(connected) is None
 
 
 def test_creds_for_does_not_answer_not_connected_on_a_failed_read(

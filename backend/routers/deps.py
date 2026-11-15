@@ -38,6 +38,23 @@ def uid(request: Request) -> Optional[str]:
     return user["id"] if user else None
 
 
+def signed_in_uid(request: Request) -> str:
+    """The signed-in seller's id, or 401 for an anonymous caller -- for the
+    routes that mean nothing without an account."""
+    user_id = uid(request)
+    if not user_id:
+        raise HTTPException(401, "Log in first.")
+    return user_id
+
+
+def signed_in_user(request: Request) -> dict:
+    """signed_in_uid, for a route that needs the whole user row."""
+    user = auth.current_user(request)
+    if not user:
+        raise HTTPException(401, "Log in first.")
+    return user
+
+
 def assert_session_owner(session_id: str, request: Request) -> None:
     """404 when this session's saved listing belongs to a DIFFERENT user.
     Session ids appear in media URLs and can leak, so possession of an id

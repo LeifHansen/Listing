@@ -217,7 +217,7 @@ def test_a_broken_prefs_read_does_not_allow_offers(monkeypatch):
     def boom(*_a, **_k):
         raise errors.StorageUnavailable("down")
     monkeypatch.setattr(listing_sync.db, "get_prefs", boom)
-    assert listing_sync.offers_enabled("someone") is False
+    assert listing_sync.offers_terms("someone")["enabled"] is False
 
 
 def test_a_broken_prefs_read_does_not_promote_anything(monkeypatch):

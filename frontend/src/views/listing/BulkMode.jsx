@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { api, postJson } from "@/lib/api";
 import { apiUrl } from "@/lib/platform";
 import { useApp } from "@/store";
-import { isDraft } from "@/lib/listingsView";
+import { isDraft, isLive } from "@/lib/listingsView";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { AIStatusCard } from "@/components/ui/AIStatus";
@@ -450,8 +450,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // than from a publish this screen happened to watch, so it still says so
   // after a reload — and so it counts the ones published from the grid below,
   // one card at a time, which is where publishing now happens.
-  const published = batchRows.filter(
-    (it) => it.status === "published" || it.status === "live");
+  const published = batchRows.filter(isLive);
   // Items the AI could not identify. These have no saved draft, so the grid
   // cannot show them and they get their own cards (see LostItemCard).
   const lost = items.filter(

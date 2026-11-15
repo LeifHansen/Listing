@@ -110,7 +110,11 @@ def _with_current_policies(uid: str, acct: dict, access_token: str) -> dict:
 def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
     """The check itself, run by the one caller that claimed it."""
     try:
-        discovered = ebay_auth.fetch_policies_and_location(access_token)
+        # One read of each list for the whole pass: the defaults and the ids
+        # that exist come out of the same answers (see ebay_auth._once).
+        memo: dict = {}
+        discovered = ebay_auth.fetch_policies_and_location(access_token,
+                                                           memo=memo)
         # Sync from whatever the connected eBay account actually has -- an id
         # that belongs to someone else is replaced, and an EMPTY slot is filled
         # from this account's own default.
@@ -124,7 +128,10 @@ def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
         # that kind -- which is exactly the case `absent` reports and the
         # publish checklist turns into an instruction the seller can act on.
         result = ebay_account.reconcile_account_settings(
-            access_token, acct, discovered, fill_blanks=True)
+            access_token, acct, discovered, fill_blanks=True,
+            policy_ids=lambda t: ebay_auth.policy_ids_on_account(t, memo=memo),
+            location_keys=lambda t: ebay_auth.location_keys_on_account(
+                t, memo=memo))
         changes, conclusive = result.changes, result.conclusive
         # This pass already asked eBay which policies the account has. Keep
         # the answer: it is the only thing that can vet the shipping policy id
@@ -153,7 +160,7 @@ def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
     # repair is half a repair.
     if ebay_account.settings_were_dropped(changes, acct):
         # 1. Label what is already here as the previous account's. Without it
-        #    listing_sync.belongs_to treats every unstamped record as this
+        #    listing_sync.owns treats every unstamped record as this
         #    account's, and syncs and revises keep operating on the PREVIOUS
         #    seller's item ids.
         marked = db.stamp_ebay_account(
@@ -626,6 +633,18 @@ def preflight_issues(uid: Optional[str], listing: Listing, mode: str) -> list[di
     return issues
 
 
+def _sentence(labels) -> str:
+    """Labels deduped, in order, joined as a sentence: "a, b and c"."""
+    seen, out = set(), []
+    for label in labels:
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else ", ".join(out[:-1]) + " and " + out[-1]
+
+
 def _label_list(names) -> str:
     """Field names as the words a seller uses, deduped, in a sentence.
 
@@ -633,15 +652,8 @@ def _label_list(names) -> str:
     package weight are "package weight" — so "the package weight and the
     package weight" has to be impossible.
     """
-    seen, out = set(), []
-    for name in names:
-        label = sync_merge.FIELD_LABELS.get(name, name.replace("_", " "))
-        if label not in seen:
-            seen.add(label)
-            out.append(label)
-    if not out:
-        return ""
-    return out[0] if len(out) == 1 else ", ".join(out[:-1]) + " and " + out[-1]
+    return _sentence(sync_merge.FIELD_LABELS.get(name, name.replace("_", " "))
+                     for name in names)
 
 
 def refusal_key(issues: Optional[list]) -> str:
@@ -733,16 +745,55 @@ def revise_message(conflicts: Optional[dict], relist: bool,
     held = [d["label"] for d in sync_merge.describe_conflicts(conflicts)]
     if not held:
         return "Your eBay listing has been updated." + moved + stayed
-    seen, names = set(), []
-    for label in held:  # the label map folds several fields onto one word
-        if label not in seen:
-            seen.add(label)
-            names.append(label)
-    listed = names[0] if len(names) == 1 else (
-        ", ".join(names[:-1]) + " and " + names[-1])
+    # Deduped: the label map folds several fields onto one word.
+    listed = _sentence(held)
     return (f"Your eBay listing has been updated — except the {listed}, which "
             f"you and eBay both changed. Choose which version to keep."
             + moved + stayed)
+
+
+def _not_ready(problems: list, mode: str) -> PublishOutcome:
+    """The checklist's answer: what to fix before eBay will accept it."""
+    message = (f"Not quite ready — {len(problems)} thing"
+               f"{'s' if len(problems) != 1 else ''} to fix "
+               "before eBay will accept it:")
+    return PublishOutcome(
+        ok=False, issues=problems, message=message,
+        raw={"dry_run": False, "error": True, "mode": mode,
+             "message": message, "issues": problems})
+
+
+def _refused(exc: Exception, issues: list) -> PublishOutcome:
+    """eBay's refusal of a create or revise -- or its silence -- as the
+    outcome.
+
+    Refused, or never answered for? ebay_errors already writes the right
+    sentence from this; the flag is how a CLIENT can tell without reading it.
+    Both places: the dataclass field for the fan-out's results map, and `raw`
+    because the legacy single-eBay body is returned verbatim and is what the
+    bulk queues read. See PublishOutcome.
+    """
+    unknown = bool(getattr(exc, "outcome_unknown", False))
+    return PublishOutcome(
+        ok=False, message=str(exc), issues=issues,
+        outcome_unknown=unknown,
+        raw={"dry_run": False, "error": True, "mode": "live",
+             "message": str(exc), "issues": issues,
+             **({"outcome_unknown": True} if unknown else {})})
+
+
+def _stamp_owner(listing: Listing, creds: Optional[dict]) -> None:
+    """The record's owner. Publishing through this account's creds IS the
+    ownership fact, so write it down — without this the record's
+    ebay_account stayed empty forever and the account-switch bookkeeping
+    (count_foreign_listings, release) could never see it. Fills a blank
+    only: a stamped record's history is not this call's to rewrite."""
+    if not listing.ebay_account:
+        listing.ebay_account = ((creds or {}).get("ebay_username")
+                                or "").strip()
+    if not listing.ebay_account_id:
+        listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
+                                   or "").strip()
 
 
 def _view_url(listing: Listing, listing_id: str) -> str:
@@ -974,16 +1025,7 @@ class EbayProvider:
                 log.info("%s blocked by preflight: session=%s issues=%d",
                          "relist" if relist else "revise", session_id,
                          len(problems))
-                return PublishOutcome(
-                    ok=False, issues=problems,
-                    message=f"Not quite ready — {len(problems)} thing"
-                            f"{'s' if len(problems) != 1 else ''} to fix "
-                            "before eBay will accept it:",
-                    raw={"dry_run": False, "error": True, "mode": mode,
-                         "message": f"Not quite ready — {len(problems)} thing"
-                                    f"{'s' if len(problems) != 1 else ''} to "
-                                    "fix before eBay will accept it:",
-                         "issues": problems})
+                return _not_ready(problems, mode)
             # Captured before the create overwrites it: a relist mints a new
             # item id, and the OLD one is what makes this relist's idempotency
             # key distinct from the publish that first listed the item.
@@ -1056,31 +1098,8 @@ class EbayProvider:
                     listing.ebay_listing_id or "?",
                     getattr(exc, "code", "") or "?", str(exc)[:200],
                     (getattr(exc, "detail", "") or "")[:200] or "(none)")
-                # Refused, or never answered for? ebay_errors already writes
-                # the right sentence from this; the flag is how a CLIENT can
-                # tell without reading it. Both places: the dataclass field
-                # for the fan-out's results map, and `raw` because the legacy
-                # single-eBay body is returned verbatim and is what the bulk
-                # queues read. See PublishOutcome.
-                unknown = bool(getattr(exc, "outcome_unknown", False))
-                return PublishOutcome(
-                    ok=False, message=str(exc), issues=issues,
-                    outcome_unknown=unknown,
-                    raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues,
-                         **({"outcome_unknown": True} if unknown else {})})
-            # The record's owner. Publishing through this account's creds IS
-            # the ownership fact, so write it down — without this the record's
-            # ebay_account stayed empty forever and the account-switch
-            # bookkeeping (count_foreign_listings, release) could never see
-            # it. Fills a blank only: a stamped record's history is not this
-            # call's to rewrite.
-            if not listing.ebay_account:
-                listing.ebay_account = ((creds or {}).get("ebay_username")
-                                        or "").strip()
-            if not listing.ebay_account_id:
-                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
-                                           or "").strip()
+                return _refused(exc, issues)
+            _stamp_owner(listing, creds)
             # eBay moved the listing to a live category, exactly as it can on
             # a create: store what it actually FILED. This has to happen
             # before the record is written below — set afterwards it would
@@ -1205,15 +1224,7 @@ class EbayProvider:
                                   user_id=ctx.uid)
                 log.info("publish blocked by preflight: session=%s issues=%d",
                          session_id, len(problems))
-                return PublishOutcome(
-                    ok=False, issues=problems,
-                    message=f"Not quite ready — {len(problems)} thing"
-                            f"{'s' if len(problems) != 1 else ''} to fix "
-                            "before eBay will accept it:",
-                    raw={"dry_run": False, "error": True, "mode": mode,
-                         "message": f"Not quite ready — {len(problems)} thing"
-                                    f"{'s' if len(problems) != 1 else ''} to fix before eBay will accept it:",
-                         "issues": problems})
+                return _not_ready(problems, mode)
         # Self-heal the ship-from location on a live publish: re-ensure it
         # from the saved ZIP so a location missing its country (eBay
         # 'Item.Country empty') gets repaired without the user re-saving
@@ -1270,29 +1281,12 @@ class EbayProvider:
                 # the record cannot point at, and the record above stays a
                 # draft precisely because we do not know. Saying "refused" to
                 # that seller is what produces the second one.
-                unknown = bool(getattr(exc, "outcome_unknown", False))
-                return PublishOutcome(
-                    ok=False, message=str(exc), issues=issues,
-                    outcome_unknown=unknown,
-                    raw={"dry_run": False, "error": True, "mode": "live",
-                         "message": str(exc), "issues": issues,
-                         **({"outcome_unknown": True} if unknown else {})})
+                return _refused(exc, issues)
             # Record the item id FIRST. Everything below is optional extra work
             # (photo bookkeeping, promotion) and none of it is worth risking the
             # one write that stops the next publish creating a second listing:
             # an id that never lands is indistinguishable from "never listed".
-            # The record's owner. Publishing through this account's creds IS
-            # the ownership fact, so write it down — without this the record's
-            # ebay_account stayed empty forever and the account-switch
-            # bookkeeping (count_foreign_listings, release) could never see
-            # it. Fills a blank only: a stamped record's history is not this
-            # call's to rewrite.
-            if not listing.ebay_account:
-                listing.ebay_account = ((creds or {}).get("ebay_username")
-                                        or "").strip()
-            if not listing.ebay_account_id:
-                listing.ebay_account_id = ((creds or {}).get("ebay_user_id")
-                                           or "").strip()
+            _stamp_owner(listing, creds)
             recorded = _record_published(session_id, listing.model_dump(),
                                          "published", ctx.uid)
             storage.save_listing(session_id, listing)
@@ -1445,7 +1439,7 @@ class EbayProvider:
 
     # --- buyer messages (Message API — limited release) -------------------
     #
-    # The five methods of marketplaces.messaging.MessagingProvider. Ids in and
+    # The five methods of marketplaces.messaging.MESSAGING_METHODS. Ids in and
     # out are RAW; the inbox adds the "ebay:" prefix. Everything delegates to
     # services.ebay_messages, which owns the FROM_MEMBERS filter that keeps
     # eBay's own system mail out of a P2P inbox.

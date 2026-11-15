@@ -14,7 +14,7 @@ import { CategorySuggestList } from "./CategorySuggestList";
    /api/category-suggestions endpoint as the editor's picker; choosing one
    hands {category_id, category_suggestion} to the parent, which owns
    persistence. */
-export function CategoryQuickPick({ listing, onPick, saving }) {
+function CategoryQuickPick({ listing, onPick, saving }) {
   const l = listing || {};
   const [open, setOpen] = useState(false);
   const [sugg, setSugg] = useState(null); // null | {loading} | {items} | {error}
@@ -91,6 +91,34 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
 }
 
 
+/* How a control on a draft card writes the SAVED draft — the category here,
+   the format (DraftFormatEdit) and the price (DraftPriceEdit) beside it.
+
+   The patch names the fields that changed and leaves everything else as
+   stored: the copy a card holds is a summary from the last /api/listings
+   load, and writing the whole of it back overwrites anything edited since
+   (see main.patch_listing). Then the cache is refreshed, because the card
+   reads what just changed — its Publish gate (no price, or an auction with
+   no starting bid, is blocked) and the condition list that hangs off the
+   category. `what` names the field in the error: "the category". */
+export function useDraftPatch(item, what) {
+  const { loadListings } = useApp();
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const save = async (patch) => {
+    setSaving(true);
+    try {
+      await patchJson(`/api/listings/${item.id}`, patch);
+      await loadListings({ quiet: true });
+    } catch (e) {
+      toast(`Couldn't save ${what}: ${e.message}`, { kind: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  return { saving, save };
+}
+
 /* The same control, wired to a SAVED listing — display, pick, patch, refresh.
 
    A wrong category is the AI misfire that costs most once it is published,
@@ -100,25 +128,7 @@ export function CategoryQuickPick({ listing, onPick, saving }) {
    manager. One component, so they cannot drift.
 */
 export function DraftCategoryEdit({ item, className }) {
-  const { loadListings } = useApp();
-  const { toast } = useToast();
-  const [saving, setSaving] = useState(false);
-  const save = async (patch) => {
-    setSaving(true);
-    try {
-      // The patch names the two category fields and leaves everything else
-      // as stored — a card must never write back a whole listing it only
-      // holds a summary of.
-      await patchJson(`/api/listings/${item.id}`, patch);
-      // Refresh the cache so the card (and its Publish gate, and the
-      // condition list that hangs off the category) sees the change.
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't save the category: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { saving, save } = useDraftPatch(item, "the category");
   return (
     <div className={className}>
       <CategoryQuickPick listing={item.listing} onPick={save} saving={saving} />

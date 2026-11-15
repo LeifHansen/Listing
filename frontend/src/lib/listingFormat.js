@@ -87,7 +87,7 @@ export function formatChipLabel(value) {
   return FORMAT_CHIP_LABELS[normalizeFormat(value)];
 }
 
-export function durationLabel(value) {
+function durationLabel(value) {
   return DURATION_DAYS[String(value || "").trim().toUpperCase()] || "7 days";
 }
 

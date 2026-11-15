@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -158,13 +159,6 @@ def video_path(session_id: str) -> Path:
     as optimized_path is to optimized_dir: a GET must never be a disk write,
     and re-creating empty dirs for purged sessions undoes the orphan sweep."""
     return session_dir(session_id) / VIDEO_SUBDIR
-
-
-def list_videos(session_id: str) -> list[str]:
-    d = video_path(session_id)  # read-only — never mkdir on a lookup
-    if not d.is_dir():
-        return []
-    return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
 
 
 def history_dir(session_id: str) -> Path:
@@ -444,6 +438,26 @@ def earliest_snapshot(session_id: str, name: str) -> Optional[Path]:
     return min(stamped)[1] if stamped else None
 
 
+def _prune_older(directory: Path, cutoff: float):
+    """Delete each file directly inside `directory` last modified at or
+    before `cutoff`, yielding its size as it goes.
+
+    The walk the three prune_* passes below share. A file that will not stat
+    or unlink is skipped and the rest are still pruned; a directory that
+    will not list raises, and the caller decides whether that ends its pass.
+    """
+    if not directory.is_dir():
+        return
+    for p in directory.iterdir():
+        try:
+            st = p.stat()
+            if stat.S_ISREG(st.st_mode) and st.st_mtime <= cutoff:
+                p.unlink(missing_ok=True)
+                yield st.st_size
+        except Exception:  # noqa: BLE001 - keep pruning the rest
+            continue
+
+
 def prune_originals(max_age_seconds: int) -> int:
     """Delete source uploads (session original/ dirs) and the as-shot copies
     beside them, older than the cutoff.
@@ -483,15 +497,9 @@ def prune_originals(max_age_seconds: int) -> int:
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
             for sub in ("original", "as_shot", "vision"):
-                old_dir = d / sub
                 try:
-                    if not old_dir.is_dir():
-                        continue
-                    for p in old_dir.iterdir():
-                        if p.is_file() and p.stat().st_mtime <= cutoff:
-                            size = p.stat().st_size
-                            p.unlink(missing_ok=True)
-                            freed += size
+                    for size in _prune_older(d / sub, cutoff):
+                        freed += size
                 except Exception:  # noqa: BLE001 - keep pruning the rest
                     continue
     except Exception as exc:  # noqa: BLE001
@@ -510,15 +518,9 @@ def prune_history(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            hist = d / "history"
             try:
-                if not hist.is_dir():
-                    continue
-                for p in hist.iterdir():
-                    if p.is_file() and p.stat().st_mtime <= cutoff:
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
+                for size in _prune_older(d / "history", cutoff):
+                    freed += size
             except Exception:  # noqa: BLE001
                 continue
     except Exception as exc:  # noqa: BLE001
@@ -536,15 +538,8 @@ def prune_exports(max_age_seconds: int) -> int:
         base = config.EXPORTS_DIR
         if not base.exists():
             return 0
-        cutoff = time.time() - max_age_seconds
-        for p in base.iterdir():
-            try:
-                if p.is_file() and p.stat().st_mtime <= cutoff:
-                    size = p.stat().st_size
-                    p.unlink(missing_ok=True)
-                    freed += size
-            except Exception:  # noqa: BLE001 - keep pruning the rest
-                continue
+        for size in _prune_older(base, time.time() - max_age_seconds):
+            freed += size
     except Exception as exc:  # noqa: BLE001
         log.warning(f"storage: prune_exports failed: {exc}")
     return freed

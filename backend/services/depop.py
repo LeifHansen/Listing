@@ -14,6 +14,7 @@ import httpx
 
 from .. import config
 from ..config import log
+from .ebay import NEVER_SENT
 
 
 class DepopError(ValueError):
@@ -43,14 +44,10 @@ class UnknownOutcome(DepopError):
     outcome_unknown = True
 
 
-# Transport failures that prove the request never reached Depop. Everything
-# else -- including an exception type nobody here anticipated -- is unknown,
-# the same asymmetry the eBay and Etsy clients use.
-_NEVER_SENT = (
-    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
-    httpx.UnsupportedProtocol, httpx.InvalidURL,
-)
-
+# Transport failures that prove the request never reached Depop are
+# ebay.NEVER_SENT. Everything else -- including an exception type nobody here
+# anticipated -- is unknown, the same asymmetry the eBay and Etsy clients use.
+#
 # The methods that can change something over there. `_request` is the single
 # choke point for every Depop call and already takes the method, so this needs
 # no table of call names and cannot go stale as calls are added.
@@ -96,7 +93,7 @@ def _request(method: str, path: str, access_token: str, *,
             headers={"Authorization": f"Bearer {access_token}",
                      "Accept": "application/json"},
             json=json_body, timeout=timeout)
-    except _NEVER_SENT as exc:
+    except NEVER_SENT as exc:
         # No connection, so Depop never saw this. A definite failure even for
         # a write.
         raise _unreachable(method, path, exc) from exc

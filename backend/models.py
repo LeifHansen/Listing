@@ -48,10 +48,10 @@ MAX_CONDITION_DESCRIPTORS = 20
 #
 # The plumbing either side of this number carries a list anyway (Listing.videos
 # below, the repeatable <VideoID> the Trading schema takes), so raising the
-# ceiling the day eBay does is this constant and the one beside it in
-# services/ebay_video.py. Held here as well because models.py is the layer with
-# no eBay dependency -- the route and the editor both need the number, and
-# neither should have to import an httpx-backed module to learn it.
+# ceiling the day eBay does is this one constant (services/ebay_video.py reads
+# it too). It lives here because models.py is the layer with no eBay
+# dependency -- the route and the editor both need the number, and neither
+# should have to import an httpx-backed module to learn it.
 MAX_VIDEOS = 1
 
 # How a listing sells. FIXED_PRICE is Buy It Now (the default and the great

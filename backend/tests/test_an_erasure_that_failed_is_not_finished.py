@@ -153,3 +153,44 @@ def test_the_erasure_paths_use_the_strict_one():
         assert call in src, (
             f"{call!r} is not wired to the strict purge any more — an erasure "
             "that fails will be recorded as done")
+
+
+class _RefusingBucket:
+    """Answers the bulk delete -- and refuses one key in it, the way S3 and
+    R2 report per-object failures under Quiet: only in `Errors`."""
+
+    def __init__(self):
+        self.pages = [[{"Key": "a"}, {"Key": "b"}], [{"Key": "c"}]]
+        self.deleted: list[str] = []
+
+    def get_paginator(self, _name):
+        pages = self.pages
+
+        class P:
+            def paginate(self, **_k):
+                return [{"Contents": p} for p in pages]
+        return P()
+
+    def delete_objects(self, Delete, **_k):
+        keys = [o["Key"] for o in Delete["Objects"]]
+        self.deleted += [k for k in keys if k != "b"]
+        if "b" in keys:
+            return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "no"}]}
+        return {}
+
+
+def test_a_key_the_bucket_refused_keeps_the_erasure_unfinished(monkeypatch):
+    """A delete that answered but refused some keys used to count every key
+    as removed, so the queue dropped the debt with a photo still in R2."""
+    bucket = _RefusingBucket()
+    monkeypatch.setattr(objstore, "_get_client", lambda: bucket)
+    monkeypatch.setattr(objstore.config, "R2_BUCKET", "test-bucket")
+    with pytest.raises(objstore.ObjectStoreUnavailable, match="b: AccessDenied"):
+        objstore.delete_prefix_strict("sessions/abc/")
+    assert bucket.deleted == ["a", "c"], "the other pages are still attempted"
+
+
+def test_the_best_effort_delete_counts_only_what_went(monkeypatch):
+    monkeypatch.setattr(objstore, "_get_client", lambda: _RefusingBucket())
+    monkeypatch.setattr(objstore.config, "R2_BUCKET", "test-bucket")
+    assert objstore.delete_prefix("sessions/abc/") == 2

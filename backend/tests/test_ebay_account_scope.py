@@ -91,26 +91,26 @@ def wired(monkeypatch):
     return run
 
 
-# --- belongs_to -------------------------------------------------------------
+# --- owns, for a caller holding only a username ----------------------------
 
 def test_a_record_from_another_account_is_out_of_scope():
-    assert not listing_sync.belongs_to({"ebay_account": "old-seller"}, "new-seller")
+    assert not listing_sync.owns({"ebay_account": "old-seller"}, "new-seller")
 
 
 def test_a_record_from_this_account_is_in_scope():
-    assert listing_sync.belongs_to({"ebay_account": "new-seller"}, "new-seller")
+    assert listing_sync.owns({"ebay_account": "new-seller"}, "new-seller")
 
 
 def test_an_unstamped_record_still_counts_as_this_account():
     """Records predate the field; the only account they can belong to is the
     one that was connected when they were written."""
-    assert listing_sync.belongs_to({"ebay_account": ""}, "new-seller")
-    assert listing_sync.belongs_to({}, "new-seller")
+    assert listing_sync.owns({"ebay_account": ""}, "new-seller")
+    assert listing_sync.owns({}, "new-seller")
 
 
 def test_no_connected_account_scopes_nothing_out():
     """An unreadable account name must not quietly exclude the whole store."""
-    assert listing_sync.belongs_to({"ebay_account": "old-seller"}, "")
+    assert listing_sync.owns({"ebay_account": "old-seller"}, "")
 
 
 # --- an owner we could not name ---------------------------------------------
@@ -119,7 +119,7 @@ def test_an_unnamed_owner_is_still_scoped_out_of_reads():
     """The sentinel exists to stop the sweeps re-confirming those listings
     under whoever is connected now; that job is unchanged."""
     unknown = {"ebay_account": listing_sync.UNKNOWN_ACCOUNT}
-    assert not listing_sync.belongs_to(unknown, "new-seller")
+    assert not listing_sync.owns(unknown, "new-seller")
 
 
 def test_an_unnamed_owner_never_reads_as_a_rival_account():

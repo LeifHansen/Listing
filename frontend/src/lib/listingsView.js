@@ -231,7 +231,7 @@ export function orderListings(items, metricsById = {}) {
    selling. The server decides (listing_sync.ENDED_GRACE_DAYS) and publishes
    the number on /api/health; this is only what to say before that answer has
    arrived, so a dialog never promises a month the sweep does not measure. */
-export const DEFAULT_ENDED_GRACE_DAYS = 30;
+const DEFAULT_ENDED_GRACE_DAYS = 30;
 
 export function endedGraceDays(health) {
   const days = Number(health?.ended_grace_days);

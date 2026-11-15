@@ -86,6 +86,22 @@ describe("the selling format in the editor", () => {
     expect(sets).toContainEqual(["listing_format", "AUCTION"]);
   });
 
+  // The heading used to be a <label>, and a label hands its clicks to its
+  // first control: tapping "Selling format", or the ⓘ beside it to read
+  // what the formats mean, quietly switched the listing to Buy It Now.
+  it("changes nothing when the heading or its ⓘ is tapped", () => {
+    const sets = [];
+    render(stub(sets, { listing_format: "AUCTION_BIN" }));
+    expect(formatButtons().some((b) => b.closest("label"))).toBe(false);
+    const heading = [...host.querySelectorAll("span")]
+      .find((el) => el.firstChild?.textContent === "Selling format");
+    act(() => heading.click());
+    act(() => heading.querySelector("[aria-label]").click());
+    expect(sets).toEqual([]);
+    expect(host.querySelector('[role="group"][aria-label="Selling format"]'))
+      .toBe(formatButtons()[0].parentElement);
+  });
+
   // The whole point of "Both" being a word rather than "Auction + BIN".
   it("says what each format means", () => {
     render(stub([], { listing_format: "AUCTION_BIN" }));

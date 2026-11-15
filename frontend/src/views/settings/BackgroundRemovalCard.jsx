@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { TagPill } from "@/components/ui/badges";
 import { useToast } from "@/components/ui/Toaster";
 
-export const PHOTOROOM_URL = "https://www.photoroom.com/api";
+const PHOTOROOM_URL = "https://www.photoroom.com/api";
 
 // Background removal — Photoroom, on the app's own account. Photoroom has no
 // way for an app to create an account for each seller, so instead there is

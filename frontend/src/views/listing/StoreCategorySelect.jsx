@@ -21,7 +21,7 @@ import { Field, Select } from "@/components/ui/fields";
  * says so rather than hiding — the same distinction lib/priceLookup draws.
  */
 
-export function useStoreCategories() {
+function useStoreCategories() {
   const { ebay, storeCategoriesData, setStoreCategoriesData } = useApp();
   useEffect(() => {
     if (!ebay.connected || storeCategoriesData) return;
@@ -32,7 +32,6 @@ export function useStoreCategories() {
   return {
     connected: ebay.connected,
     categories: storeCategoriesData?.categories || [],
-    hasStore: !!storeCategoriesData?.store,
     // undefined while the first request is still out — which is not the same
     // as "we asked and could not reach eBay".
     checked: storeCategoriesData ? storeCategoriesData.checked !== false : undefined,

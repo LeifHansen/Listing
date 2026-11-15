@@ -10,7 +10,7 @@ What was not correct was writing the empty string down. `""` is not a name; it
 is "we couldn't find out". Stored, it takes out the two things that depend on
 knowing which eBay account a record belongs to:
 
-  - `listing_sync.belongs_to` scopes nothing, so every previous account's
+  - `listing_sync.owns` scopes nothing, so every previous account's
     listings read as the connected seller's again — the exact regression #176
     was written to fix.
   - `db.count_foreign_listings` counts every labelled record as foreign, so a

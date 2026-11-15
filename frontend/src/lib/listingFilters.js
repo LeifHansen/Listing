@@ -146,7 +146,7 @@ export function normalizeFilters(raw) {
 /* Which dimensions are actually narrowing anything. The price boxes count as
    ONE — they are one question with two ends, and a "2 filters" badge for a
    single range reads as a miscount. */
-export function activeFilterKeys(filters) {
+function activeFilterKeys(filters) {
   const f = normalizeFilters(filters);
   const on = [];
   if (f.format.length) on.push("format");

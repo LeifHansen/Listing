@@ -70,9 +70,9 @@ SAFE_TO_REPEAT = {
         "mints another; nothing of the seller's changes.",
     "backend.etsy_auth._token_request": "same as ebay_auth._token_request.",
     "backend.depop_auth._token_request": "same as ebay_auth._token_request.",
-    "backend.services.ebay_notify._app_token":
-        "application token fetch — no seller state.",
-    "backend.services.taxonomy._app_token": "same as ebay_notify._app_token.",
+    "backend.services.taxonomy._app_token":
+        "application token fetch — no seller state. ebay_notify and pricing "
+        "use this one too.",
     "backend.ebay_auth._create_policy":
         "creates a business policy, but every caller looks the account up "
         "FIRST and adopts an existing one (ensure_payment_policy and friends), "

@@ -125,8 +125,8 @@ def test_a_240_ebay_explained_is_not_a_placeholder():
 def test_240_is_recognised_from_the_wording_alone():
     """The message reaches ebay_errors as plain text on some paths, with no
     error id attached."""
-    issues = ebay_errors.from_response(E240)
-    assert issues[0]["target"] == "account"
+    issue = ebay_errors.explain({"message": E240})
+    assert issue["target"] == "account"
 
 
 def test_from_trading_error_carries_ebays_detail():

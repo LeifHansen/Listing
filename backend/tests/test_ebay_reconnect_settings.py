@@ -167,9 +167,18 @@ def test_no_policy_id_asks_nothing(lookup):
 # the repair itself is reconcile_account_settings, covered above.
 
 
+def _due(uid, now=None):
+    """Would the next publish re-check this account? Asked through the gate
+    the publish itself takes (claim_verify), and released straight away."""
+    if ebay_account.claim_verify(uid, now=now):
+        ebay_account.release_verify(uid)
+        return True
+    return False
+
+
 def test_a_fresh_account_is_checked_immediately():
     ebay_account.forget_verified("u-fresh")
-    assert ebay_account.verify_due("u-fresh", now=1000.0) is True
+    assert _due("u-fresh", now=1000.0) is True
 
 
 def test_a_recent_check_is_not_repeated_on_every_publish():
@@ -177,15 +186,15 @@ def test_a_recent_check_is_not_repeated_on_every_publish():
     repeatedly -- that is the whole reason it is time-gated."""
     ebay_account.forget_verified("u-hot")
     ebay_account.note_verified("u-hot", now=1000.0)
-    assert ebay_account.verify_due("u-hot", now=1000.0 + 1) is False
-    assert ebay_account.verify_due(
+    assert _due("u-hot", now=1000.0 + 1) is False
+    assert _due(
         "u-hot", now=1000.0 + ebay_account.VERIFY_TTL - 1) is False
 
 
 def test_the_check_comes_back_round():
     ebay_account.forget_verified("u-old")
     ebay_account.note_verified("u-old", now=1000.0)
-    assert ebay_account.verify_due(
+    assert _due(
         "u-old", now=1000.0 + ebay_account.VERIFY_TTL) is True
 
 
@@ -194,16 +203,16 @@ def test_disconnecting_forgets_the_previous_account_passed():
     pass is exactly how another account's ids survive a switch."""
     ebay_account.forget_verified("u-switch")
     ebay_account.note_verified("u-switch", now=1000.0)
-    assert ebay_account.verify_due("u-switch", now=1000.0 + 1) is False
+    assert _due("u-switch", now=1000.0 + 1) is False
     ebay_account.forget_verified("u-switch")
-    assert ebay_account.verify_due("u-switch", now=1000.0 + 1) is True
+    assert _due("u-switch", now=1000.0 + 1) is True
 
 
 def test_one_users_check_says_nothing_about_another():
     ebay_account.forget_verified()
     ebay_account.note_verified("u-a", now=1000.0)
-    assert ebay_account.verify_due("u-a", now=1000.0 + 1) is False
-    assert ebay_account.verify_due("u-b", now=1000.0 + 1) is True
+    assert _due("u-a", now=1000.0 + 1) is False
+    assert _due("u-b", now=1000.0 + 1) is True
 
 
 # --- the repair must not be suppressed by the outage that caused it ----------

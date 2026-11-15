@@ -118,32 +118,6 @@ def test_only_a_upc_is_handed_to_ebays_product_search():
     assert barcodes.ebay_gtin("036000291453") == ""
 
 
-def test_codes_are_picked_out_of_a_tag_transcript():
-    """What the zoom pass hands back is prose: sizes, RN numbers, care
-    symbols and prices around the digits. The check digit is what separates
-    the code from the rest, so nothing has to parse the sentence."""
-    transcript = (
-        "NECK LABEL: UNIQLO / ユニクロ  SIZE L\n"
-        "CARE: 100% COTTON  MADE IN CHINA  中国製\n"
-        "RN 12345   STYLE 441-A   $4.99 price sticker\n"
-        f"BARCODE UPC-A: 0 36000 29145 2\n"
-        f"Second sticker: {EAN_13}\n"
-        "Blurred one: 036000291453\n"
-        "ISBN 978-0-306-40615-7 on the back cover\n"
-    )
-    found = barcodes.find(transcript)
-    assert [f["value"] for f in found] == [UPC_A, EAN_13, ISBN_13]
-    assert [f["kind"] for f in found] == ["UPC", "EAN", "ISBN"]
-
-
-def test_two_codes_on_one_line_do_not_merge_into_a_third_thing():
-    """A single greedy run over "036000291452 5901234123457" is 24 digits,
-    which is no code at all — and swallowing the first one is how a verified
-    UPC goes missing."""
-    assert [f["value"] for f in barcodes.find(f"{UPC_A} {EAN_13}")] \
-        == [UPC_A, EAN_13]
-
-
 def test_a_code_shaped_value_is_recognised_even_when_it_fails():
     """The guard's other half. Twelve digits in a UPC box are a UPC whatever
     the model called them; if they do not check out they are a misread, not a
@@ -388,3 +362,14 @@ def test_a_upc_prices_the_product_instead_of_the_words_in_the_title(monkeypatch)
     assert seen.get("q") == "vintage teacup"
     assert "gtin" not in seen
     assert out["label"] == "Live asking prices on eBay"
+
+
+def test_an_identifiers_answer_that_is_not_a_list_never_fails_the_draft():
+    """The model is asked for a list. A single object where the list should
+    be is still that one identifier; a number, a string or null is none --
+    and neither may raise, because it runs after the photos were paid for."""
+    one = barcodes.from_scan({"value": "9780306406157", "type": "isbn"})
+    assert [e["value"] for e in one] == ["9780306406157"]
+    assert one[0]["verified"] is True
+    for raw in (5, "9780306406157", None, True, 1.5):
+        assert barcodes.from_scan(raw) == []

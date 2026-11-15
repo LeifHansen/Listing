@@ -225,9 +225,10 @@ def snapshot(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
         owner = job.get("_uid")
         if owner and owner != uid:
             return None
-        copy = json.loads(json.dumps(job))  # deep copy, safe to hand out
-    # Every underscore key is internal bookkeeping (_uid, _rev), not API.
-    return {k: v for k, v in copy.items() if not k.startswith("_")}
+        # Every underscore key is internal bookkeeping (_uid, _rev), not API,
+        # so it is left out before the copy rather than copied and dropped.
+        public = {k: v for k, v in job.items() if not k.startswith("_")}
+        return json.loads(json.dumps(public))  # deep copy, safe to hand out
 
 
 def internal(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
@@ -385,6 +386,14 @@ def _record(job: dict) -> dict:
     return {k: job[k] for k in MIRROR_FIELDS if k in job}
 
 
+def _progress(record: dict, unit: str) -> str:
+    """" (3 of 10 <unit>)" from a mirrored record's counters, or "" when it
+    never recorded a total."""
+    total = record.get("total_items") or 0
+    current = record.get("current") or 0
+    return f" ({min(current, total)} of {total} {unit})" if total else ""
+
+
 def interrupted_message(record: dict) -> str:
     """Why a mirrored job that was still running has no result: the process it
     ran in went away. Names the phase and count it reached, so the answer is
@@ -392,9 +401,7 @@ def interrupted_message(record: dict) -> str:
     if record.get("kind") == "ebay-import":
         # The store mirror, not a photo batch: nothing was drafted, and what it
         # did import is already in Listings.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} listings in)" if total else ""
+        where = _progress(record, "listings in")
         return ("The server restarted while mirroring your eBay store"
                 f"{where}, so the sync stopped early. Whatever it imported is "
                 "in Listings — run Sync with eBay again to finish.")
@@ -404,9 +411,7 @@ def interrupted_message(record: dict) -> str:
         return ("The server restarted before the AI finished this item, so no "
                 "draft was saved. Please try again.")
     if record.get("kind") == "crosspost-etsy":
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} sent)" if total else ""
+        where = _progress(record, "sent")
         return ("The server restarted while crossposting to Etsy"
                 f"{where}, so the run stopped early. What it sent is on Etsy — "
                 "check your shop's drafts for the one it was sending, then run "
@@ -416,9 +421,7 @@ def interrupted_message(record: dict) -> str:
         # pushed to eBay) as it finishes, so an interrupted run leaves real
         # work behind — and pointing the seller at Drafts, as the photo-batch
         # wording below does, would send them somewhere their listings aren't.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while filling in your listings"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "filled in — run it again for the rest.")
@@ -426,9 +429,7 @@ def interrupted_message(record: dict) -> str:
         # The Manage tab's "Lower prices…". Each cut reaches eBay as it is
         # made, so the ones that finished are not to be cut again: the seller
         # ticks the rest and runs it for those.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "lowered on eBay — tick the rest and run it again for those.")
@@ -436,9 +437,7 @@ def interrupted_message(record: dict) -> str:
         # "Send offers…". Each offer is stamped on its listing as it goes out,
         # which takes it out of the group — so running it again reaches only
         # the listings this run never got to, never the same watchers twice.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while sending your offers"
                 f"{where}, so the run stopped early. The offers it sent are "
                 "with your buyers — run it again for the rest.")
@@ -505,7 +504,11 @@ def adopt_mirrors() -> list[dict]:
     safe to re-derive on the next restart — and what stops this pass from
     rewriting a job that some other process is still working on."""
     try:
-        files = sorted(_mirror_dir().glob("*.json"), key=lambda p: p.stat().st_mtime)
+        # (mtime, path), oldest first. Each file is stat'ed once, here: the
+        # age split below reuses it rather than asking the disk again.
+        files = sorted(((p.stat().st_mtime, p)
+                        for p in _mirror_dir().glob("*.json")),
+                       key=lambda pair: pair[0])
         # Half-written mirrors from the crash we're recovering from: os.replace
         # never got to rename them, and nothing else ever will.
         strays = list(_mirror_dir().glob("*.tmp"))
@@ -513,8 +516,9 @@ def adopt_mirrors() -> list[dict]:
         log.debug("jobstore: no job mirrors to load (%s)", exc)
         return []
     cutoff = time.time() - MIRROR_TTL
-    fresh = [p for p in files if p.stat().st_mtime > cutoff]
-    for path in strays + [p for p in files if p not in fresh] + fresh[:-MIRROR_MAX]:
+    fresh = [p for mtime, p in files if mtime > cutoff]
+    stale = [p for mtime, p in files if mtime <= cutoff]
+    for path in strays + stale + fresh[:-MIRROR_MAX]:
         path.unlink(missing_ok=True)
     interrupted: list[dict] = []
     for path in fresh[-JOBS_MAX:]:

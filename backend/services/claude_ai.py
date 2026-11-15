@@ -737,17 +737,8 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
     content: list[dict] = []
     for p in image_paths[:8]:  # cap images per request
         content.append(_image_block(p))
-    content.append(
-        {
-            "type": "text",
-            "text": (
-                "These are the product photos for one listing. Draft it."
-                + _PRICING_STRATEGY_HINTS.get(strategy, "")
-                + identify_notes_block(notes)
-                + item_notes_block(item_notes)
-            ),
-        }
-    )
+    content.append({"type": "text",
+                    "text": _identify_ask(strategy, notes, item_notes)})
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
@@ -768,7 +759,25 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
         raise RuntimeError("the AI response was too long and got cut off; "
                            "try again or use fewer photos")
     text = "".join(b.text for b in resp.content if b.type == "text")
-    data = _extract_json(text)
+    return _identify_result(_extract_json(text), image_names)
+
+
+def _identify_ask(strategy: str = "", notes: str = "",
+                  item_notes: str = "") -> str:
+    """The text under the photos on an identify call, on either backend: the
+    ask, the seller's pricing strategy and the seller's own notes. All of it
+    changes per upload, which is why it rides the user turn and never the
+    cached system prefix."""
+    return ("These are the product photos for one listing. Draft it."
+            + _PRICING_STRATEGY_HINTS.get(strategy, "")
+            + identify_notes_block(notes)
+            + item_notes_block(item_notes))
+
+
+def _identify_result(data: dict, image_names: list[str]) -> IdentifyResult:
+    """The model's identify answer as an IdentifyResult, whichever backend
+    wrote it — the two draft against one schema, so they parse through one
+    path."""
     listing = _to_listing(data, image_names)
     # eBay charges extra for subtitles - never auto-fill one; the seller can
     # add it in the editor if it's worth the fee. (refine() keeps whatever
@@ -1592,9 +1601,6 @@ def refine(listing: Listing, prompt: str) -> Listing:
 # The price, the specifics, the condition and the category are the facts the
 # seller already sold this item under, and a relist that moved any of them
 # would be a different listing rather than the same one with fresh words.
-FRESH_COPY_FIELDS = ("title", "description")
-
-
 def fresh_copy(listing: Listing) -> dict:
     """A new title and description for a listing that is being relisted.
 
@@ -2470,16 +2476,6 @@ def fill_missing_aspects(image_paths: list[Path], listing: Listing,
     text = "".join(b.text for b in resp.content if b.type == "text")
     return _validate_specifics(_extract_json(text), named)
 
-# ---------------------------------------------------------------------------
-# Maker / manufacturer identification — a double-layer check.
-#
-# The generic identify pass rarely commits to a maker (it's told never to
-# guess), so Brand/Maker/Manufacturer often ship empty. This dedicated pass
-# behaves like a reverse-image lookup: layer 1 HUNTS for maker evidence in the
-# photos and names a candidate; layer 2 independently tries to KNOCK IT DOWN.
-# Only a candidate that survives both layers is written to the listing —
-# accuracy over coverage, since a wrong maker is worse than a blank one.
-# ---------------------------------------------------------------------------
 
 # --- research: look the item UP, instead of remembering it ------------------
 #
@@ -2573,6 +2569,51 @@ def research_item(image_paths: list[Path], listing: Listing,
     return _research_item_claude(image_paths, listing, observations=observations)
 
 
+def _research_context(listing: Listing, observations: str = "",
+                      ask: str = "") -> str:
+    """What the research pass is told about the draft it is checking, ending
+    in the schema — the same words on either backend. `ask` is the backend's
+    own sentence about HOW to look it up, and goes just before the schema."""
+    specifics = "; ".join(
+        f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
+        if (s.value or "").strip())
+    return (
+        "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
+        "lookup of any kind. Check it.\n\n"
+        f"Drafted title: {listing.title}\n"
+        f"Drafted brand: {listing.brand or '(none)'}\n"
+        f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
+        f"Category: {listing.category_suggestion or '(unknown)'}\n"
+        f"Specifics: {specifics or '(none)'}\n"
+        f"What the first pass saw: {(observations or '')[:600]}\n\n"
+        "Establish what this actually is and what it is actually worth."
+        + ask + _RESEARCH_SCHEMA)
+
+
+def _with_web_search(client, content: list[dict]):
+    """One user turn under the server-side web-search tool, followed to the
+    end of its loop. The research pass and the art lookup both ask this way,
+    and both are bounded the same: RESEARCH_MAX_SEARCHES searches, and
+    _RESEARCH_MAX_RESUMES resumes of a paused turn."""
+    messages = [{"role": "user", "content": content}]
+    tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
+              "max_uses": RESEARCH_MAX_SEARCHES}]
+    resp = client.messages.create(
+        model=config.VISION_MODEL, max_tokens=4096,
+        tools=tools, messages=messages)
+    # A server-tool loop that hits its iteration limit comes back paused,
+    # not finished. Resending the turn resumes it; the API needs no extra
+    # user message and adding one would derail it.
+    resumes = 0
+    while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
+        resumes += 1
+        messages = messages + [{"role": "assistant", "content": resp.content}]
+        resp = client.messages.create(
+            model=config.VISION_MODEL, max_tokens=4096,
+            tools=tools, messages=messages)
+    return resp
+
+
 def _research_item_claude(image_paths: list[Path], listing: Listing,
                           observations: str = "") -> Optional[dict]:
     """The web-search research pass on Claude's own server-side search tool."""
@@ -2581,37 +2622,9 @@ def _research_item_claude(image_paths: list[Path], listing: Listing,
     try:
         client = _client()
         imgs = [_image_block(p) for p in image_paths[:4]]
-        specifics = "; ".join(
-            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
-            if (s.value or "").strip())
-        context = (
-            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with no "
-            "lookup of any kind. Check it.\n\n"
-            f"Drafted title: {listing.title}\n"
-            f"Drafted brand: {listing.brand or '(none)'}\n"
-            f"Drafted price: {'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
-            f"Category: {listing.category_suggestion or '(unknown)'}\n"
-            f"Specifics: {specifics or '(none)'}\n"
-            f"What the first pass saw: {(observations or '')[:600]}\n\n"
-            "Establish what this actually is and what it is actually worth."
-            + _RESEARCH_SCHEMA)
-        messages = [{"role": "user", "content": imgs + [{"type": "text",
-                                                         "text": context}]}]
-        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
-                  "max_uses": RESEARCH_MAX_SEARCHES}]
-        resp = client.messages.create(
-            model=config.VISION_MODEL, max_tokens=4096,
-            tools=tools, messages=messages)
-        # A server-tool loop that hits its iteration limit comes back paused,
-        # not finished. Resending the turn resumes it; the API needs no extra
-        # user message and adding one would derail it.
-        resumes = 0
-        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
-            resumes += 1
-            messages = messages + [{"role": "assistant", "content": resp.content}]
-            resp = client.messages.create(
-                model=config.VISION_MODEL, max_tokens=4096,
-                tools=tools, messages=messages)
+        context = _research_context(listing, observations)
+        resp = _with_web_search(client, imgs + [{"type": "text",
+                                                 "text": context}])
         _log_usage("research", resp)
         text = "".join(b.text for b in resp.content if b.type == "text")
         data = _extract_json(text)
@@ -2786,20 +2799,8 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
                else "\nNo reverse image search was available for this photo.\n")
             + knowledge.block(references)
             + _ART_SCHEMA)
-        messages = [{"role": "user", "content": imgs + [{"type": "text",
-                                                         "text": context}]}]
-        tools = [{"type": WEB_SEARCH_TOOL, "name": "web_search",
-                  "max_uses": RESEARCH_MAX_SEARCHES}]
-        resp = client.messages.create(
-            model=config.VISION_MODEL, max_tokens=4096,
-            tools=tools, messages=messages)
-        resumes = 0
-        while resp.stop_reason == "pause_turn" and resumes < _RESEARCH_MAX_RESUMES:
-            resumes += 1
-            messages = messages + [{"role": "assistant", "content": resp.content}]
-            resp = client.messages.create(
-                model=config.VISION_MODEL, max_tokens=4096,
-                tools=tools, messages=messages)
+        resp = _with_web_search(client, imgs + [{"type": "text",
+                                                 "text": context}])
         _log_usage("artwork", resp)
         text = "".join(b.text for b in resp.content if b.type == "text")
         data = _extract_json(text)
@@ -2816,24 +2817,17 @@ def identify_artwork(image_paths: list[Path], listing: Listing,
     return data
 
 
-_MAKER_HUNT_SCHEMA = """
-Return ONLY a JSON object (no markdown fences):
-{
-  "maker": "the exact maker/manufacturer/brand name, or \\"\\" if none is identifiable",
-  "evidence": "concise: what in the photos supports this (logo, tag text, stamp, hallmark, signature, model plate, distinctive design)",
-  "confidence": "low|medium|high"
-}
-Rules:
-- Inspect EVERY photo closely for maker evidence: logos, embossed or printed
-  marks, sewn tags, labels, stamps, hallmarks, signatures, serial/model
-  plates, packaging text, and distinctive design signatures (typography,
-  colorways, stitching, hardware, patterns) you recognize.
-- Work like a reverse-image search: match what you actually see against known
-  makers in this product category.
-- Name the MOST SPECIFIC maker the evidence supports (e.g. "Fenton" not
-  "a glass maker"; "Pyrex" not "vintage glassware").
-- If the photos genuinely show no identifiable maker, return "" — never guess.
-"""
+# ---------------------------------------------------------------------------
+# Maker / manufacturer identification — a double-layer check.
+#
+# The generic identify pass rarely commits to a maker (it's told never to
+# guess), so Brand/Maker/Manufacturer often ship empty. Layer 1 is the
+# enrichment chain's own read of the tags and photos (main._enrich_listing),
+# which names a candidate with its evidence; layer 2, verify_maker below,
+# independently tries to KNOCK IT DOWN. Only a candidate that survives both
+# is written to the listing — accuracy over coverage, since a wrong maker is
+# worse than a blank one.
+# ---------------------------------------------------------------------------
 
 _MAKER_VERIFY_SCHEMA = """
 Return ONLY a JSON object (no markdown fences):
@@ -2884,37 +2878,6 @@ def verify_maker(image_paths: list[Path], listing: Listing,
     if verdict != "confirm" or vconf not in ("medium", "high"):
         return None
     return {"maker": maker, "evidence": evidence, "confidence": vconf}
-
-
-def identify_maker(image_paths: list[Path], listing: Listing) -> Optional[dict]:
-    """Double-layer maker/manufacturer identification from the photos.
-
-    Layer 1 hunts for a maker candidate with evidence; layer 2 (verify_maker)
-    independently verifies it. Returns {"maker", "evidence", "confidence"}
-    only when the verifier confirms with at least medium confidence; None
-    otherwise. Raises on API errors — the caller treats this enrichment as
-    best-effort."""
-    if not image_paths:
-        return None
-    client = _client()
-    imgs = [_image_block(p) for p in image_paths[:8]]
-    context = (f"Item: {listing.title}\n"
-               f"Category: {listing.category_suggestion or 'unknown'}")
-
-    hunt = client.messages.create(
-        model=config.VISION_MODEL,
-        max_tokens=700,
-        messages=[{"role": "user", "content": imgs + [{"type": "text", "text": (
-            "You are an expert product identifier and appraiser hunting for the "
-            "maker of this item.\n\nCONTEXT:\n" + context + "\n" + _MAKER_HUNT_SCHEMA)}]}],
-    )
-    _log_usage("maker_hunt", hunt)
-    data = _extract_json("".join(b.text for b in hunt.content if b.type == "text"))
-    maker = str(data.get("maker", "")).strip()
-    evidence = str(data.get("evidence", "")).strip()
-    if not maker or len(maker) > 65:
-        return None
-    return verify_maker(image_paths, listing, maker, evidence)
 
 
 # --- distilling a reference link -------------------------------------------

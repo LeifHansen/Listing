@@ -39,9 +39,9 @@ def _stub(monkeypatch, fetch, policies=MINE[0], locations=MINE[1]):
     monkeypatch.setattr(ebay_provider.ebay_auth, "fetch_policies_and_location",
                         fetch)
     monkeypatch.setattr(ebay_provider.ebay_auth, "policy_ids_on_account",
-                        lambda _t: policies)
+                        lambda _t, **_kw: policies)
     monkeypatch.setattr(ebay_provider.ebay_auth, "location_keys_on_account",
-                        lambda _t: locations)
+                        lambda _t, **_kw: locations)
     monkeypatch.setattr(ebay_provider.db, "save_ebay_account",
                         lambda uid, **kw: None)
     monkeypatch.setattr(ebay_provider.db, "stamp_ebay_account",
@@ -53,7 +53,7 @@ def test_requests_that_arrive_together_share_one_check(monkeypatch):
     inside = threading.Event()
     let_go = threading.Event()
 
-    def slow_fetch(_token):
+    def slow_fetch(_token, **_kw):
         calls.append(1)
         inside.set()
         let_go.wait(5)
@@ -78,7 +78,7 @@ def test_an_inconclusive_check_is_retried_by_the_next_request(monkeypatch):
     """The claim is released however the check ends; only a pass eBay
     answered starts the clock."""
     calls = []
-    _stub(monkeypatch, lambda _t: calls.append(1) or {},
+    _stub(monkeypatch, lambda _t, **_kw: calls.append(1) or {},
           policies={}, locations=None)
     ebay_provider._with_current_policies("u1", dict(ACCT), "tok")
     ebay_provider._with_current_policies("u1", dict(ACCT), "tok")
@@ -88,7 +88,7 @@ def test_an_inconclusive_check_is_retried_by_the_next_request(monkeypatch):
 def test_a_check_that_raised_is_retried_by_the_next_request(monkeypatch):
     calls = []
 
-    def boom(_t):
+    def boom(_t, **_kw):
         calls.append(1)
         raise RuntimeError("eBay is down")
 

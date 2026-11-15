@@ -407,10 +407,8 @@ async def _unhandled(request: Request, exc: Exception):
         # arrives here instead, and is the same non-event: say so at INFO and
         # record nothing, rather than let the one path the handler cannot
         # cover put the row back in the feed.
-        log.info("client went away during %s %s",
-                 request.method, request.url.path)
-        return Response(status_code=499)
-    reference = errorlog.current_reference() or errorlog.new_reference()
+        return await _client_went_away(request, exc)
+    reference = deps.support_reference()
     # error, not exception: ServerErrorMiddleware re-raises after this, so
     # uvicorn prints the traceback anyway and log.exception would put a
     # second copy of it in the Fly window. The row below keeps its own.
@@ -820,6 +818,13 @@ def _warm_models() -> None:
 
 def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
+
+
+def _truthy(value) -> bool:
+    """A yes from a form field, a query string or a JSON body: the boolean
+    itself, or "1", "true", "yes" or "on" in any case. Everything else -- a
+    "false", a blank, a missing value, a typo -- is no."""
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @app.get("/api/health")
@@ -1606,40 +1611,6 @@ def _cover_remaining_specifics(listing: Listing, image_paths: list,
     return added
 
 
-def _fill_category_specifics(listing: Listing, image_paths: list) -> Optional[int]:
-    """Best-effort: fill eBay's category item specifics (required + recommended)
-    from the photos and merge them in without overwriting anything already set.
-    Returns how many were added, or None when the enrichment DIDN'T RUN
-    (unconfigured, no category, no photos, or it failed) — callers use that to
-    decide whether the client-side autofill fallback still has work to do.
-    NEVER raises — a listing must still save and publish if this fails.
-
-    This runs server-side during identify (single + bulk) so listings come
-    SEO-ready even on the bulk 'list live now' path, which publishes straight
-    after identify and would otherwise reach eBay with only the generic
-    specifics from the first vision pass (the 'specifics not populating' bug)."""
-    if not (config.taxonomy_ready() and config.anthropic_ready()):
-        return None
-    if not listing.category_id:
-        return None
-    try:
-        aspects = taxonomy.item_aspects(listing.category_id).get("aspects", [])
-        paths = [p for p in image_paths if p.is_file()]
-        if not aspects or not paths:
-            return None
-        filled = claude_ai.fill_aspects(paths, listing, aspects,
-                                        tag_text=_tag_text_for(paths, aspects))
-    except Exception as exc:  # noqa: BLE001 - enrichment is optional
-        log.info("specifics enrich skipped (cat=%s): %s", listing.category_id, exc)
-        return None
-    added = _merge_filled_specifics(listing, filled, aspects)
-    if added:
-        log.info("specifics enrich: cat=%s added=%d", listing.category_id, added)
-    added += _cover_remaining_specifics(listing, paths, aspects)
-    _pair_aspects(listing, aspects)
-    return added
-
-
 # Aspect names that mean "who made this". A wrong maker is worse than a blank
 # one, so these only get filled by the double-layer check below.
 _MAKER_ASPECT_NAMES = {"brand", "maker", "manufacturer"}
@@ -1752,39 +1723,6 @@ def _apply_maker(listing: Listing, found: dict, brand_missing: bool,
              maker, found.get("confidence"), (found.get("evidence") or "")[:120])
 
 
-def _fill_maker(listing: Listing, image_paths: list) -> bool:
-    """Best-effort maker/manufacturer identification (double-layer check).
-
-    The generic identify pass is told never to guess, so Brand / Maker /
-    Manufacturer are rarely filled. When they're missing, run the dedicated
-    two-layer ID in claude_ai.identify_maker (hunt, then adversarial verify —
-    like a reverse-image lookup with a second opinion) and only write a maker
-    both layers agree on. NEVER raises. Returns True if anything was set."""
-    if not config.anthropic_ready():
-        return False
-    brand_missing, unfilled = _maker_targets(listing)
-    if not (brand_missing or unfilled):
-        return False  # maker already known — don't burn two vision calls
-    try:
-        paths = [p for p in image_paths if p.is_file()]
-        found = claude_ai.identify_maker(paths, listing)
-    except Exception as exc:  # noqa: BLE001 - enrichment is optional
-        log.info("maker id skipped: %s", exc)
-        return False
-    if not found:
-        return False
-    _apply_maker(listing, found, brand_missing, unfilled)
-    return True
-
-
-def _identify_chain() -> str:
-    """Which post-identify enrichment chain runs: 'v2' (default) consolidates
-    tag reading + specifics + the maker hunt into one vision call (plus a
-    conditional maker verify); 'v1' is the original multi-call chain, kept
-    wired as an instant rollback (IDENTIFY_CHAIN=v1)."""
-    return os.getenv("IDENTIFY_CHAIN", "v2").strip().lower() or "v2"
-
-
 def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
     """Make the specifics eBay pairs with each other agree. Never raises —
     the draft is worth more than the tidy-up."""
@@ -1798,7 +1736,7 @@ def _pair_aspects(listing: Listing, aspects: list[dict]) -> None:
 
 def _enrich_listing_v2(listing: Listing, image_paths: list, tags: list,
                        progress=None) -> Optional[int]:
-    """Chain v2 enrichment: ONE consolidated vision call fills the category's
+    """The enrichment: ONE consolidated vision call fills the category's
     item specifics AND hunts the maker, with zoomed crops of the tags the
     identify pass located passed inline as ground truth (no separate locate or
     transcribe round-trips). The adversarial maker verify still runs as its
@@ -1907,9 +1845,12 @@ def _specifics_were_filled(added: Optional[int]) -> bool:
 
 def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
                     progress=None) -> Optional[int]:
-    """Post-identify enrichment (item specifics + maker), routed by
-    IDENTIFY_CHAIN. `progress(phase)` (optional) reports stage names for job
-    heartbeats. Returns specifics added, or None when enrichment didn't run.
+    """Post-identify enrichment: the category's item specifics and the maker,
+    in one consolidated vision call (see _enrich_listing_v2). It runs
+    server-side during identify, single and bulk, so a draft comes SEO-ready
+    rather than carrying only the first vision pass's generic specifics.
+    `progress(phase)` (optional) reports stage names for job heartbeats.
+    Returns specifics added, or None when enrichment didn't run.
 
     Stamps `listing.enriched_at` whenever the chain actually RAN — including
     the run that added nothing, which is the one that matters. "The AI has
@@ -1919,20 +1860,29 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
     no photos, no taxonomy — `added is None`) leaves it alone, because that
     listing still has the fill ahead of it.
     """
-    if _identify_chain() == "v1":
-        if progress:
-            progress("specifics")
-        added = _fill_category_specifics(listing, image_paths)
-        if progress:
-            progress("maker")
-        _fill_maker(listing, image_paths)
-    else:
-        added = _enrich_listing_v2(listing, image_paths, tags or [],
-                                   progress=progress)
+    added = _enrich_listing_v2(listing, image_paths, tags or [],
+                               progress=progress)
     if added is not None:
         listing.enriched_at = datetime.now(timezone.utc).isoformat(
             timespec="seconds")
     return added
+
+
+def _photo_path(session_id: str, name: str, *,
+                create: bool = True) -> Optional[Path]:
+    """Where the optimized photo `name` of this session lives, or None when
+    `name` would reach outside the session's photo folder ("../../etc/passwd").
+
+    The name is a path segment the caller controls, so every route that takes
+    one resolves it through here rather than joining it onto a directory.
+    `create=False` is for a read that must never write to the volume (the
+    public /media route, the studio's loads): it looks the folder up without
+    making it, where storage.optimized_dir would."""
+    folder = (storage.optimized_dir(session_id) if create
+              else storage.optimized_path(session_id))
+    opt_dir = folder.resolve()
+    path = (opt_dir / name).resolve()
+    return path if opt_dir in path.parents else None
 
 
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
@@ -2235,9 +2185,7 @@ def account_summary(request: Request) -> dict:
     give, so an unreachable database is reported as unknown, not as zero --
     both when db_status says it is down and when the read itself fails.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     counted = db.db_status().get("connected", False)
     # Counted in SQL, not measured off a page. These used to be
     # `len(db.list_listings(limit=LIST_CAP))` and a Python sum over the same
@@ -2280,9 +2228,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     grant is theirs to revoke in eBay's settings. Both facts are stated in the
     confirm dialog and the privacy policy rather than quietly assumed.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     uid = user["id"]
 
     # Password-guessing here is the same attack as on /login, with a worse
@@ -2341,9 +2287,7 @@ def connect_ticket(request: Request) -> dict:
     flow from the native shell, where the connect NAVIGATION can carry
     neither the Bearer header nor the cross-origin session cookie. Scoped so
     a leaked URL is useless for anything but opening a connect screen."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     return {"ticket": auth.make_ticket(uid, "connect")}
 
 
@@ -2353,13 +2297,19 @@ def _connect_uid(request: Request, ticket: str) -> Optional[str]:
     return deps.uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
 
 
+def _set_flow_cookie(resp, request: Request, name: str, value: str) -> None:
+    """Set one of an OAuth flow's cookies: this browser only, ten minutes, and
+    Lax so it rides the top-level redirect back from the marketplace."""
+    resp.set_cookie(name, value, max_age=600, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https")
+
+
 def _mark_native_flow(resp, request: Request, native: str) -> None:
     """Remember that this OAuth flow began inside the native shell, so the
     callback can send the webview back into the app instead of leaving the
     user stranded on the website. Rides a cookie exactly like the nonce."""
-    if str(native).lower() in ("1", "true", "yes"):
-        resp.set_cookie(NATIVE_RETURN_COOKIE, "app", max_age=600, httponly=True,
-                        samesite="lax", secure=request.url.scheme == "https")
+    if _truthy(native):
+        _set_flow_cookie(resp, request, NATIVE_RETURN_COOKIE, "app")
 
 
 def _request_origin(request: Request) -> str:
@@ -2389,7 +2339,7 @@ def _offsite_connect(request: Request, uid: str, path: str, native: str):
     if not config.oauth_return_ok(here):
         return None
     params = {"ticket": auth.make_ticket(uid, "connect"), "return_to": here}
-    if str(native).lower() in ("1", "true", "yes"):
+    if _truthy(native):
         params["native"] = "1"
     log.info("connect: bouncing %s to the OAuth origin, returning to %s",
              path, here)
@@ -2406,9 +2356,7 @@ def _mark_return_origin(resp, request: Request, return_to: str) -> None:
     """
     origin = (return_to or "").strip().rstrip("/")
     if origin and origin != _request_origin(request) and config.oauth_return_ok(origin):
-        resp.set_cookie(RETURN_ORIGIN_COOKIE, origin, max_age=600,
-                        httponly=True, samesite="lax",
-                        secure=request.url.scheme == "https")
+        _set_flow_cookie(resp, request, RETURN_ORIGIN_COOKIE, origin)
 
 
 def _finish_connect(request: Request, path: str):
@@ -2457,14 +2405,12 @@ def ebay_connect(request: Request, ticket: str = "", native: str = "",
     offsite = _offsite_connect(request, uid, "/api/ebay/connect", native)
     if offsite is not None:
         return offsite
-    import secrets as _secrets
-    nonce = _secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
     resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
     # Bind the flow to this browser: the callback requires this cookie to match
     # the nonce embedded in the signed state (CSRF protection). Lax so it rides
     # the top-level redirect back from eBay.
-    resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
-                    samesite="lax", secure=request.url.scheme == "https")
+    _set_flow_cookie(resp, request, EBAY_NONCE_COOKIE, nonce)
     _mark_native_flow(resp, request, native)
     _mark_return_origin(resp, request, return_to)
     return resp
@@ -2515,7 +2461,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         # was granted, so it hands back "" far more often than it hands back a
         # wrong name — and "" is not a name, it is "we don't know". Writing it
         # anyway erased a username the app already had, and a blank username
-        # makes listing_sync.belongs_to scope nothing (every account's listings
+        # makes listing_sync.owns scope nothing (every account's listings
         # look like this one's) while count_foreign_listings reports every
         # labelled record as foreign. db.save_ebay_account skips None, so None
         # is how "leave what's there" is spelled.
@@ -2549,7 +2495,7 @@ def ebay_callback(request: Request, code: str = "", state: str = ""):
         if switched or ebay_account.settings_were_dropped(save_kwargs, existing):
             # A different store. Label everything already here as the previous
             # account's, so syncs and publishes stop treating those listings as
-            # this account's (see services/listing_sync.belongs_to).
+            # this account's (see services/listing_sync.owns).
             #
             # Dropped settings alone say the store changed, not who it was: a
             # policy the seller deleted looks the same, and the previous name
@@ -2688,9 +2634,7 @@ def release_foreign_listings(request: Request,
     items is still the one connected. Publishes stamp the owner now, so this
     legacy pool only ever shrinks.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     include_unowned = bool((payload or {}).get("include_unowned"))
     acct = db.get_ebay_account(uid) or {}
     connected = (acct.get("ebay_username") or "").strip()
@@ -2799,11 +2743,7 @@ def _flag(payload: Optional[dict], key: str, *, default: bool) -> bool:
     that never mentions it. Same vocabulary as _international: the JSON
     boolean, or the "1"/"true" a form would send."""
     value = (payload or {}).get(key)
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+    return default if value is None else _truthy(value)
 
 
 def _choice(value, choices, default: int, what: str) -> int:
@@ -2832,10 +2772,7 @@ def _international(payload: Optional[dict]) -> bool:
     Accepts the JSON boolean the dialog sends and the "1"/"true" a form or a
     query string would, and nothing else counts as yes.
     """
-    value = (payload or {}).get("international_shipping")
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+    return _truthy((payload or {}).get("international_shipping"))
 
 
 @app.get("/api/ebay/policy-preview")
@@ -2999,6 +2936,20 @@ def ensure_all_policies(request: Request, payload: Optional[dict] = None) -> dic
     return out
 
 
+def _marketplace_targets(names) -> list[str]:
+    """The marketplaces a publish request names: trimmed, lowercased, each
+    once and in the order given."""
+    return [k for k in dict.fromkeys((key or "").strip().lower()
+                                     for key in names) if k]
+
+
+def _marketplace_label(key: str) -> str:
+    """A marketplace's name as the seller reads it ("eBay", "Etsy"), or its
+    key for one this deployment does not offer."""
+    provider = marketplaces.get(key)
+    return provider.label if provider else key
+
+
 def _preflight_issues(request: Request, listing: Listing, mode: str) -> list[dict]:
     """Run the full pre-publish checklist for this user's account state."""
     return ebay_provider.preflight_issues(deps.uid(request), listing, mode)
@@ -3017,8 +2968,7 @@ async def publish_preflight(req: PublishRequest, request: Request) -> dict:
     fan-out would have accepted, since it only runs the providers it was
     given.
     """
-    targets = [k for k in dict.fromkeys(
-        (key or "").strip().lower() for key in req.marketplaces) if k]
+    targets = _marketplace_targets(req.marketplaces)
     mode = req.mode or "live"
     # No selection at all = the legacy single-eBay client.
     ebay_targeted = not targets or "ebay" in targets
@@ -3063,9 +3013,7 @@ def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
     Everything eBay said comes back verbatim under `ebay`, so the answer can
     be read here, quoted to eBay Customer Service, or pasted into a bug report.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
@@ -3206,9 +3154,7 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
     """Save the account's default shipping/payment/return policy selections and
     (optionally) a ship-from ZIP, which we use to create the eBay inventory
     location that publishing requires."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     fields = {
         k: str(payload.get(k) or "")
         for k in ("fulfillment_policy_id", "payment_policy_id", "return_policy_id")
@@ -3598,9 +3544,7 @@ def _distill_reference_row(record_id: str, attempt: int = 0) -> None:
 @app.get("/api/profile")
 def get_profile(request: Request) -> dict:
     """The logged-in user's profile + eBay connection summary for Settings."""
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     acct = db.get_ebay_account(user["id"]) or {}
     connected = bool(acct.get("refresh_token"))
     return {
@@ -3622,9 +3566,7 @@ def get_profile(request: Request) -> dict:
 @app.post("/api/profile")
 def save_profile(request: Request, payload: dict) -> dict:
     """Save profile customizations (currently: display name)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     display_name = str(payload.get("display_name", "")).strip()[:80]
     updated = db.update_user(uid, display_name=display_name)
     if not updated:
@@ -3656,7 +3598,7 @@ _PREF_FIELDS = {
     "auto_promote": (int, 0, 1),
     # Accept Best Offer on every new listing, with no minimum: eBay sends the
     # seller every offer to accept or decline. OFF unless explicitly saved on
-    # — see services/listing_sync.offers_enabled, which is where the decision
+    # — see services/listing_sync.offers_terms, which is where the decision
     # is actually made, and which also explains why it never touches a listing
     # that is already live.
     "allow_offers": (int, 0, 1),
@@ -3691,9 +3633,7 @@ _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 @app.get("/api/prefs")
 def get_prefs(request: Request) -> dict:
     """The user's new-listing defaults (weight/dims/quantity/condition)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     return {"prefs": db.get_prefs(uid)}
 
 
@@ -3713,9 +3653,7 @@ def save_prefs(request: Request, payload: dict) -> dict:
     that saves itself the moment it changes sends one key and nothing else is
     touched. The alias just says so in the method.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     clean: dict = {}
     for key, (typ, lo, hi) in _PREF_FIELDS.items():
         if key not in payload:
@@ -3855,9 +3793,7 @@ def _clean_listing_views(raw: object) -> list:
 @app.get("/api/listing-views")
 def listing_views(request: Request) -> dict:
     """The seller's saved listing views."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # Strict: this screen REPORTS what is saved, and `[]` from a failed read
     # is a claim that the seller has saved nothing — the same mistake as
     # rendering a failed /api/listings as an empty store.
@@ -3872,9 +3808,7 @@ def put_listing_views(request: Request, payload: dict) -> dict:
     short list the client already holds, and a per-view endpoint would need
     its own merge rules for a race that a single write does not have.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     views = _clean_listing_views((payload or {}).get("views"))
     if not db.save_listing_views(uid, views):
         raise HTTPException(
@@ -4990,9 +4924,7 @@ def _apply_listing_defaults(listing: Listing, uid: Optional[str],
 def sync_profile_from_ebay(request: Request) -> dict:
     """Auto-pull profile info from the connected eBay account: identity
     (username/email), business policies, and inventory location."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -5005,7 +4937,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
         # left out (the email needs its own scope and is usually absent), and
         # "" is "we don't know", not a name. Written anyway, pressing "Sync
         # from eBay" erased a username and email the app already had, and a
-        # blank username makes listing_sync.belongs_to scope nothing.
+        # blank username makes listing_sync.owns scope nothing.
         for field, value in (("ebay_username", ident["username"]),
                              ("ebay_email", ident["email"]),
                              ("ebay_user_id", ident.get("user_id"))):
@@ -5032,9 +4964,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
 def ebay_disconnect(request: Request) -> dict:
     """Unlink the current user's eBay account so they can connect a different
     one (or the correct one, if the wrong account got linked)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # Keep saved policy/location prefs so reconnecting the same account restores
     # them; a different account overwrites them on connect (see the callback).
     ebay_account.forget_verified(uid)
@@ -5136,8 +5066,7 @@ def ebay_payments_status(request: Request) -> dict:
     The raw detail is not discarded; it goes to the log under `reference`,
     which comes back to the seller so support can join the two.
     """
-    if not deps.uid(request):
-        raise HTTPException(401, "Log in first.")
+    deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
@@ -5406,10 +5335,10 @@ async def upload(
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
-    run_pipeline = str(pipeline).lower() in ("true", "1", "yes", "on")
+    run_pipeline = _truthy(pipeline)
     if run_pipeline and not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    strip_bg = _truthy(remove_bg)
     # Uploading + optimizing stays free; background removal is switched on
     # per seller and metered per photo. Cleared before any disk work so a
     # seller who hasn't switched it on, is out of this month's allowance, or
@@ -5493,7 +5422,7 @@ async def upload(
     # the event loop so photo processing doesn't stall every other request.
     opt_results = await run_in_threadpool(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
-    optimized = storage.list_optimized(session_id)
+    optimized = await run_in_threadpool(storage.list_optimized, session_id)
     if not optimized:
         await run_in_threadpool(_refund_cutouts, spent, held)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
@@ -5566,11 +5495,11 @@ async def upload_more(
     # holds them is never offloaded.
     rec = await run_in_threadpool(db.get_listing_best_effort, session_id)
     recorded = await run_in_threadpool(_listing_image_order, session_id, rec)
-    existing = sorted(set(recorded or []) | set(storage.list_optimized(session_id)),
-                      key=storage.natural_key)
+    on_disk = await run_in_threadpool(storage.list_optimized, session_id)
+    existing = sorted(set(recorded or []) | set(on_disk), key=storage.natural_key)
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    strip_bg = _truthy(remove_bg)
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
     held, spent = (await run_in_threadpool(_start_cutouts, request, len(files))
@@ -5708,10 +5637,8 @@ async def edit_image(
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
+    path = _photo_path(session_id, name)
+    if path is None or not await run_in_threadpool(_ensure_local, session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -5786,9 +5713,8 @@ async def image_restore_original(
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo to restore.")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:  # path-traversal guard
+    path = _photo_path(session_id, name)
+    if path is None:
         raise HTTPException(400, "Invalid image name")
 
     def _restore() -> None:
@@ -5894,25 +5820,19 @@ def _studio_load(request: Request, session_id: str, name: str,
     # photos. The inline-`file` path above is the editor's own canvas blob and
     # touches nothing stored, so it stays open to the logged-out flows.
     deps.assert_session_owner(session_id, request)
-    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    path = _photo_path(session_id, name, create=False)
+    if path is None or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     return Image.open(path)
 
 
-def _data_url(img, fmt: str = "JPEG") -> str:
-    import base64
+def _data_url(img) -> str:
+    """The studio's result as a JPEG data: URL, for the editor to preview."""
     from io import BytesIO
 
     buf = BytesIO()
-    if fmt == "PNG":
-        img.save(buf, "PNG", optimize=True)
-        mime = "image/png"
-    else:
-        img.save(buf, "JPEG", quality=88, optimize=True)
-        mime = "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode()}"
+    img.save(buf, "JPEG", quality=88, optimize=True)
+    return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
 @app.post("/api/rotate-image")
@@ -5925,9 +5845,8 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
+    path = _photo_path(session_id, name)
+    if path is None or not await run_in_threadpool(_ensure_local, session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
@@ -6270,12 +6189,13 @@ def price_suggestions(payload: dict, request: Request) -> dict:
 _STICKY_STATUSES = STICKY_STATUSES
 
 
-def _sticky_status(rec: Optional[dict], default: str = "draft") -> str:
+def _sticky_status(rec: Optional[dict]) -> str:
     """The status to persist on a save/refine: never demote a listing that is
-    already live/sold/ended (see _STICKY_STATUSES). Takes the record the
-    caller already read — each db.get_listing is a cross-region round trip."""
+    already live/sold/ended (see _STICKY_STATUSES), and "draft" otherwise.
+    Takes the record the caller already read — each db.get_listing is a
+    cross-region round trip."""
     cur = (rec or {}).get("status")
-    return cur if cur in _STICKY_STATUSES else default
+    return cur if cur in _STICKY_STATUSES else "draft"
 
 
 def _restore_server_state(session_id: str, listing: Listing,
@@ -6327,6 +6247,35 @@ def _restore_server_state(session_id: str, listing: Listing,
     # dashboard reads it to tell a price that has sat from one that was just
     # dropped; recommender.price_drop_stamp is where that is decided.
     listing.price_lowered_at = recommender.price_drop_stamp(stored, listing.price)
+    return rec
+
+
+def _owned_listing(listing_id: str, request: Request) -> dict:
+    """The stored record for `listing_id`, or 404 when there is none or it is
+    another account's.
+
+    One answer for both, so a stranger is never told the id exists. A listing
+    id is not a secret -- it rides in the public /media URLs handed to eBay --
+    so holding one must not open someone else's listing. A record nobody owns
+    (a logged-out session) passes, as it does deps.assert_session_owner.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec or (rec.get("user_id") and rec["user_id"] != deps.uid(request)):
+        raise HTTPException(404, "Listing not found")
+    return rec
+
+
+def _owned_by(listing_id: str, uid: Optional[str]) -> Optional[dict]:
+    """_owned_listing for a worker, which knows the seller but has no request
+    to answer: the record, or None when it is gone or another account's.
+
+    A batch re-reads each listing as it reaches it, so it is judged on what it
+    is now rather than when the button was pressed. That read is by id alone,
+    so the check the route's scoped lookup made has to be made again here.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec or (rec.get("user_id") and rec["user_id"] != uid):
+        return None
     return rec
 
 
@@ -6444,11 +6393,7 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     stale.
     """
     deps.assert_session_owner(session_id, request)
-    rec = db.get_listing(session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(session_id, request)
 
     allowed = _PATCHABLE + _EDITOR_PATCHABLE
     changes = {k: v for k, v in (payload or {}).items() if k in allowed}
@@ -6659,10 +6604,6 @@ def _quick_edit_targets(listing: Listing) -> list[str]:
 
 def _quick_edit_sentence(outcomes: dict) -> str:
     """One line for the toast: where the change landed, and where it didn't."""
-    def _label(key: str) -> str:
-        provider = marketplaces.get(key)
-        return provider.label if provider else key
-
     if list(outcomes) == ["ebay"]:
         outcome = outcomes["ebay"]
         # The provider's own sentence either way: on success it is
@@ -6671,13 +6612,13 @@ def _quick_edit_sentence(outcomes: dict) -> str:
         # from `issues` where it can (publishShared.blockedReason).
         return outcome.message or ("Your eBay listing has been updated." if outcome.ok
                                    else "eBay didn't take the change.")
-    done = [_label(k) for k, o in outcomes.items() if o.ok]
+    done = [_marketplace_label(k) for k, o in outcomes.items() if o.ok]
     missed = [(k, o) for k, o in outcomes.items() if not o.ok]
     parts = []
     if done:
         parts.append("Updated on " + " and ".join(done) + ".")
     for key, outcome in missed:
-        parts.append(f"{_label(key)} didn't take it: "
+        parts.append(f"{_marketplace_label(key)} didn't take it: "
                      f"{outcome.message or 'no reason given'}")
     return " ".join(parts) or "Nothing was updated."
 
@@ -6754,11 +6695,7 @@ def quick_edit_listing(session_id: str, payload: dict, request: Request) -> dict
     """
     deps.assert_session_owner(session_id, request)
     uid = deps.uid(request)
-    rec = db.get_listing(session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(session_id, request)
     status = rec.get("status") or "draft"
     if status == "sold":
         raise HTTPException(
@@ -7074,9 +7011,8 @@ def _drop_optimized_image(session_id: str, name: str,
         images = [n for n in stored if n != name]
         if images != stored:
             images = _save_image_order(session_id, rec, images, uid)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:  # path-traversal guard
+    path = _photo_path(session_id, name)
+    if path is None:
         raise HTTPException(400, "Invalid image name")
     if path.is_file():
         try:
@@ -8135,7 +8071,7 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         _assign_store_category(listing, ctx.uid)
         # Fill item specifics (and the maker) up front so the draft the
         # seller reviews carries real specifics, not just the generic
-        # first pass — one consolidated call on chain v2.
+        # first pass — one consolidated call.
         _enrich_listing(listing, paths, tags=result.tags)
         # A note the fill just answered must not outlive it: it is
         # what the dashboard's "Fill in details" reads, and a fresh
@@ -8574,7 +8510,8 @@ async def bulk_upload(
     # Same reason for background removal: the worker counts the cutouts
     # against the month's allowance, but whether this seller may have any at
     # all is answered here, while there is still a request to say no on.
-    if str(remove_bg).lower() in ("true", "1", "yes", "on"):
+    strip_bg = _truthy(remove_bg)
+    if strip_bg:
         try:
             await run_in_threadpool(
                 bg_removal.check, await run_in_threadpool(deps.uid, request))
@@ -8622,7 +8559,6 @@ async def bulk_upload(
     # Capture per-request context now — the worker thread has no Request.
     uid = await run_in_threadpool(deps.uid, request)
     job_id = storage.new_session_id()
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     await run_in_threadpool(_register_bulk_job, job_id, {
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
@@ -9050,7 +8986,8 @@ def delete_pending_item(job_id: str, req: PendingItemRequest,
               for gi, g in enumerate(groups) if gi != req.gi]
     still_used = {i for g in others for i in g.get("indices") or []}
     dropped = [i for i in mine if i not in still_used]
-    kept = [i for i in range(len(names)) if i not in set(dropped)]
+    gone = set(dropped)
+    kept = [i for i in range(len(names)) if i not in gone]
     moved = {old: new for new, old in enumerate(kept)}
     left = [names[i] for i in kept]
     regrouped = [{**g, "indices": [moved[i] for i in g.get("indices") or []
@@ -9389,8 +9326,7 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _resolve_category(result.listing)
         _assign_store_category(result.listing, uid)
         # Fill the category's item specifics (and hunt the maker) so the draft
-        # is SEO-ready — one consolidated call on chain v2, the original
-        # multi-call chain on IDENTIFY_CHAIN=v1.
+        # is SEO-ready, in one consolidated call.
         added = _enrich_listing(result.listing, [opt_dir / n for n in names],
                                 tags=result.tags, progress=_beat)
         # Tell the editor whether the server-side fill actually FILLED
@@ -10019,9 +9955,7 @@ def dismiss_duplicate_listings(request: Request,
     happens to find a second later; a fingerprint matching no current group is
     ignored. Omit it to dismiss every group the scan finds right now.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     groups = _scan_duplicates(user["id"])
     current = {g["fingerprint"] for g in groups}
     asked = {str(f) for f in ((payload or {}).get("fingerprints") or []) if f}
@@ -10212,6 +10146,43 @@ def insights(request: Request) -> dict:
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
+def _ticked_ids(payload: dict, none_picked: str) -> list[str]:
+    """The listing ids a bulk button was pressed over: trimmed, each once, in
+    the order sent -- or a 400, saying `none_picked` when there are none.
+
+    Bounded, because the bulk actions read their listings BY id, and an
+    unbounded body is an unbounded `IN (...)` -- a way to make one request
+    expensive for everyone. Nothing useful is lost: the cap is more than a
+    screen of ticks, and a run that takes fewer than it was handed gives the
+    rest back as `deferred` for a second run.
+    """
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or [])
+           if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, none_picked)
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    return ids
+
+
+def _ticked_records(ids: list[str], uid: str) -> list[dict]:
+    """The seller's records for `ids`, then a "missing" row for each id that
+    is not theirs or is gone -- reported by the run rather than silently
+    dropped from its totals.
+
+    The ids, asked for -- never the seller's newest LIST_CAP records filtered
+    down, which reported anything outside that window as "Listing not
+    found." Ownership is enforced inside the read (db.get_listings).
+    """
+    mine = db.get_listings(ids, uid)
+    found = {r["id"] for r in mine}
+    return mine + [{"id": rid, "status": "missing", "listing": {}}
+                   for rid in sorted(set(ids) - found)]
+
+
 def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
                base_url: str, provider) -> dict:
     """Cut ONE listing's price by `percent` and push it to eBay.
@@ -10334,11 +10305,50 @@ def _keep_marked(rid: str, fields: list[str], uid: str) -> None:
                     rid, exc)
 
 
+class _OneRunPerAccount(dict):
+    """user id -> the job id of the one run of a kind the account has going.
+
+    Each bulk action that spends money or eBay calls runs once per account at
+    a time, because a second press while the first is going does the same
+    work twice: cuts the same prices again, pays twice to fill the same
+    blanks, puts the same listings on Etsy twice. A dict, so a test can clear
+    it or ask whether an account still holds its slot.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+
+    def reserve(self, uid: str, job_id: str) -> Optional[tuple[str, dict]]:
+        """Make `job_id` this account's run -- or, while an earlier one is
+        still going, leave the slot be and return (its id, its status) for
+        the caller to hand back instead.
+
+        Check and reserve are one critical section: a double tap that passed
+        the check twice would start two runs over the same listings.
+        """
+        with self.lock:
+            running = self.get(uid)
+            if running:
+                snap = jobstore.snapshot(running, uid)
+                if snap and not snap.get("done"):
+                    return running, snap
+            self[uid] = job_id
+        return None
+
+    def release(self, uid: str, job_id: str) -> None:
+        """Give the slot back, if `job_id` still holds it. A run that started
+        and then failed, or finished, frees it; without that the next press
+        is told "already running" for a run that is not."""
+        with self.lock:
+            if self.get(uid) == job_id:
+                self.pop(uid, None)
+
+
 # The price drops running right now: user id -> job id. One per account, and
 # not for tidiness — a second press while the first is still going would cut
 # the same prices twice, 20% off and then 20% off that.
-_REPRICE_JOBS: dict[str, str] = {}
-_REPRICE_LOCK = threading.Lock()
+_REPRICE_JOBS = _OneRunPerAccount()
 
 
 def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
@@ -10357,8 +10367,8 @@ def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
         # And owned: an id that is not this seller's is queued as missing by
         # the route, and this re-read is not scoped, so the check the by-id
         # lookup made has to be made again here.
-        fresh = db.get_listing(rec["id"])
-        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
             return {"skip": "Listing not found.", "needs_you": False}
         return _lower_one(fresh, percent, uid, creds, base_url, provider)
 
@@ -10387,9 +10397,7 @@ def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish lowering these prices. Try again in a moment — "
             f"if it keeps happening, quote {reference} to support."))
     finally:
-        with _REPRICE_LOCK:
-            if _REPRICE_JOBS.get(uid) == job_id:
-                _REPRICE_JOBS.pop(uid, None)
+        _REPRICE_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/lower-prices")
@@ -10409,9 +10417,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
     per account at a time: a second press while one is running joins it
     rather than cutting the same prices twice.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -10419,47 +10425,23 @@ def lower_prices(payload: dict, request: Request) -> dict:
         percent = bulk_actions.validate_percent(payload.get("percent"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to reprice.")
-    # Bounded, because the lookup below is BY id, and an unbounded body is
-    # an unbounded `IN (...)` — a way to make one request expensive for
-    # everyone. Nothing useful is lost: this is more than a screen of ticks.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to reprice.")
     uid = user["id"]
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs over the same listings.
     job_id = storage.new_session_id()
-    with _REPRICE_LOCK:
-        running = _REPRICE_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True,
-                        "total": snap.get("total_items") or 0}
-        _REPRICE_JOBS[uid] = job_id
+    joined = _REPRICE_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
     try:
-        wanted = set(ids)
-        # The ids, asked for — never the seller's newest LIST_CAP records
-        # filtered down, which reported anything outside that window as
-        # "Listing not found." Ownership is enforced inside the read.
-        mine = db.get_listings(ids, uid)
-        # Listings the client asked for that aren't the seller's (or are
-        # gone) are reported rather than silently dropped from the totals.
-        missing = [{"id": rid, "status": "missing", "listing": {}}
-                   for rid in sorted(wanted - {r["id"] for r in mine})]
-        records = mine + missing
+        records = _ticked_records(ids, uid)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _REPRICE_LOCK:
-            if _REPRICE_JOBS.get(uid) == job_id:
-                _REPRICE_JOBS.pop(uid, None)
+        _REPRICE_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "reprice", "phase": "repricing", "done": False,
@@ -10547,16 +10529,7 @@ def send_offers(payload: dict, request: Request) -> dict:
     # eBay refuses HTML and caps the note at 2,000 characters; cleaned here so
     # a seller finds out at the boundary rather than one listing at a time.
     message = ebay_offers.clean_message(payload.get("message"))
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to offer.")
-    # Same bound, for the same reason, as the bulk price drop: the lookup
-    # below is BY id, and an unbounded body is an unbounded `IN (...)`.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to offer.")
     wanted = set(ids)
     mine = db.get_listings(ids, user["id"])
     records, deferred = mine[:BULK_OFFER_CAP], mine[BULK_OFFER_CAP:]
@@ -10615,8 +10588,7 @@ def send_offers(payload: dict, request: Request) -> dict:
 # same reason as the price drop's: a second press mid-run would offer the
 # same watchers again, and eBay refuses a second seller offer while the first
 # is live — every one of those would come back as a refusal.
-_OFFER_JOBS: dict[str, str] = {}
-_OFFER_LOCK = threading.Lock()
+_OFFER_JOBS = _OneRunPerAccount()
 # The suggestion group "Send offers…" clears.
 SEND_OFFERS_ALL_TYPES = ("send_offers",)
 
@@ -10669,9 +10641,7 @@ def _run_send_offers_job(job_id: str, records: list[dict], uid: str,
             f"if it keeps happening, quote {reference} to support."))
     finally:
         http.close()
-        with _OFFER_LOCK:
-            if _OFFER_JOBS.get(uid) == job_id:
-                _OFFER_JOBS.pop(uid, None)
+        _OFFER_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/send-offers-all")
@@ -10689,9 +10659,7 @@ def send_offers_all(payload: dict, request: Request) -> dict:
 
     Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -10704,14 +10672,10 @@ def send_offers_all(payload: dict, request: Request) -> dict:
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs offering the same watchers.
     job_id = storage.new_session_id()
-    with _OFFER_LOCK:
-        running = _OFFER_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _OFFER_JOBS[uid] = job_id
+    joined = _OFFER_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
         records = _suggestion_set(items, creds, SEND_OFFERS_ALL_TYPES)
@@ -10720,9 +10684,7 @@ def send_offers_all(payload: dict, request: Request) -> dict:
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _OFFER_LOCK:
-            if _OFFER_JOBS.get(uid) == job_id:
-                _OFFER_JOBS.pop(uid, None)
+        _OFFER_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "offers", "phase": "offering", "done": False,
@@ -10769,8 +10731,7 @@ def _bulk_caps() -> dict:
 # spends AI credits per listing, and two tabs firing it at the same store
 # would pay twice to fill the same blanks.
 # user id -> job id of the enrich currently running for them.
-_ENRICH_JOBS: dict[str, str] = {}
-_ENRICH_LOCK = threading.Lock()
+_ENRICH_JOBS = _OneRunPerAccount()
 
 
 def _drop_answered_missing_info(listing: Listing) -> int:
@@ -10999,9 +10960,7 @@ def _run_enrich_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish filling these in. Try again in a moment — if "
             f"it keeps happening, quote {reference} to support."))
     finally:
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
 
 
 @app.post("/api/listings/enrich")
@@ -11019,39 +10978,22 @@ def enrich_listings(payload: dict, request: Request) -> dict:
     does for a price drop, because every listing this touches spends AI
     credits. Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to fill in.")
-    # Bounded for the same reason the price drop is: the lookup below is BY
-    # id, and an unbounded body is an unbounded `IN (...)`. Nothing useful is
-    # lost — a pass enriches at most BULK_ENRICH_CAP of them either way, and
-    # the remainder comes back as deferred for a second run.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to fill in.")
     uid = user["id"]
     # Check AND reserve in one critical section, the way the import route
     # does. Releasing the lock between the two let a double tap pass the
     # check twice -- both saw no job, both went off to read the listings,
     # both registered -- and the seller paid for the same blanks twice.
     job_id = storage.new_session_id()
-    with _ENRICH_LOCK:
-        running = _ENRICH_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                # Two tabs, or a double tap. Hand back the job already running
-                # rather than paying a second time to fill the same blanks.
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _ENRICH_JOBS[uid] = job_id
+    joined = _ENRICH_JOBS.reserve(uid, job_id)
+    if joined:
+        # Two tabs, or a double tap. Hand back the job already running
+        # rather than paying a second time to fill the same blanks.
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         # Ownership is enforced inside the read, and an id the seller doesn't
         # own is simply absent from the answer (see db.get_listings).
@@ -11065,9 +11007,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
         # The reservation stands for a job that will never start; without
         # this the next press is told "already running" until the snapshot
         # is looked up and found missing.
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "enrich", "phase": "enriching", "done": False,
@@ -11223,9 +11163,7 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish your list. Try again in a moment — if it "
             f"keeps happening, quote {reference} to support."))
     finally:
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
 
 
 def _suggestion_set(items: list[dict], creds: Optional[dict],
@@ -11248,12 +11186,6 @@ def _suggestion_set(items: list[dict], creds: Optional[dict],
     return [it for it in items if it.get("id") in wanted]
 
 
-def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
-    """The records "Finish everything" acts on: every listing the dashboard is
-    currently offering "Fill in details" for."""
-    return _suggestion_set(items, creds, FINISH_ALL_TYPES)
-
-
 @app.post("/api/listings/finish-all")
 def finish_all(request: Request) -> dict:
     """Clear the whole "what to do next" list in one press: fill in every
@@ -11270,9 +11202,7 @@ def finish_all(request: Request) -> dict:
 
     Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     uid = user["id"]
@@ -11280,27 +11210,21 @@ def finish_all(request: Request) -> dict:
     # reservation: both spend AI credits on the same listings, and two of them
     # running at once would pay twice to fill the same blanks.
     job_id = storage.new_session_id()
-    with _ENRICH_LOCK:
-        running = _ENRICH_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _ENRICH_JOBS[uid] = job_id
+    joined = _ENRICH_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
         creds = deps.ebay_creds_for(request)
-        records = _finish_all_set(items, creds)
+        records = _suggestion_set(items, creds, FINISH_ALL_TYPES)
         if not records:
             raise HTTPException(400, "There's nothing left on your list.")
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "finish", "phase": "finishing", "done": False,
@@ -11317,12 +11241,7 @@ def finish_all(request: Request) -> dict:
 
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: str, request: Request) -> dict:
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    # Enforce ownership for listings that belong to an account.
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     # Deliberately no photo adoption here. This used to download every remote
     # photo, write them to disk, upsert the row and start an R2 upload — on a
     # read. A prefetch, a retry, a crawler, a link preview or a double-click
@@ -11351,11 +11270,7 @@ def prepare_for_editing(listing_id: str, request: Request) -> dict:
     Idempotent: a listing whose photos are already local is reported ready
     without fetching anything.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     names = _adopt_imported_images(listing_id, rec)
     return {"ok": True, "images": names,
             "listing": (rec.get("listing") or {})}
@@ -11375,11 +11290,7 @@ def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
     and asks for nothing. Either way the base moves to eBay's current value —
     see services/sync_merge.resolve for why that is true even for "mine".
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
 
     listing = Listing(**(rec.get("listing") or {}))
     try:
@@ -11425,8 +11336,9 @@ def _reachable(listing_id: str, names: list[str]) -> bool:
     caller re-downloads from eBay when this says no. Cheap enough to ask on
     every adoption, and a listing whose first photo is present has not been
     offloaded, so the common path costs a single stat."""
+    opt_dir = storage.optimized_dir(listing_id)
     for n in names:
-        if (storage.optimized_dir(listing_id) / n).is_file():
+        if (opt_dir / n).is_file():
             return True
     if not objstore.enabled():
         return False
@@ -11516,12 +11428,8 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     says so, and the editor opens on the upload card. Listings imported from
     eBay keep their eBay-hosted `image_urls`, which the copy carries as-is.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     new_id, listing, copied = _clone_listing(listing_id, rec, uid)
     log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
              listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
@@ -11571,16 +11479,24 @@ def _clone_listing(listing_id: str, rec: dict,
         objstore.upload_optimized(new_id, dst_dir, copied)
     listing.images = copied
 
+    _save_new_draft(new_id, listing, uid)
+    return new_id, listing, copied
+
+
+def _save_new_draft(new_id: str, listing: Listing, uid: Optional[str]) -> None:
+    """Write a brand-new draft to the volume and to its row, or raise.
+
+    The rule merge_listings states, at lower stakes: nothing is deleted here,
+    but answering with a new draft id that is not in the store sends the
+    client to a listing that does not exist. Shared by relist, duplicate and
+    split, the three routes that mint a draft from another listing.
+    """
     storage.save_listing(new_id, listing)
-    # Same rule, lower stakes: nothing is deleted here, but answering with a
-    # new draft id that is not in the store sends the client to a listing that
-    # does not exist.
     landed = db.upsert_listing(new_id, listing.model_dump(),
                                status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
+    if db.enabled() and not landed:
         raise errors.StorageUnavailable(
             "Couldn't create the new draft just now. Try again in a moment.")
-    return new_id, listing, copied
 
 
 # Everything a duplicate starts WITHOUT. The sale-only fields above, and on
@@ -11647,12 +11563,8 @@ def duplicate_listing(listing_id: str, request: Request) -> dict:
     carries are dropped, because a draft that has the files does not need
     the fallback strip and the editor would otherwise show both.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     data = dict(rec.get("listing") or {})
     data.update(_DUPLICATE_CLEARED)
     listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
@@ -11663,12 +11575,7 @@ def duplicate_listing(listing_id: str, request: Request) -> dict:
     listing.images = copied
     if copied:
         listing.image_urls = []
-    storage.save_listing(new_id, listing)
-    landed = db.upsert_listing(new_id, listing.model_dump(),
-                               status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
-        raise errors.StorageUnavailable(
-            "Couldn't create the new draft just now. Try again in a moment.")
+    _save_new_draft(new_id, listing, uid)
     log.info("duplicate: %s -> new draft %s (%d photo(s)) user=%s",
              listing_id, new_id, len(copied), uid)
     return {"ok": True, "id": new_id, "from": listing_id,
@@ -11694,9 +11601,8 @@ def _unlink_optimized(session_id: str, name: str) -> None:
     mirror, once nothing refers to them any more. Best-effort: the listing
     has already been saved without the photo, and a file that outlives it is
     a tidiness problem for the reclaim pass, not the seller's."""
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:
+    path = _photo_path(session_id, name)
+    if path is None:
         return
     try:
         if path.is_file():
@@ -11735,12 +11641,8 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     """
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     if (rec.get("status") or "draft") not in ("draft", "dry_run"):
         raise HTTPException(
             409, "Only a draft can be split. This listing is on a marketplace "
@@ -11794,7 +11696,8 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     # Off this listing: its order first (the row is the truth), and only then
     # the bytes, so a save that cannot be written deletes nothing. Same order
     # as _drop_optimized_image, for the same reason.
-    remaining = [n for n in images if n not in set(copied)]
+    moved = set(copied)
+    remaining = [n for n in images if n not in moved]
     try:
         remaining = _save_image_order(listing_id, rec, remaining, uid)
     except Exception:
@@ -11810,13 +11713,11 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     carried = {k: data[k] for k in _SPLIT_CARRIED_FIELDS
                if k in data and k in Listing.model_fields}
     stub = Listing(**carried, images=copied)
-    storage.save_listing(new_id, stub)
-    landed = db.upsert_listing(new_id, stub.model_dump(),
-                               status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
+    try:
+        _save_new_draft(new_id, stub, uid)
+    except errors.StorageUnavailable:
         _undo_charges()
-        raise errors.StorageUnavailable(
-            "Couldn't create the new draft just now. Try again in a moment.")
+        raise
     jobs = {"new": _start_identify_job(new_id, uid, spent_new)}
     if req.redraft:
         jobs["original"] = _start_identify_job(listing_id, uid, spent_old)
@@ -12188,12 +12089,8 @@ def _publish_body(outcomes: dict, mode: str) -> dict:
     failed = [k for k, o in outcomes.items() if not o.ok]
     dry = [k for k, o in outcomes.items() if o.dry_run]
 
-    def _label(key: str) -> str:
-        p = marketplaces.get(key)
-        return p.label if p else key
-
     def _names(keys: list[str]) -> str:
-        labels = [_label(k) for k in keys]
+        labels = [_marketplace_label(k) for k in keys]
         return " and ".join(part for part in
                             [", ".join(labels[:-1]), labels[-1]] if part)
 
@@ -12277,11 +12174,7 @@ def publish(req: PublishRequest, request: Request) -> JSONResponse:
     _restore_server_state(req.session_id, req.listing, prev_rec)
     storage.save_listing(req.session_id, req.listing)
 
-    targets: list[str] = []
-    for key in req.marketplaces:
-        key = (key or "").strip().lower()
-        if key and key not in targets:
-            targets.append(key)
+    targets = _marketplace_targets(req.marketplaces)
 
     if not targets or targets == ["ebay"]:
         # Legacy path — byte-identical responses; the provider already
@@ -12313,11 +12206,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     already sold on eBay, and that is archived like every other sale. See
     listing_sync.settle_ended.
     """
-    rec = db.get_listing(req.session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(req.session_id, request)
     creds = deps.ebay_creds_for(request)
     # Ending goes through EndItem, which needs the seller's own token. The
     # env-configured single-tenant credentials used to serve here via
@@ -12467,8 +12356,7 @@ def _settle_ending(session_id: str, rec: dict, creds: dict,
 # The runs going right now: user id -> job id. One per account: a second
 # press while the first is still going would end the listings the first is
 # already ending, and the copy it has already made.
-_END_RELIST_JOBS: dict[str, str] = {}
-_END_RELIST_LOCK = threading.Lock()
+_END_RELIST_JOBS = _OneRunPerAccount()
 
 
 def _remove_draft_quietly(draft_id: str, uid: Optional[str], why: str) -> None:
@@ -12650,8 +12538,8 @@ def _run_end_and_relist_job(job_id: str, records: list[dict], uid: str,
         # And owned: the route reports an id that is not this seller's by
         # queuing it as missing, and this re-read is not scoped, so the
         # check the by-id lookup made has to be made again here.
-        fresh = db.get_listing(rec["id"])
-        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
             return {"skip": "This listing is gone.", "needs_you": False}
         return _end_and_relist_one(fresh, uid, creds, base_url, provider)
 
@@ -12674,9 +12562,7 @@ def _run_end_and_relist_job(job_id: str, records: list[dict], uid: str,
             "Inactive tabs for where each one got to — if it keeps "
             f"happening, quote {reference} to support."))
     finally:
-        with _END_RELIST_LOCK:
-            if _END_RELIST_JOBS.get(uid) == job_id:
-                _END_RELIST_JOBS.pop(uid, None)
+        _END_RELIST_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/end-and-relist")
@@ -12690,9 +12576,7 @@ def end_and_relist(payload: dict, request: Request) -> dict:
     and two eBay calls — and returns {"job_id"} at once; poll
     /api/bulk/status/{job_id} for progress and the per-listing report.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -12700,42 +12584,23 @@ def end_and_relist(payload: dict, request: Request) -> dict:
         raise HTTPException(
             400, "The fresh copy is written by the AI, which isn't set up on "
                  "this server (ANTHROPIC_API_KEY).")
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or [])
-           if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to end and relist.")
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to end and relist.")
     uid = user["id"]
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would end, and copy, the same listings twice.
     job_id = storage.new_session_id()
-    with _END_RELIST_LOCK:
-        running = _END_RELIST_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True,
-                        "total": snap.get("total_items") or 0}
-        _END_RELIST_JOBS[uid] = job_id
+    joined = _END_RELIST_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
     try:
-        wanted = set(ids)
-        mine = db.get_listings(ids, uid)
-        # Listings the client asked for that aren't the seller's (or are
-        # gone) are reported rather than silently dropped from the totals.
-        missing = [{"id": rid, "status": "missing", "listing": {}}
-                   for rid in sorted(wanted - {r["id"] for r in mine})]
-        records = mine + missing
+        records = _ticked_records(ids, uid)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without
         # this the next press is told "already running".
-        with _END_RELIST_LOCK:
-            if _END_RELIST_JOBS.get(uid) == job_id:
-                _END_RELIST_JOBS.pop(uid, None)
+        _END_RELIST_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "end-and-relist", "phase": "relisting",
@@ -12899,8 +12764,7 @@ IMPORT_LIMIT = listing_sync.ACTIVE_LIMIT
 
 # The store mirror runs as a background job, one per account at a time.
 # user id -> job id of the import currently running for them.
-_IMPORT_JOBS: dict[str, str] = {}
-_IMPORT_LOCK = threading.Lock()
+_IMPORT_JOBS = _OneRunPerAccount()
 
 
 def _run_import_job(job_id: str, token: str, uid: str,
@@ -12939,9 +12803,7 @@ def _run_import_job(job_id: str, token: str, uid: str,
             "We couldn't import your eBay listings just now. Try again in a "
             f"moment — if it keeps happening, quote {reference} to support."))
     finally:
-        with _IMPORT_LOCK:
-            if _IMPORT_JOBS.get(uid) == job_id:
-                _IMPORT_JOBS.pop(uid, None)
+        _IMPORT_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/import-listings")
@@ -12968,15 +12830,10 @@ def import_listings(request: Request) -> dict:
         raise HTTPException(503, "No database configured — imported listings need "
                                  "DATABASE_URL set.")
     uid = user["id"]
-    with _IMPORT_LOCK:
-        running = _IMPORT_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True}
-            _IMPORT_JOBS.pop(uid, None)
-        job_id = storage.new_session_id()
-        _IMPORT_JOBS[uid] = job_id
+    job_id = storage.new_session_id()
+    joined = _IMPORT_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True}
     jobstore.register(job_id, {
         "id": job_id, "kind": "ebay-import", "phase": "listing", "done": False,
         "error": None, "current": 0, "total_items": 0,
@@ -13093,10 +12950,8 @@ def _is_unmodified(request: Optional[Request], etag: str, mtime: float) -> bool:
 
 @app.get("/media/{session_id}/optimized/{name}")
 def media(session_id: str, name: str, request: Request = None, v: str = ""):
-    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
-    path = (opt_dir / name).resolve()
-    # Guard against path traversal in `name` (e.g. "../../etc/passwd").
-    if opt_dir not in path.parents:
+    path = _photo_path(session_id, name, create=False)
+    if path is None:
         raise HTTPException(404, "Not found")
     if path.is_file():
         st = path.stat()
@@ -13290,9 +13145,7 @@ def etsy_settings_options(request: Request) -> dict:
 @app.post("/api/etsy/settings-options")
 def save_etsy_settings_options(request: Request, payload: dict) -> dict:
     _marketplace_or_404("etsy")
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     fields = {k: str(payload.get(k) or "").strip()
               for k in ETSY_SETTING_KEYS if k in payload}
     if not fields:
@@ -13350,8 +13203,7 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
 # published through the same door /api/publish uses — never a second copy of
 # the fan-out, because the rules that stop a duplicate live listing live
 # there.
-_CROSSPOST_JOBS: dict[str, str] = {}
-_CROSSPOST_LOCK = threading.Lock()
+_CROSSPOST_JOBS = _OneRunPerAccount()
 # How long the worker waits between listings. Etsy's limit is 10 requests a
 # second for the whole app and a publish is a dozen of them, so a batch that
 # went flat out would spend the allowance every seller shares.
@@ -13362,9 +13214,7 @@ def _etsy_provider_for(request: Request):
     """The Etsy provider and this user's credentials, or a 400 saying which
     part is missing — withheld, not connected, or not yet seated by Etsy."""
     provider = _marketplace_or_404("etsy")
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     pending, note = marketplaces.access_pending(provider, uid)
     if pending:
         raise HTTPException(400, note or "Etsy hasn't opened this app to your shop yet.")
@@ -13461,13 +13311,9 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
     # double tap that passed the check twice would put every listing on Etsy
     # twice, which is the one mistake this whole feature must not make.
     job_id = storage.new_session_id()
-    with _CROSSPOST_LOCK:
-        running = _CROSSPOST_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True}
-        _CROSSPOST_JOBS[uid] = job_id
+    joined = _CROSSPOST_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "joined": True}
     try:
         records = {r.get("id"): r for r in db.get_listings(
             [str(i["id"]) for i in items], uid)}
@@ -13476,9 +13322,7 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
             raise HTTPException(404, "None of those listings are here anymore.")
         base_url = _base_url(request)
     except BaseException:
-        with _CROSSPOST_LOCK:
-            if _CROSSPOST_JOBS.get(uid) == job_id:
-                _CROSSPOST_JOBS.pop(uid, None)
+        _CROSSPOST_JOBS.release(uid, job_id)
         raise
 
     jobstore.register(job_id, {
@@ -13503,8 +13347,8 @@ def _crosspost_one(job_id: str, uid: str, item: dict, mode: str,
     """One listing onto Etsy: write the Etsy fields the seller reviewed, then
     publish through the shared fan-out. Returns the row the job reports."""
     listing_id = str(item["id"])
-    rec = db.get_listing(listing_id) or {}
-    if not rec or (rec.get("user_id") and rec["user_id"] != uid):
+    rec = _owned_by(listing_id, uid)
+    if not rec:
         return {"status": "skipped", "message": "That listing isn't here any more."}
     ready, skipped = _crosspost_candidates([rec])
     if skipped:
@@ -13598,9 +13442,7 @@ def _run_crosspost_job(job_id: str, uid: str, items: list[dict], mode: str,
         log.exception("crosspost %s: run failed", job_id)
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
     finally:
-        with _CROSSPOST_LOCK:
-            if _CROSSPOST_JOBS.get(uid) == job_id:
-                _CROSSPOST_JOBS.pop(uid, None)
+        _CROSSPOST_JOBS.release(uid, job_id)
 
 
 def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
@@ -13647,7 +13489,7 @@ def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
             "total_items": len(items), "items": items,
             "_ids": ids, "_mode": mode, "_done": done + inflight, "_inflight": [],
         }, uid=uid)
-        with _CROSSPOST_LOCK:
+        with _CROSSPOST_JOBS.lock:
             _CROSSPOST_JOBS[uid] = job_id
         queue = [{"id": i} for i in ids if i in owned]
         threading.Thread(
@@ -13705,18 +13547,15 @@ def marketplace_connect(marketplace: str, request: Request,
     offsite = _offsite_connect(request, uid, f"/api/{marketplace}/connect", native)
     if offsite is not None:
         return offsite
-    import secrets as _secrets
-    nonce = _secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))
     resp = RedirectResponse(url)
     # Bind the flow to this browser, exactly like the eBay nonce cookie: the
     # callback requires the nonce here to match the one in the signed state
     # (CSRF protection). Flow secrets (e.g. Etsy's PKCE code_verifier) ride
     # along — httponly, 10 minutes, this browser only.
-    resp.set_cookie(_flow_cookie(marketplace),
-                    json.dumps({"nonce": nonce, **flow}),
-                    max_age=600, httponly=True, samesite="lax",
-                    secure=request.url.scheme == "https")
+    _set_flow_cookie(resp, request, _flow_cookie(marketplace),
+                     json.dumps({"nonce": nonce, **flow}))
     _mark_native_flow(resp, request, native)
     _mark_return_origin(resp, request, return_to)
     return resp
@@ -13775,9 +13614,7 @@ def marketplace_status(marketplace: str, request: Request) -> dict:
 @app.post("/api/{marketplace}/disconnect")
 def marketplace_disconnect(marketplace: str, request: Request) -> dict:
     provider = _marketplace_or_404(marketplace)
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # A disconnect that did not land is a failed disconnect, and saying so
     # is the whole point: the seller is told nothing changed and can retry,
     # instead of reloading onto a card that still says connected after being
@@ -13803,11 +13640,7 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
     swept after the grace period. `removed` in the answer says which, so the
     client knows whether to drop the card."""
     provider = _marketplace_or_404(marketplace)
-    rec = db.get_listing(req.session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(req.session_id, request)
     uid = deps.uid(request)
     creds = provider.creds_for(uid)
     if not creds:
@@ -13855,13 +13688,12 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
                 "your copy here — refresh in a moment to see the right "
                 "state.") from exc
         return {"ok": True, **res, "removed": removed}
-    new_status = (prev_status if prev_status in ("published", "live")
-                  else prev_status or "draft")
     # The marketplace really did end the listing, so `ok` is not the lie —
     # the lost write is. The record would still say `published`, and the app
     # would go on offering to revise and repromote something that is gone.
     # Same check the eBay end route already makes.
-    landed = db.upsert_listing(req.session_id, data, status=new_status,
+    landed = db.upsert_listing(req.session_id, data,
+                               status=prev_status or "draft",
                                user_id=uid or rec.get("user_id"))
     if db.enabled() and not landed:
         raise errors.StorageUnavailable(

@@ -32,10 +32,10 @@ import { Select } from "@/components/ui/fields";
 // /api/ebay/policies requests on its first paint, and every one of those is a
 // live round of eBay account calls (list_business_policies), against the same
 // app-wide allowance everything else here spends carefully. The editor's
-// PublishCard asks through here too. Cleared when it settles, so a later ask
+// cards and Quick Edit ask through here too. Cleared when it settles, so a later ask
 // (a reconnect, a retry after a failure) goes out fresh.
 let policiesInFlight = null;
-export function loadPolicies() {
+function loadPolicies() {
   if (!policiesInFlight) {
     policiesInFlight = api("/api/ebay/policies")
       .finally(() => { policiesInFlight = null; });
@@ -56,7 +56,7 @@ export function useFulfillmentPolicies() {
   };
 }
 
-export function policyLabel(p) {
+function policyLabel(p) {
   return `${p.name}${p.summary ? ` · ${p.summary}` : ""}`;
 }
 

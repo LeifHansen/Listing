@@ -37,7 +37,7 @@ def test_an_ended_listing_earns_no_recommendation():
 def test_no_ended_listing_reaches_the_ranked_list():
     """Not just the single-listing rule — the ranked list the dashboard reads."""
     items = [_ended(id=f"e{i}") for i in range(5)]
-    assert recommender.recommendations(items, limit=50) == []
+    assert recommender.ranked(items) == []
 
 
 def test_a_sold_listing_mislabelled_ended_is_not_offered_a_relist():
@@ -61,7 +61,7 @@ def test_the_relist_type_is_gone_from_every_rule():
                         "listing": {"title": "Live", "images": []}},
              {"id": "d1", "status": "unlisted", "title": "Draft",
               "listing": {"title": "Draft", "images": []}}]
-    recs = recommender.recommendations(
-        items, metrics_by_id={"e1": {"views": 200, "watchers": 0}}, limit=50)
+    recs = recommender.ranked(
+        items, metrics_by_id={"e1": {"views": 200, "watchers": 0}})
     assert recs, "the live and draft items should still be advised"
     assert all(r["type"] != "relist" for r in recs)

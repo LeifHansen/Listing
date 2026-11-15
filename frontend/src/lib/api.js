@@ -1,7 +1,7 @@
 import {
   ensureAiConsent, grantAiConsent, hasAiConsent,
 } from "@/lib/aiConsent";
-import { API_BASE, apiUrl, storedToken, tokenReady } from "@/lib/platform";
+import { API_BASE, apiUrl, storedToken, tokenPurchasesAllowed, tokenReady } from "@/lib/platform";
 import { noteRequestId } from "@/lib/clientErrors";
 import {
   decodeAppliesOrientation, drawOriented, fileHead, isJpeg, jpegOrientation,
@@ -108,6 +108,11 @@ function unknownOutcome(err, method) {
 // failures and were the two most likely to be live. 45 + 5x30, rounded up.
 export const PUBLISH_TIMEOUT_MS = 240000;
 
+// The out-of-tokens sentence without its "— or buy a token pack…" clause.
+export function withoutPurchasePrompt(detail) {
+  return String(detail).replace(/\s*[—-]+\s*or buy\b[^.]*\./i, ".");
+}
+
 export async function api(path, opts = {}) {
   if (AI_PHOTO_RE.test(path)) await ensureAiConsent();
   // Native shell: same-origin cookies never travel, so authenticate with the
@@ -196,6 +201,10 @@ export async function api(path, opts = {}) {
     // 402 the server maps Anthropic-credit exhaustion to): let the app shell
     // open the buy-tokens dialog on top of whatever toast the caller shows.
     if (res.status === 402 && /token/i.test(String(detail))) {
+      // A build that may not sell tokens must not tell the seller to buy
+      // them either (see tokenPurchasesAllowed): keep when the free ones
+      // come back, drop the invitation (services/tokens.insufficient_message).
+      if (!tokenPurchasesAllowed()) detail = withoutPurchasePrompt(detail);
       try { window.dispatchEvent(new CustomEvent("tokens:needed", { detail })); } catch (e) {}
     }
     // The session is gone: expired, or cancelled from another device by the
@@ -266,6 +275,12 @@ export function patchJson(path, body) {
 // the client polls instead of a single long request that a gateway or the
 // browser would time out ("server taking too long to respond"). If we give up
 // waiting, the server keeps working and saves the draft anyway.
+// No answer at all (a dropped connection, a timeout), a server error or a
+// rate limit: worth asking again. Anything else is the server's answer.
+function transientFailure(e) {
+  return e?.status == null || e.status >= 500 || e.status === 429;
+}
+
 export async function pollJob(jobId, {
   intervalMs = 1500, timeoutMs = 240000, onUpdate, stopWhen,
 } = {}) {
@@ -287,7 +302,20 @@ export async function pollJob(jobId, {
   let deadline = Date.now() + timeoutMs;
   let lastSeen = "";
   for (;;) {
-    const j = await api(`/api/bulk/status/${jobId}`);
+    let j;
+    try {
+      j = await api(`/api/bulk/status/${jobId}`);
+    } catch (e) {
+      // A status read that failed is not a job that failed: the work goes on
+      // on the server either way. A phone changing networks, or the minute a
+      // deploy restarts the machine, used to end the wait with "Couldn't …"
+      // while the job carried on. So a dropped connection or a server error
+      // is asked again until the same stage deadline; an answer the server
+      // gave on purpose (no such job, the session is gone) ends it.
+      if (!transientFailure(e) || Date.now() > deadline) throw e;
+      await new Promise((r) => setTimeout(r, intervalMs));
+      continue;
+    }
     if (onUpdate) {
       try { onUpdate(j); } catch { /* display-only */ }
     }
@@ -437,7 +465,7 @@ export async function downscaleAllForUpload(files, limit = 4) {
 // where their photo simply did not appear. It was missing .avif (which
 // current Android phones produce), .jfif and .jpe — `jpe?g` matches jpg and
 // jpeg, never jpe.
-export const IMAGE_EXT_RE =
+const IMAGE_EXT_RE =
   /\.(jpe|jpeg|jpg|jfif|png|webp|bmp|gif|tiff?|heic|heif|hif|avif)$/i;
 
 // What the file pickers advertise. One string, because two pickers that

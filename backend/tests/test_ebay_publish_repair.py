@@ -9,7 +9,7 @@ part it was named for.
 Two of those things, and the second is not housekeeping:
 
   1. Stamp the listings already here as the previous account's. Without it
-     `listing_sync.belongs_to` treats every unstamped record as belonging to
+     `listing_sync.owns` treats every unstamped record as belonging to
      whoever is connected now, and syncs and revises go on operating on the
      PREVIOUS seller's item ids.
 
@@ -44,6 +44,15 @@ ON_NEW_ACCOUNT = {
 }
 
 
+def _due(uid, now=None):
+    """Would the next publish re-check this account? Asked through the gate
+    the publish itself takes (claim_verify), and released straight away."""
+    if ebay_account.claim_verify(uid, now=now):
+        ebay_account.release_verify(uid)
+        return True
+    return False
+
+
 @pytest.fixture
 def repair(monkeypatch):
     """_with_current_policies with eBay and the database stubbed out.
@@ -60,11 +69,11 @@ def repair(monkeypatch):
         ebay_account.forget_verified("u1")
         monkeypatch.setattr(ebay_provider.ebay_auth,
                             "fetch_policies_and_location",
-                            lambda _t: dict(ON_NEW_ACCOUNT))
+                            lambda _t, **_kw: dict(ON_NEW_ACCOUNT))
         monkeypatch.setattr(ebay_provider.ebay_auth, "policy_ids_on_account",
-                            lambda _t: answers_policies)
+                            lambda _t, **_kw: answers_policies)
         monkeypatch.setattr(ebay_provider.ebay_auth, "location_keys_on_account",
-                            lambda _t: answers_location)
+                            lambda _t, **_kw: answers_location)
         monkeypatch.setattr(ebay_provider.db, "save_ebay_account",
                             lambda uid, **kw: saved.update(kw))
         monkeypatch.setattr(ebay_provider.db, "stamp_ebay_account",
@@ -118,12 +127,12 @@ def test_an_ebay_outage_changes_nothing_and_does_not_start_the_clock(repair):
     assert saved == {}
     assert stamped == []
     assert out == ACCT
-    assert ebay_account.verify_due("u1") is True
+    assert _due("u1") is True
 
 
 def test_a_conclusive_pass_is_not_repeated_on_the_next_publish(repair):
     repair(*ALL_MINE)
-    assert ebay_account.verify_due("u1") is False
+    assert _due("u1") is False
 
 
 def test_an_empty_slot_is_filled_from_the_connected_account(repair):

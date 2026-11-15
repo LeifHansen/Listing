@@ -278,3 +278,21 @@ def test_a_sandbox_key_is_a_config_warning(fresh_config):
     cfg = fresh_config(PHOTOROOM_API_KEY="live-key")
     assert cfg.PHOTOROOM_SANDBOX is False
     assert not any("sandbox key" in w for w in cfg.config_warnings())
+
+
+@pytest.mark.parametrize("value", ["0", "-2"])
+def test_a_retry_count_below_one_still_makes_one_attempt(value):
+    """BG_API_TRIES=0 used to make no request at all and then fail reading
+    the response that never came, so every cutout reported a generic error.
+    Read in a fresh interpreter: the setting is taken at import."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from backend.services import cutout_api; print(cutout_api._TRIES)"],
+        env={**os.environ, "BG_API_TRIES": value}, capture_output=True,
+        text=True, check=True, cwd=Path(__file__).resolve().parents[2])
+    assert out.stdout.strip().splitlines()[-1] == "1"

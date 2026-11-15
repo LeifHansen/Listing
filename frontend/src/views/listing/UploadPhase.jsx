@@ -168,6 +168,32 @@ export function UploadPhase({ defaultOpen = false }) {
   // Taken once, on mount — a later retry must not re-seed the drop zone.
   useEffect(() => { clearBulkRetry(); }, [clearBulkRetry]);
 
+  // Every preview is an object URL, and an object URL keeps its photo in
+  // memory until it is revoked. Removing a photo and the upload itself
+  // revoke theirs; leaving the screen with a pile still staged did not, so a
+  // shoot picked and walked away from stayed in memory for the life of the
+  // tab. A pile handed to a bulk upload is the store's from then on — it
+  // revokes them, or hands them back to the next uploader if the upload
+  // fails — so that one is left alone (see startBulk).
+  //
+  // Deferred a tick and re-checked, because StrictMode rehearses an unmount
+  // on every mount in development: revoking then would break the previews a
+  // failed batch has just handed back.
+  const filesNow = useRef(files);
+  useEffect(() => { filesNow.current = files; });
+  const handedOff = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      setTimeout(() => {
+        if (mounted.current || handedOff.current) return;
+        filesNow.current.forEach((f) => URL.revokeObjectURL(f.url));
+      }, 0);
+    };
+  }, []);
+
   // A question the seller walked away from.
   //
   // The step lives in this component, so opening Drafts — or reloading —
@@ -269,11 +295,13 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // The revokes below happen out here, never inside a setFiles updater: an
+  // updater has to be pure (see addFiles), and React runs it twice over in
+  // development.
   const removeFile = (i) => {
-    setFiles((cur) => {
-      URL.revokeObjectURL(cur[i].url);
-      return cur.filter((_, j) => j !== i);
-    });
+    const gone = files[i].url;
+    URL.revokeObjectURL(gone);
+    setFiles((cur) => cur.filter((f) => f.url !== gone));
   };
 
   const togglePick = (url) => {
@@ -292,23 +320,25 @@ export function UploadPhase({ defaultOpen = false }) {
   };
 
   const removePicked = () => {
-    setFiles((cur) => {
-      const kept = cur.filter((f) => !picked.has(f.url));
-      // Revoke only what actually left: a URL still on screen must keep
-      // working, and a revoked one renders as a broken tile.
-      cur.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
-      return kept;
-    });
+    // Revoke only what actually left: a URL still on screen must keep
+    // working, and a revoked one renders as a broken tile.
+    files.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
+    setFiles((cur) => cur.filter((f) => !picked.has(f.url)));
     endSelecting();
   };
 
   // The batch screen takes over on the click — no waiting on the upload with
   // the Sell tab still on screen — which unmounts this component, so the
   // upload itself runs from the store (see runBulkUpload).
-  const startBulk = once("bulk", async () => {
+  //
+  // `once` is applied at CALL time, as useListingForm.publish does: the body
+  // writes a ref, and a closure over one handed to once() during render is
+  // what React's refs rule refuses. Same in-flight guard, same key.
+  const startBulk = () => once("bulk", async () => {
     if (!files.length) return;
+    handedOff.current = true;   // the previews go with the pile
     await runBulkUpload(files, cutting, notes);
-  });
+  })();
 
   // The draft has landed — the same ending for the pass that ran straight
   // through and the one that waited for the seller's notes.
@@ -436,7 +466,8 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
-  const process = once("process", async () => {
+  // Call-time `once`, like startBulk above: it can end up in startBulk.
+  const process = () => once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
     setBusy(true);
@@ -495,7 +526,7 @@ export function UploadPhase({ defaultOpen = false }) {
       setBusy(false);
       setStage(null);
     }
-  });
+  })();
 
   if (busy || notesBusy) {
     // Real pipeline stages from the job status; the pre-job moment (uploading

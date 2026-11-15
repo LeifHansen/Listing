@@ -4,6 +4,8 @@ import "@/styles/tokens.css";
 import App from "@/App";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { installClientErrorReporting } from "@/lib/clientErrors";
+import { installNativeShell } from "@/lib/nativeShell";
+import { installStaleBuildReload } from "@/lib/staleBuild";
 
 // Before createRoot, so a throw during the very first render is caught by the
 // window handler even though the boundary below is not mounted yet. Installed
@@ -11,6 +13,10 @@ import { installClientErrorReporting } from "@/lib/clientErrors";
 // the built output at startup, and a second one there could not reach the
 // bundle's apiUrl anyway.
 installClientErrorReporting();
+// The shell's links and back button (a no-op on the web; see lib/nativeShell).
+installNativeShell();
+// A screen loaded on first use whose file a deploy replaced (lib/staleBuild).
+installStaleBuildReload();
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>

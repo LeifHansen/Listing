@@ -51,9 +51,7 @@ def notifications_list(request: Request, limit: int = 50,
 def notifications_mark_read(request: Request, payload: dict) -> dict:
     """Mark notifications read: {"ids": [...]} for specific ones, or
     {"all": true} for everything unread."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     if payload.get("all"):
         return {"marked": db.mark_notifications_read(uid)}
     ids = [str(i) for i in (payload.get("ids") or []) if i]
@@ -115,9 +113,7 @@ def messages_thread(conversation_id: str, request: Request,
 
     User-initiated, so this one fails honestly rather than soft-emptying.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     try:
         return messages_service.get_conversation(
             uid, conversation_id, limit=max(1, min(limit, 200)))
@@ -134,9 +130,7 @@ def messages_send(request: Request, payload: dict) -> dict:
     Returns the refreshed thread, so the client renders what the marketplace
     actually stored rather than the optimistic bubble it drew.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     text = str(payload.get("text") or "").strip()
     cid = str(payload.get("conversation_id") or "").strip()
     if not text:
@@ -161,8 +155,6 @@ def messages_mark_read(request: Request, payload: dict) -> dict:
     """Mark one conversation read. Best-effort: the badge re-syncs on the next
     poll, so a marketplace that refuses this never becomes an error the seller
     has to look at."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     cid = str(payload.get("conversation_id") or "").strip()
     return {"ok": bool(cid) and messages_service.mark_read(uid, cid)}

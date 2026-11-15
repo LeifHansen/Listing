@@ -74,7 +74,6 @@ function stub(sets, over = {}) {
     set: (field, value) => sets.push([field, value]),
     suggestCategories: () => {},
     chooseCategory: () => {},
-    loadCategoryMeta: () => {},
   };
 }
 

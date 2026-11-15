@@ -124,11 +124,15 @@ export function ShopMode() {
     }
   });
 
-  const buy = once("buy", async () => {
+  const buy = once("buy", async (how) => {
     if (!result) return;
-    if (!user) {
+    // The resume below runs in the same tick the login sets the user, so this
+    // closure still sees nobody signed in; without the flag it asked again,
+    // reopening the sign-in and never adding the find. (A click passes its
+    // event here, which carries no such flag.)
+    if (!user && how?.signedIn !== true) {
       // Resume the buy after the login that interrupted it.
-      openAuth(() => buy());
+      openAuth(() => buy({ signedIn: true }));
       return;
     }
     try {

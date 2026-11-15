@@ -37,7 +37,7 @@ export const MAX_PHOTOS = 24;
 // an upload that succeeds onto a listing that shows no video is the worst way
 // to learn the rule. Mirrors models.MAX_VIDEOS — keep the two in step.
 export const MAX_VIDEOS = 1;
-export const EBAY_MIN_PRICE = 0.99;
+const EBAY_MIN_PRICE = 0.99;
 
 // Does this publish include eBay? `targets` is the effectiveTargets array
 // from publishShared (null = the legacy single-eBay path). eBay-only
@@ -248,15 +248,14 @@ export function blockerLabels(blockers) {
    leave the return policy and the photo for later, exactly as the server
    lets it. */
 
-export const ETSY_MIN_PRICE = 0.20;
-export const ETSY_TITLE_MAX = 140;
-export const ETSY_MAX_PHOTOS = 10;
+const ETSY_MIN_PRICE = 0.20;
+const ETSY_TITLE_MAX = 140;
 // Etsy's ceiling on words in capitals. Mirrors mapping_etsy.ALL_CAPS_WORD_LIMIT.
-export const ETSY_ALL_CAPS_WORD_LIMIT = 3;
-export const ETSY_WHO_MADE = ["i_did", "someone_else", "collective"];
+const ETSY_ALL_CAPS_WORD_LIMIT = 3;
+const ETSY_WHO_MADE = ["i_did", "someone_else", "collective"];
 // Etsy's when_made vocabulary; the top bucket is renamed every January.
 // Mirrors mapping_etsy.WHEN_MADE — keep the two in step.
-export const ETSY_WHEN_MADE = [
+const ETSY_WHEN_MADE = [
   "made_to_order", "2020_2026", "2010_2019", "2007_2009", "before_2007",
   "2000_2006", "1990s", "1980s", "1970s", "1960s", "1950s", "1940s",
   "1930s", "1920s", "1910s", "1900s", "1800s", "1700s", "before_1700",
@@ -295,7 +294,7 @@ export function etsyTitle(title) {
 
 // The most recent year a when_made bucket can mean; null for made-to-order
 // or anything outside Etsy's list. Mirrors mapping_etsy.when_made_latest_year.
-export function whenMadeLatestYear(whenMade) {
+function whenMadeLatestYear(whenMade) {
   if (!ETSY_WHEN_MADE.includes(whenMade) || whenMade === "made_to_order") return null;
   if (whenMade.startsWith("before_")) return Number(whenMade.slice(7)) - 1;
   if (whenMade.includes("_")) return Number(whenMade.split("_")[1]);
@@ -417,12 +416,16 @@ export function blockersFor(listing, targets,
   return out;
 }
 
+// One marketplace key in words: "eBay", "Etsy", "Depop".
+export function marketLabel(key) {
+  return key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 // "eBay", "Etsy", "eBay and Etsy" — the marketplaces a publish is going to,
 // in words, for every sentence that used to say "eBay" unconditionally.
 export function marketNames(targets) {
   const keys = targets && targets.length ? targets : ["ebay"];
-  const label = (k) => (k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1));
-  const names = keys.map(label);
+  const names = keys.map(marketLabel);
   return names.length > 1
     ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
     : names[0];

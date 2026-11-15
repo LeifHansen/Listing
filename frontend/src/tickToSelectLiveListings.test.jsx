@@ -137,6 +137,8 @@ describe("the listings manager on two marketplaces", () => {
     const open = [...host.querySelectorAll("button")]
       .find((b) => b.textContent.includes("Crosspost to Etsy"));
     await act(async () => { open.click(); });
+    // The wizard is fetched the first time it opens (see ListingsView).
+    await act(async () => { await import("@/views/crosspost/CrosspostWizard"); });
     const dialog = document.querySelector("[role=dialog]") || document.body;
     expect(dialog.textContent).toContain("Item a");
     // Nothing Etsy would refuse on this one, judged against the shop defaults.

@@ -19,7 +19,7 @@ import uuid as _uuid
 from typing import Optional, Sequence
 
 from sqlalchemy import (DateTime, Index, JSON, String, and_, create_engine,
-                        delete, func, or_, select, text)
+                        delete, func, or_, select, text, update)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -860,6 +860,20 @@ def mutate_listing_data(
         return None
 
 
+def _page_after(before: tuple[_dt.datetime, str], ts_col, id_col):
+    """The rows that follow `before` -- the `(timestamp, id)` of the previous
+    page's last row -- in `(timestamp DESC, id DESC)` order. The keyset
+    condition behind every "load older" in this module.
+
+    Spelled out rather than as a row-value comparison, which older SQLite
+    builds do not accept. `id` breaks the ties: timestamps collide readily
+    (an import writes a whole store in one pass), and a cursor that cannot
+    separate two rows with the same instant either repeats them or skips them.
+    """
+    ts, last_id = before
+    return or_(ts_col < ts, and_(ts_col == ts, id_col < last_id))
+
+
 def list_listings(limit: int = 50, user_id: Optional[str] = None,
                   statuses: Optional[tuple[str, ...]] = None,
                   before: Optional[tuple[_dt.datetime, str]] = None,
@@ -927,15 +941,8 @@ def list_listings(limit: int = 50, user_id: Optional[str] = None,
                 # there are more, and skip rows across a keyset cursor.
                 q = q.where(ListingRecord.status != SCANNED)
             if before is not None:
-                # Spelled out rather than as a row-value comparison, which
-                # older SQLite builds do not accept. `id` breaks the ties:
-                # timestamps collide readily (an import writes a whole store
-                # in one pass), and a cursor that cannot separate two rows
-                # with the same instant either repeats them or skips them.
-                ts, last_id = before
-                q = q.where(or_(ListingRecord.updated_at < ts,
-                                and_(ListingRecord.updated_at == ts,
-                                     ListingRecord.id < last_id)))
+                q = q.where(_page_after(before, ListingRecord.updated_at,
+                                        ListingRecord.id))
             q = q.order_by(ListingRecord.updated_at.desc(),
                            ListingRecord.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -1046,19 +1053,16 @@ def list_releasable_listings(user_id: str, account: str,
         return []
     try:
         with Session(eng) as s:
-            account_col = _json_text(ListingRecord.data, "ebay_account")
             # Stamped with somebody else's name. The sentinel a switch writes
             # is just another name, so it lands here too.
-            foreign = and_(account_col.is_not(None), account_col != "",
-                           account_col != account)
+            foreign = _other_ebay_owner(account)
             where = foreign
             if include_unowned:
                 # No owner recorded at all. Not narrowed to records carrying
                 # an eBay id: `releasable` also accepts a `marketplaces.ebay`
                 # entry, and this query only has to be wide enough to contain
                 # every record that predicate would say yes to.
-                where = or_(foreign, or_(account_col.is_(None),
-                                         account_col == ""))
+                where = or_(foreign, _no_ebay_owner())
             rows = s.execute(
                 select(ListingRecord)
                 .where(ListingRecord.user_id == user_id)
@@ -1864,15 +1868,6 @@ def get_ebay_account(user_id: str) -> Optional[dict]:
             "moment.") from exc
 
 
-def get_ebay_account_best_effort(user_id: str) -> Optional[dict]:
-    """get_ebay_account for advisory callers — see
-    get_marketplace_account_best_effort."""
-    try:
-        return get_ebay_account(user_id)
-    except StorageUnavailable:
-        return None
-
-
 def record_deletion_notice(notification_id: str, ebay_user_id: str,
                            payload_digest: str) -> str:
     """Durably accept one deletion notice. Returns "new" or "duplicate".
@@ -1987,13 +1982,36 @@ def _json_text(column, key: str):
     for an absent key, so `!= ''` drops missing and blank alike.
 
     Only safe to compare as text for a field the Listing model types as `str`
-    — which the two callers below both do (models.Listing.ebay_account and
-    .ebay_listing_id, defaulting to ""), and every write goes through the
-    model. For a field that could hold a number or a bool, `->>` would render
-    it as "0"/"false" and a text comparison would disagree with Python's
-    truth test.
+    — which both fields the ownership conditions below read are
+    (models.Listing.ebay_account and .ebay_listing_id, defaulting to ""), and
+    every write goes through the model. For a field that could hold a number
+    or a bool, `->>` would render it as "0"/"false" and a text comparison
+    would disagree with Python's truth test.
     """
     return column[key].as_string()
+
+
+# The eBay-ownership conditions the banner counts, the stamp writes and the
+# unlink pass reads. Built in one place so the count a seller is shown and the
+# rows an action then touches cannot drift apart.
+
+def _no_ebay_owner():
+    """No owning eBay account recorded: the label is absent or blank."""
+    account_col = _json_text(ListingRecord.data, "ebay_account")
+    return or_(account_col.is_(None), account_col == "")
+
+
+def _other_ebay_owner(account: str):
+    """Labelled with some eBay account other than `account`. An absent label
+    is NULL, which neither comparison admits, so it is not "other"."""
+    account_col = _json_text(ListingRecord.data, "ebay_account")
+    return and_(account_col != "", account_col != account)
+
+
+def _unowned_ebay_record():
+    """Carries an eBay item id but no owning account."""
+    item_col = _json_text(ListingRecord.data, "ebay_listing_id")
+    return and_(_no_ebay_owner(), item_col != "")
 
 
 def stamp_ebay_account(user_id: str, account: str) -> int:
@@ -2020,13 +2038,10 @@ def stamp_ebay_account(user_id: str, account: str) -> int:
             # mirrored store is thousands of them, and on the common case (a
             # reconnect where everything is already labelled) every single one
             # was fetched only to be skipped.
-            account_col = _json_text(ListingRecord.data, "ebay_account")
-            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
             rows = s.execute(
                 select(ListingRecord)
                 .where(ListingRecord.user_id == user_id)
-                .where(or_(account_col.is_(None), account_col == ""))
-                .where(item_col != "")
+                .where(_unowned_ebay_record())
             ).scalars().all()
             for rec in rows:
                 data = dict(rec.data or {})
@@ -2061,12 +2076,11 @@ def count_foreign_listings(user_id: str, account: str) -> int:
             # Python version fetched every listing's whole JSON blob — a
             # mirrored store is megabytes of it, over a cross-region link,
             # to produce one integer nothing else in the response needs.
-            account_col = _json_text(ListingRecord.data, "ebay_account")
             return int(s.execute(
                 select(func.count())
                 .select_from(ListingRecord)
                 .where(ListingRecord.user_id == user_id)
-                .where(account_col != "", account_col != account)
+                .where(_other_ebay_owner(account))
             ).scalar_one() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: count_foreign_listings failed: {exc}")
@@ -2088,14 +2102,11 @@ def count_unowned_ebay_listings(user_id: str) -> int:
         if eng is None:
             return 0
         with Session(eng) as s:
-            account_col = _json_text(ListingRecord.data, "ebay_account")
-            item_col = _json_text(ListingRecord.data, "ebay_listing_id")
             return int(s.execute(
                 select(func.count())
                 .select_from(ListingRecord)
                 .where(ListingRecord.user_id == user_id)
-                .where(or_(account_col.is_(None), account_col == ""))
-                .where(item_col != "")
+                .where(_unowned_ebay_record())
             ).scalar_one() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: count_unowned_ebay_listings failed: {exc}")
@@ -2195,24 +2206,11 @@ def get_marketplace_account(user_id: str, marketplace: str) -> Optional[dict]:
         # None, `publish` takes its dry-run branch, and the seller who pressed
         # Publish is handed ok=True with nothing listed. The provider's own
         # comment already names that outcome for a failed token SAVE; the read
-        # underneath it had the same hole. Advisory callers take
-        # get_marketplace_account_best_effort instead, by name.
+        # underneath it had the same hole.
         log.warning(f"db: get_marketplace_account failed: {exc}")
         raise StorageUnavailable(
             "We couldn't check your marketplace connection just now. Try "
             "again in a moment.") from exc
-
-
-def get_marketplace_account_best_effort(user_id: str,
-                                        marketplace: str) -> Optional[dict]:
-    """get_marketplace_account for callers that only DECORATE a screen with
-    the connection state — a badge, a settings default, a status row. They opt
-    in to None-on-failure by name, so the choice is visible at the call site
-    rather than being every caller's silent default."""
-    try:
-        return get_marketplace_account(user_id, marketplace)
-    except StorageUnavailable:
-        return None
 
 
 def disconnect_marketplace_account(user_id: str, marketplace: str) -> bool:
@@ -2518,7 +2516,7 @@ def plan_spend(free_quota: int, free_used: int, purchased: int,
     Lives here, beside token_spend, because token_spend is its only caller and
     a debit rule with two implementations is a debit rule with none: this was a
     copy in services/tokens.py that the billing tests exercised while the row
-    lock below ran its own inline version. Re-exported as tokens.plan_spend.
+    lock below ran its own inline version.
     """
     free_remaining = max(0, free_quota - max(0, free_used))
     if amount <= 0:
@@ -2869,17 +2867,19 @@ def mark_notifications_read(user_id: str,
         if eng is None or not user_id:
             return 0
         with Session(eng) as s:
-            q = select(Notification).where(Notification.user_id == user_id,
+            # One UPDATE, rather than loading every unread row into the
+            # session to stamp each in Python and flush it back.
+            q = update(Notification).where(Notification.user_id == user_id,
                                            Notification.read_at.is_(None))
             if ids is not None:
                 if not ids:
                     return 0
                 q = q.where(Notification.id.in_(list(ids)[:200]))
-            rows = s.execute(q).scalars().all()
-            for row in rows:
-                row.read_at = _now()
+            changed = s.execute(
+                q.values(read_at=_now())
+                .execution_options(synchronize_session=False)).rowcount
             s.commit()
-            return len(rows)
+            return int(changed or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: mark_notifications_read failed: {exc}")
         return 0
@@ -2981,10 +2981,8 @@ def admin_audit_list(limit: int = 50,
         with Session(eng) as s:
             q = select(AdminAuditLog)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(AdminAuditLog.created_at < ts,
-                                and_(AdminAuditLog.created_at == ts,
-                                     AdminAuditLog.id < last_id)))
+                q = q.where(_page_after(before, AdminAuditLog.created_at,
+                                        AdminAuditLog.id))
             q = q.order_by(AdminAuditLog.created_at.desc(),
                            AdminAuditLog.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -3107,10 +3105,8 @@ def error_events_list(limit: int = 50,
         with Session(eng) as s:
             q = select(ErrorEvent)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(ErrorEvent.last_seen < ts,
-                                and_(ErrorEvent.last_seen == ts,
-                                     ErrorEvent.id < last_id)))
+                q = q.where(_page_after(before, ErrorEvent.last_seen,
+                                        ErrorEvent.id))
             if since_hours:
                 cutoff = _now() - _dt.timedelta(hours=int(since_hours))
                 q = q.where(ErrorEvent.last_seen >= cutoff)
@@ -3240,10 +3236,8 @@ def admin_list_users(limit: int = 50,
                     User.display_name.icontains(q, autoescape=True),
                     User.id == q))
             if before is not None:
-                ts, last_id = before
-                query = query.where(or_(User.created_at < ts,
-                                        and_(User.created_at == ts,
-                                             User.id < last_id)))
+                query = query.where(_page_after(before, User.created_at,
+                                                User.id))
             query = query.order_by(User.created_at.desc(),
                                    User.id.desc()).limit(limit)
             rows = s.execute(query).scalars().all()
@@ -3384,13 +3378,12 @@ def admin_platform_kpis(days: int = 30) -> dict:
             signup_stamps = [row for row in s.execute(
                 select(User.created_at).where(User.created_at >= since)
             ).scalars() if row is not None]
-            active: set[str] = set()
-            active.update(uid for uid in s.execute(
-                select(ListingRecord.user_id.distinct())
+            active: set[str] = set(s.execute(
+                select(ListingRecord.user_id).distinct()
                 .where(ListingRecord.updated_at >= since)
                 .where(ListingRecord.user_id.is_not(None))).scalars())
-            active.update(uid for uid in s.execute(
-                select(TokenLedger.user_id.distinct())
+            active.update(s.execute(
+                select(TokenLedger.user_id).distinct()
                 .where(TokenLedger.created_at >= since)).scalars())
             by_status = {status: int(count or 0) for status, count in s.execute(
                 select(ListingRecord.status, func.count())
@@ -3521,10 +3514,8 @@ def admin_ledger(limit: int = 50,
             if user_id:
                 q = q.where(TokenLedger.user_id == user_id)
             if before is not None:
-                ts, last_id = before
-                q = q.where(or_(TokenLedger.created_at < ts,
-                                and_(TokenLedger.created_at == ts,
-                                     TokenLedger.id < last_id)))
+                q = q.where(_page_after(before, TokenLedger.created_at,
+                                        TokenLedger.id))
             q = q.order_by(TokenLedger.created_at.desc(),
                            TokenLedger.id.desc()).limit(limit)
             rows = s.execute(q).scalars().all()
@@ -3574,10 +3565,8 @@ def admin_list_listings(limit: int = 50,
             if user_id:
                 query = query.where(ListingRecord.user_id == user_id)
             if before is not None:
-                ts, last_id = before
-                query = query.where(or_(ListingRecord.updated_at < ts,
-                                        and_(ListingRecord.updated_at == ts,
-                                             ListingRecord.id < last_id)))
+                query = query.where(_page_after(before, ListingRecord.updated_at,
+                                                ListingRecord.id))
             query = query.order_by(ListingRecord.updated_at.desc(),
                                    ListingRecord.id.desc()).limit(limit)
             # ->> hands back TEXT on Postgres and a real number on SQLite's

@@ -155,7 +155,14 @@ def dbmod(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     importlib.reload(db)
     monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
-    return db
+    yield db
+    # The reloaded module keeps its engine after the URL is restored; close
+    # it rather than leave a connection pool on a deleted file for the
+    # garbage collector (the suite's "unclosed database" ResourceWarnings).
+    if db._engine is not None:
+        db._engine.dispose()
+    db._engine = None
+    db._initialized = False
 
 
 @pytest.fixture(autouse=True)

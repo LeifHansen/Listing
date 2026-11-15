@@ -22,6 +22,7 @@ from .. import config
 from ..config import log
 from ..etsy_auth import api_headers
 from ..models import Listing
+from .ebay import NEVER_SENT
 
 
 def _headers(access_token: str) -> dict:
@@ -113,15 +114,11 @@ class UnknownOutcome(EtsyError):
     outcome_unknown = True
 
 
-# Transport failures that prove the request never reached Etsy: no connection
-# was established, so nothing there could have acted on it. Everything else,
-# including an exception type nobody here anticipated, is unknown -- the same
-# asymmetry the Trading and orders clients use, for the same reason.
-_NEVER_SENT = (
-    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
-    httpx.UnsupportedProtocol, httpx.InvalidURL,
-)
-
+# Transport failures that prove the request never reached Etsy are
+# ebay.NEVER_SENT: no connection was established, so nothing there could have
+# acted on it. Everything else, including an exception type nobody here
+# anticipated, is unknown -- the same asymmetry the Trading and orders clients
+# use, for the same reason.
 _UNKNOWN_ISSUE = {
     "target": "generic", "level": "error",
     "title": "We could not confirm what Etsy did",
@@ -203,7 +200,7 @@ def _send(doing: str, changes: bool, call, *args, **kwargs) -> httpx.Response:
     for attempt in (1, 2):
         try:
             resp = call(*args, **kwargs)
-        except _NEVER_SENT as exc:
+        except NEVER_SENT as exc:
             raise _unreachable(doing, exc) from exc
         except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
             if changes:
