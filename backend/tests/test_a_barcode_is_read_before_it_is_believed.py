@@ -362,3 +362,14 @@ def test_a_upc_prices_the_product_instead_of_the_words_in_the_title(monkeypatch)
     assert seen.get("q") == "vintage teacup"
     assert "gtin" not in seen
     assert out["label"] == "Live asking prices on eBay"
+
+
+def test_an_identifiers_answer_that_is_not_a_list_never_fails_the_draft():
+    """The model is asked for a list. A single object where the list should
+    be is still that one identifier; a number, a string or null is none --
+    and neither may raise, because it runs after the photos were paid for."""
+    one = barcodes.from_scan({"value": "9780306406157", "type": "isbn"})
+    assert [e["value"] for e in one] == ["9780306406157"]
+    assert one[0]["verified"] is True
+    for raw in (5, "9780306406157", None, True, 1.5):
+        assert barcodes.from_scan(raw) == []

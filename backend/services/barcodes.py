@@ -229,9 +229,17 @@ def from_scan(raw) -> list[dict]:
     Returns [{"value", "kind", "symbology", "source", "verified"}], with
     "checksum_failed" set on the ones that were code-shaped and wrong.
     """
+    # The schema asks for a list, but this is model output: one identifier
+    # sent as a bare object is still that identifier, and anything else that
+    # is not a list is no identifiers -- never an exception that fails the
+    # whole draft after its photos were paid for.
+    if isinstance(raw, dict):
+        raw = [raw]
+    elif not isinstance(raw, list):
+        return []
     out: list[dict] = []
     seen: set[str] = set()
-    for entry in (raw or [])[:8]:
+    for entry in raw[:8]:
         if not isinstance(entry, dict):
             continue
         value = str(entry.get("value", "")).strip()[:64]
