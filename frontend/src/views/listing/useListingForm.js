@@ -535,16 +535,23 @@ export function useListingForm() {
     }));
   }, [imageBase]);
 
+  // The photo list, written to the form and the session together. A form and
+  // session that disagree about the photos are what made a delete followed by
+  // a drag come back as "this listing's photos changed somewhere else" — and
+  // the session's copy is what the next full save spreads.
+  const setImages = useCallback((imgs) => {
+    setForm((f) => ({ ...f, images: imgs }));
+    setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+  }, [setSession]);
+
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
   // server delete fails.
   //
-  // The SESSION is updated alongside the form, and the server's remaining
-  // list is applied on top. Both matter beyond tidiness: the delete is now
-  // persisted server-side (see /api/delete-image), so its answer is the list
-  // the next reorder is checked against — and a form and session that
-  // disagree about the photos are what made a delete followed by a drag come
-  // back as "this listing's photos changed somewhere else".
+  // The SESSION is updated alongside the form (setImages), and the server's
+  // remaining list is applied on top. Both matter beyond tidiness: the delete
+  // is now persisted server-side (see /api/delete-image), so its answer is
+  // the list the next reorder is checked against.
   const deleteImage = useCallback(async (name, confirmFn) => {
     const prev = form.images || [];
     if (prev.length <= 1) {
@@ -557,10 +564,6 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
-    const setImages = (imgs) => {
-      setForm((f) => ({ ...f, images: imgs }));
-      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
-    };
     const next = prev.filter((n) => n !== name);
     setImages(next);
     try {
@@ -573,7 +576,7 @@ export function useListingForm() {
       setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
+  }, [form.images, sessionId, setImages, invalidateListings, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
@@ -587,30 +590,22 @@ export function useListingForm() {
   const reorderImages = useCallback(async (nextImages) => {
     const imgs = [...nextImages];
     const previous = form.images || [];
-    setForm((f) => ({ ...f, images: imgs }));
-    setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    setImages(imgs);
     if (!sessionId) return;
     try {
-      const res = await api(`/api/listings/${sessionId}/images/order`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ images: imgs }),
-      });
+      const res = await patchJson(`/api/listings/${sessionId}/images/order`,
+        { images: imgs });
       // The server's answer wins — it is what eBay will be handed.
       const saved = res.images || imgs;
-      if (saved.join("|") !== imgs.join("|")) {
-        setForm((f) => ({ ...f, images: saved }));
-        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
-      }
+      if (saved.join("|") !== imgs.join("|")) setImages(saved);
       // The first image is the card's thumbnail, so a reorder can change what
       // every listing card is showing.
       invalidateListings();
     } catch (e) {
-      setForm((f) => ({ ...f, images: previous }));
-      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
+      setImages(previous);
       toast(`Photo order not saved: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
+  }, [form.images, sessionId, setImages, invalidateListings, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
@@ -685,8 +680,7 @@ export function useListingForm() {
           // Still on this listing: onto its photos and fields as they are
           // now, which is also what the editor goes on showing.
           const next = append(now.images);
-          setForm((f) => ({ ...f, images: next }));
-          setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
+          setImages(next);
           payload = { ...now.collect(), images: next };
         } else {
           // The seller has moved on to another listing, whose editor this
@@ -719,7 +713,7 @@ export function useListingForm() {
       setAddingPhotos(false);
       setAddingStatus("");
     }
-  }, [sessionId, setForm, setSession, invalidateListings, toast, rememberSaved]);
+  }, [sessionId, setImages, invalidateListings, toast, rememberSaved]);
 
   // ---------- the listing's video ----------
   // eBay takes ONE video per listing, MP4, and this is the whole of the
