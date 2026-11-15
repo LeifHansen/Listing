@@ -2377,13 +2377,19 @@ def _connect_uid(request: Request, ticket: str) -> Optional[str]:
     return deps.uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
 
 
+def _set_flow_cookie(resp, request: Request, name: str, value: str) -> None:
+    """Set one of an OAuth flow's cookies: this browser only, ten minutes, and
+    Lax so it rides the top-level redirect back from the marketplace."""
+    resp.set_cookie(name, value, max_age=600, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https")
+
+
 def _mark_native_flow(resp, request: Request, native: str) -> None:
     """Remember that this OAuth flow began inside the native shell, so the
     callback can send the webview back into the app instead of leaving the
     user stranded on the website. Rides a cookie exactly like the nonce."""
     if _truthy(native):
-        resp.set_cookie(NATIVE_RETURN_COOKIE, "app", max_age=600, httponly=True,
-                        samesite="lax", secure=request.url.scheme == "https")
+        _set_flow_cookie(resp, request, NATIVE_RETURN_COOKIE, "app")
 
 
 def _request_origin(request: Request) -> str:
@@ -2430,9 +2436,7 @@ def _mark_return_origin(resp, request: Request, return_to: str) -> None:
     """
     origin = (return_to or "").strip().rstrip("/")
     if origin and origin != _request_origin(request) and config.oauth_return_ok(origin):
-        resp.set_cookie(RETURN_ORIGIN_COOKIE, origin, max_age=600,
-                        httponly=True, samesite="lax",
-                        secure=request.url.scheme == "https")
+        _set_flow_cookie(resp, request, RETURN_ORIGIN_COOKIE, origin)
 
 
 def _finish_connect(request: Request, path: str):
@@ -2481,14 +2485,12 @@ def ebay_connect(request: Request, ticket: str = "", native: str = "",
     offsite = _offsite_connect(request, uid, "/api/ebay/connect", native)
     if offsite is not None:
         return offsite
-    import secrets as _secrets
-    nonce = _secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
     resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
     # Bind the flow to this browser: the callback requires this cookie to match
     # the nonce embedded in the signed state (CSRF protection). Lax so it rides
     # the top-level redirect back from eBay.
-    resp.set_cookie(EBAY_NONCE_COOKIE, nonce, max_age=600, httponly=True,
-                    samesite="lax", secure=request.url.scheme == "https")
+    _set_flow_cookie(resp, request, EBAY_NONCE_COOKIE, nonce)
     _mark_native_flow(resp, request, native)
     _mark_return_origin(resp, request, return_to)
     return resp
@@ -13670,18 +13672,15 @@ def marketplace_connect(marketplace: str, request: Request,
     offsite = _offsite_connect(request, uid, f"/api/{marketplace}/connect", native)
     if offsite is not None:
         return offsite
-    import secrets as _secrets
-    nonce = _secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))
     resp = RedirectResponse(url)
     # Bind the flow to this browser, exactly like the eBay nonce cookie: the
     # callback requires the nonce here to match the one in the signed state
     # (CSRF protection). Flow secrets (e.g. Etsy's PKCE code_verifier) ride
     # along — httponly, 10 minutes, this browser only.
-    resp.set_cookie(_flow_cookie(marketplace),
-                    json.dumps({"nonce": nonce, **flow}),
-                    max_age=600, httponly=True, samesite="lax",
-                    secure=request.url.scheme == "https")
+    _set_flow_cookie(resp, request, _flow_cookie(marketplace),
+                     json.dumps({"nonce": nonce, **flow}))
     _mark_native_flow(resp, request, native)
     _mark_return_origin(resp, request, return_to)
     return resp
