@@ -17,7 +17,7 @@ import {
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Textarea, Select } from "@/components/ui/fields";
+import { Field, InfoTip, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { Section } from "./Section";
 import { PhotoTile } from "./PhotoTile";
@@ -889,9 +889,19 @@ export function PricingCard({ w }) {
       <div className="flex flex-col gap-4">
         {/* The same three the draft cards offer, with the same names (see
             lib/listingFormat). "Both" is an auction carrying a Buy It Now
-            price; the ⓘ says so, because the label alone cannot. */}
-        <Field label="Selling format" help={settled ? settledWhy : FORMAT_HELP[fmt]}>
-          <div className={cn(
+            price; the ⓘ says so, because the label alone cannot.
+
+            Not wrapped in <Field>: that renders a <label>, and a label
+            hands every click inside it to its first control -- so tapping
+            the heading, or the ⓘ to read what "Both" means, switched the
+            listing to Buy It Now. The heading is drawn the way Field draws
+            one, over a named group. */}
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
+            Selling format
+            <InfoTip text={settled ? settledWhy : FORMAT_HELP[fmt]} />
+          </span>
+          <div role="group" aria-label="Selling format" className={cn(
             "inline-flex w-full sm:w-auto rounded-input border border-line p-0.5 bg-bg-sunken",
             settled && "opacity-60",
           )}>
@@ -913,7 +923,7 @@ export function PricingCard({ w }) {
               </button>
             ))}
           </div>
-        </Field>
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
           {isAuction && (
