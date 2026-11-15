@@ -165,7 +165,7 @@ def owns(listing: Listing | dict, account) -> bool:
 
     Records that predate immutable ids fall back to the username, which is
     all they have. Refusing those outright would strand sellers who did
-    nothing wrong, so they stay readable — but see `may_write`.
+    nothing wrong, so they stay readable.
     """
     owner_id = account_id_of(listing)
     caller_id, caller_name = _identity(account)
@@ -209,54 +209,6 @@ def matchable(listing: Listing | dict, account) -> bool:
     owner_id = account_id_of(listing)
     caller_id, _caller_name = _identity(account)
     return not (owner_id and caller_id and owner_id != caller_id)
-
-
-def may_write(listing: Listing | dict, account) -> bool:
-    """True when this record may be WRITTEN on `account`'s behalf.
-
-    Stricter than `owns`, because the failures are not symmetric: showing a
-    seller a listing that turns out not to be theirs is a confusing screen,
-    while REVISING one is an edit to a stranger's live listing that no later
-    correction undoes.
-
-    So a write needs the caller to be identified, and needs the record to
-    agree — by immutable id where there is one, by a named username where the
-    record is too old to have anything better.
-    """
-    caller_id, caller_name = _identity(account)
-    if not caller_id and not caller_name:
-        # Nothing to prove ownership against.
-        return False
-    owner_id = account_id_of(listing)
-    if owner_id:
-        return bool(caller_id) and owner_id == caller_id
-    owner_name = account_of(listing)
-    if owner_name == UNKNOWN_ACCOUNT:
-        return False
-    if not owner_name:
-        # A legacy record with no owner recorded. The connected account is
-        # the only one it can plausibly belong to, and refusing would make
-        # every pre-existing listing permanently uneditable.
-        return True
-    return bool(caller_name) and owner_name == caller_name
-
-
-def belongs_to(listing: Listing | dict, account: str) -> bool:
-    """Deprecated alias for `owns`, kept for callers that hold only a name.
-
-    This used to be the ownership rule itself, and it decided on the seller's
-    eBay USERNAME — a display name they can change. Worse, it returned True
-    when EITHER side was blank, so a connected account whose identity could
-    not be read (the identity scope 403s on older connections) matched every
-    record in the database. Since eBay's GetItem answers for any seller's
-    item, a status sweep then re-confirmed another account's listings as live
-    under this one.
-
-    It delegates now so there is exactly ONE ownership rule. Prefer `owns`
-    for reads and `may_write` for writes, passing the creds bundle so the
-    immutable account id is available.
-    """
-    return owns(listing, account)
 
 
 def _is_blank(value) -> bool:

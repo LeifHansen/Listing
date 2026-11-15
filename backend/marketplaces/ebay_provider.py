@@ -153,7 +153,7 @@ def _verify_policies(uid: str, acct: dict, access_token: str) -> dict:
     # repair is half a repair.
     if ebay_account.settings_were_dropped(changes, acct):
         # 1. Label what is already here as the previous account's. Without it
-        #    listing_sync.belongs_to treats every unstamped record as this
+        #    listing_sync.owns treats every unstamped record as this
         #    account's, and syncs and revises keep operating on the PREVIOUS
         #    seller's item ids.
         marked = db.stamp_ebay_account(

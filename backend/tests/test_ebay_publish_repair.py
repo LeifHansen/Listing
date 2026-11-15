@@ -9,7 +9,7 @@ part it was named for.
 Two of those things, and the second is not housekeeping:
 
   1. Stamp the listings already here as the previous account's. Without it
-     `listing_sync.belongs_to` treats every unstamped record as belonging to
+     `listing_sync.owns` treats every unstamped record as belonging to
      whoever is connected now, and syncs and revises go on operating on the
      PREVIOUS seller's item ids.
 
