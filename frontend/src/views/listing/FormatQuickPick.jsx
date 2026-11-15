@@ -1,13 +1,10 @@
-import { useState } from "react";
 import { Gavel } from "lucide-react";
-import { patchJson } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { useApp } from "@/store";
-import { useToast } from "@/components/ui/Toaster";
 import { Select } from "@/components/ui/fields";
 import {
   FORMAT_HELP, LISTING_FORMATS, listingFormat,
 } from "@/lib/listingFormat";
+import { useDraftPatch } from "./CategoryQuickPick";
 
 /* How a draft SELLS — Buy It Now, auction, or both — on the face of the card.
  *
@@ -71,25 +68,7 @@ export function FormatQuickPick({ listing, onPick, saving, className }) {
  * isDraft the way it already gates DraftCategoryEdit.
  */
 export function DraftFormatEdit({ item, className }) {
-  const { loadListings } = useApp();
-  const { toast } = useToast();
-  const [saving, setSaving] = useState(false);
-  const save = async (patch) => {
-    setSaving(true);
-    try {
-      // Named fields only, never the whole listing this card happens to hold
-      // — the copy on a card is from the last /api/listings load, and sending
-      // it back overwrites anything edited since (see main.patch_listing).
-      await patchJson(`/api/listings/${item.id}`, patch);
-      // The card's Publish gate reads the format (an auction with no starting
-      // bid is blocked), so the cache has to see the change too.
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't save the selling format: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { saving, save } = useDraftPatch(item, "the selling format");
   return (
     <FormatQuickPick listing={item.listing} onPick={save} saving={saving}
       className={className} />
