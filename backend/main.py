@@ -6342,6 +6342,35 @@ def _restore_server_state(session_id: str, listing: Listing,
     return rec
 
 
+def _owned_listing(listing_id: str, request: Request) -> dict:
+    """The stored record for `listing_id`, or 404 when there is none or it is
+    another account's.
+
+    One answer for both, so a stranger is never told the id exists. A listing
+    id is not a secret -- it rides in the public /media URLs handed to eBay --
+    so holding one must not open someone else's listing. A record nobody owns
+    (a logged-out session) passes, as it does deps.assert_session_owner.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec or (rec.get("user_id") and rec["user_id"] != deps.uid(request)):
+        raise HTTPException(404, "Listing not found")
+    return rec
+
+
+def _owned_by(listing_id: str, uid: Optional[str]) -> Optional[dict]:
+    """_owned_listing for a worker, which knows the seller but has no request
+    to answer: the record, or None when it is gone or another account's.
+
+    A batch re-reads each listing as it reaches it, so it is judged on what it
+    is now rather than when the button was pressed. That read is by id alone,
+    so the check the route's scoped lookup made has to be made again here.
+    """
+    rec = db.get_listing(listing_id)
+    if not rec or (rec.get("user_id") and rec["user_id"] != uid):
+        return None
+    return rec
+
+
 @app.post("/api/refine")
 def refine(req: RefineRequest, request: Request) -> dict:
     if not config.anthropic_ready():
@@ -6456,11 +6485,7 @@ def patch_listing(session_id: str, payload: dict, request: Request) -> dict:
     stale.
     """
     deps.assert_session_owner(session_id, request)
-    rec = db.get_listing(session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(session_id, request)
 
     allowed = _PATCHABLE + _EDITOR_PATCHABLE
     changes = {k: v for k, v in (payload or {}).items() if k in allowed}
@@ -6766,11 +6791,7 @@ def quick_edit_listing(session_id: str, payload: dict, request: Request) -> dict
     """
     deps.assert_session_owner(session_id, request)
     uid = deps.uid(request)
-    rec = db.get_listing(session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(session_id, request)
     status = rec.get("status") or "draft"
     if status == "sold":
         raise HTTPException(
@@ -10368,8 +10389,8 @@ def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
         # And owned: an id that is not this seller's is queued as missing by
         # the route, and this re-read is not scoped, so the check the by-id
         # lookup made has to be made again here.
-        fresh = db.get_listing(rec["id"])
-        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
             return {"skip": "Listing not found.", "needs_you": False}
         return _lower_one(fresh, percent, uid, creds, base_url, provider)
 
@@ -11328,12 +11349,7 @@ def finish_all(request: Request) -> dict:
 
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: str, request: Request) -> dict:
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    # Enforce ownership for listings that belong to an account.
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     # Deliberately no photo adoption here. This used to download every remote
     # photo, write them to disk, upsert the row and start an R2 upload — on a
     # read. A prefetch, a retry, a crawler, a link preview or a double-click
@@ -11362,11 +11378,7 @@ def prepare_for_editing(listing_id: str, request: Request) -> dict:
     Idempotent: a listing whose photos are already local is reported ready
     without fetching anything.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     names = _adopt_imported_images(listing_id, rec)
     return {"ok": True, "images": names,
             "listing": (rec.get("listing") or {})}
@@ -11386,11 +11398,7 @@ def resolve_conflict(listing_id: str, payload: dict, request: Request) -> dict:
     and asks for nothing. Either way the base moves to eBay's current value —
     see services/sync_merge.resolve for why that is true even for "mine".
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
 
     listing = Listing(**(rec.get("listing") or {}))
     try:
@@ -11527,12 +11535,8 @@ def relist_listing(listing_id: str, request: Request) -> dict:
     says so, and the editor opens on the upload card. Listings imported from
     eBay keep their eBay-hosted `image_urls`, which the copy carries as-is.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     new_id, listing, copied = _clone_listing(listing_id, rec, uid)
     log.info("relist: %s -> new draft %s (%d photo(s), %d eBay-hosted) user=%s",
              listing_id, new_id, len(copied), len(listing.image_urls or []), uid)
@@ -11658,12 +11662,8 @@ def duplicate_listing(listing_id: str, request: Request) -> dict:
     carries are dropped, because a draft that has the files does not need
     the fallback strip and the editor would otherwise show both.
     """
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     data = dict(rec.get("listing") or {})
     data.update(_DUPLICATE_CLEARED)
     listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
@@ -11745,12 +11745,8 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     """
     if not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    rec = db.get_listing(listing_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(listing_id, request)
     uid = deps.uid(request)
-    if rec.get("user_id") and rec["user_id"] != uid:
-        raise HTTPException(404, "Listing not found")
     if (rec.get("status") or "draft") not in ("draft", "dry_run"):
         raise HTTPException(
             409, "Only a draft can be split. This listing is on a marketplace "
@@ -12323,11 +12319,7 @@ def end_listing(req: SessionOnlyRequest, request: Request) -> dict:
     already sold on eBay, and that is archived like every other sale. See
     listing_sync.settle_ended.
     """
-    rec = db.get_listing(req.session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(req.session_id, request)
     creds = deps.ebay_creds_for(request)
     # Ending goes through EndItem, which needs the seller's own token. The
     # env-configured single-tenant credentials used to serve here via
@@ -12660,8 +12652,8 @@ def _run_end_and_relist_job(job_id: str, records: list[dict], uid: str,
         # And owned: the route reports an id that is not this seller's by
         # queuing it as missing, and this re-read is not scoped, so the
         # check the by-id lookup made has to be made again here.
-        fresh = db.get_listing(rec["id"])
-        if not fresh or (fresh.get("user_id") and fresh["user_id"] != uid):
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
             return {"skip": "This listing is gone.", "needs_you": False}
         return _end_and_relist_one(fresh, uid, creds, base_url, provider)
 
@@ -13511,8 +13503,8 @@ def _crosspost_one(job_id: str, uid: str, item: dict, mode: str,
     """One listing onto Etsy: write the Etsy fields the seller reviewed, then
     publish through the shared fan-out. Returns the row the job reports."""
     listing_id = str(item["id"])
-    rec = db.get_listing(listing_id) or {}
-    if not rec or (rec.get("user_id") and rec["user_id"] != uid):
+    rec = _owned_by(listing_id, uid)
+    if not rec:
         return {"status": "skipped", "message": "That listing isn't here any more."}
     ready, skipped = _crosspost_candidates([rec])
     if skipped:
@@ -13811,11 +13803,7 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
     swept after the grace period. `removed` in the answer says which, so the
     client knows whether to drop the card."""
     provider = _marketplace_or_404(marketplace)
-    rec = db.get_listing(req.session_id)
-    if not rec:
-        raise HTTPException(404, "Listing not found")
-    if rec.get("user_id") and rec["user_id"] != deps.uid(request):
-        raise HTTPException(404, "Listing not found")
+    rec = _owned_listing(req.session_id, request)
     uid = deps.uid(request)
     creds = provider.creds_for(uid)
     if not creds:
