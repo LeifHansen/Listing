@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppProvider, useApp } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { ShopMode } from "@/views/ShopMode";
+import { AuthDialog } from "@/components/AuthDialog";
 
 // The shelf scan reads frames out of a recorded video, and jsdom decodes no
 // video at all — <video> fires neither onloadedmetadata nor onerror, so the
@@ -86,11 +87,18 @@ function json(body, status = 200) {
  * (never the boot one) so a test can look at the app between the two.
  */
 function server(calls, { price = PRICE, addFails = false,
-                         holdListings = null } = {}) {
+                         holdListings = null, signedOut = false } = {}) {
   let listingReads = 0;
+  let user = signedOut ? null : BASE["/api/auth/me"].user;
   return (url, opts = {}) => {
     const path = String(url);
     const body = () => { try { return JSON.parse(opts.body || "{}"); } catch { return null; } };
+    if (path.startsWith("/api/auth/me")) return json({ user });
+    if (path.startsWith("/api/auth/login")) {
+      calls.push({ path: "/api/auth/login" });
+      user = BASE["/api/auth/me"].user;
+      return json({ user, token: "t" });
+    }
     if (path.startsWith("/api/upload")) {
       calls.push({ path: "/api/upload" });
       return json({ session_id: "sess42" });
@@ -167,6 +175,7 @@ async function mount(calls = [], opts) {
       <ToastProvider>
         <AppProvider>
           <ShopMode />
+          <AuthDialog />
           <Probe />
         </AppProvider>
       </ToastProvider>,
@@ -283,6 +292,36 @@ describe("buying a find", () => {
        expect(probe()).toContain("tab=finds");
        expect(text()).toContain("It's under Finds on the Sell tab");
      });
+
+  it("signed out, a Buy asks for the login and then finishes the buy", async () => {
+    const calls = [];
+    await mount(calls, { signedOut: true });
+    await pick("image/*", photo());
+    await press("Buy");
+    expect(calls.some((c) => c.path === "/api/inventory/add")).toBe(false);
+
+    const typeInto = (el, value) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const email = document.body.querySelector('input[type="email"]');
+    const password = document.body.querySelector('input[type="password"]');
+    expect(email && password).toBeTruthy();
+    await act(async () => {
+      typeInto(email, "seller@example.com");
+      typeInto(password, "correct horse");
+    });
+    await act(async () => {
+      password.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flush(4);
+
+    // Before the fix the resumed Buy still saw nobody signed in and opened
+    // the login again; the find was never added.
+    expect(calls.filter((c) => c.path === "/api/auth/login")).toHaveLength(1);
+    expect(calls.some((c) => c.path === "/api/inventory/add")).toBe(true);
+    expect(probe()).toContain("tab=finds");
+  });
 
   it("waits for the reload before jumping, so the tab exists when it gets there",
      async () => {
