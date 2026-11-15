@@ -11479,16 +11479,24 @@ def _clone_listing(listing_id: str, rec: dict,
         objstore.upload_optimized(new_id, dst_dir, copied)
     listing.images = copied
 
+    _save_new_draft(new_id, listing, uid)
+    return new_id, listing, copied
+
+
+def _save_new_draft(new_id: str, listing: Listing, uid: Optional[str]) -> None:
+    """Write a brand-new draft to the volume and to its row, or raise.
+
+    The rule merge_listings states, at lower stakes: nothing is deleted here,
+    but answering with a new draft id that is not in the store sends the
+    client to a listing that does not exist. Shared by relist, duplicate and
+    split, the three routes that mint a draft from another listing.
+    """
     storage.save_listing(new_id, listing)
-    # Same rule, lower stakes: nothing is deleted here, but answering with a
-    # new draft id that is not in the store sends the client to a listing that
-    # does not exist.
     landed = db.upsert_listing(new_id, listing.model_dump(),
                                status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
+    if db.enabled() and not landed:
         raise errors.StorageUnavailable(
             "Couldn't create the new draft just now. Try again in a moment.")
-    return new_id, listing, copied
 
 
 # Everything a duplicate starts WITHOUT. The sale-only fields above, and on
@@ -11567,12 +11575,7 @@ def duplicate_listing(listing_id: str, request: Request) -> dict:
     listing.images = copied
     if copied:
         listing.image_urls = []
-    storage.save_listing(new_id, listing)
-    landed = db.upsert_listing(new_id, listing.model_dump(),
-                               status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
-        raise errors.StorageUnavailable(
-            "Couldn't create the new draft just now. Try again in a moment.")
+    _save_new_draft(new_id, listing, uid)
     log.info("duplicate: %s -> new draft %s (%d photo(s)) user=%s",
              listing_id, new_id, len(copied), uid)
     return {"ok": True, "id": new_id, "from": listing_id,
@@ -11710,13 +11713,11 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     carried = {k: data[k] for k in _SPLIT_CARRIED_FIELDS
                if k in data and k in Listing.model_fields}
     stub = Listing(**carried, images=copied)
-    storage.save_listing(new_id, stub)
-    landed = db.upsert_listing(new_id, stub.model_dump(),
-                               status="draft", user_id=uid)
-    if db.enabled() and not landed:      # see the note in merge_listings
+    try:
+        _save_new_draft(new_id, stub, uid)
+    except errors.StorageUnavailable:
         _undo_charges()
-        raise errors.StorageUnavailable(
-            "Couldn't create the new draft just now. Try again in a moment.")
+        raise
     jobs = {"new": _start_identify_job(new_id, uid, spent_new)}
     if req.redraft:
         jobs["original"] = _start_identify_job(listing_id, uid, spent_old)
