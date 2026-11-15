@@ -44,6 +44,15 @@ ON_NEW_ACCOUNT = {
 }
 
 
+def _due(uid, now=None):
+    """Would the next publish re-check this account? Asked through the gate
+    the publish itself takes (claim_verify), and released straight away."""
+    if ebay_account.claim_verify(uid, now=now):
+        ebay_account.release_verify(uid)
+        return True
+    return False
+
+
 @pytest.fixture
 def repair(monkeypatch):
     """_with_current_policies with eBay and the database stubbed out.
@@ -118,12 +127,12 @@ def test_an_ebay_outage_changes_nothing_and_does_not_start_the_clock(repair):
     assert saved == {}
     assert stamped == []
     assert out == ACCT
-    assert ebay_account.verify_due("u1") is True
+    assert _due("u1") is True
 
 
 def test_a_conclusive_pass_is_not_repeated_on_the_next_publish(repair):
     repair(*ALL_MINE)
-    assert ebay_account.verify_due("u1") is False
+    assert _due("u1") is False
 
 
 def test_an_empty_slot_is_filled_from_the_connected_account(repair):
