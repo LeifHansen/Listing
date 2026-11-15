@@ -119,9 +119,9 @@ def _backoff(resp, attempt: int) -> float:
     return min(15.0, float(2 ** attempt))
 
 
-def _send_with_retries(name: str, send: Callable, exc_cls: type):
+def _send_with_retries(send: Callable):
     """Run `send()` (an httpx call) with retries on 429/5xx/network errors.
-    Returns the final response; raises `exc_cls` when the service stayed
+    Returns the final response; raises PhotoroomError when Photoroom stayed
     unreachable through every attempt.
 
     Only 429s and 5xx retry. A 401, 402 or 403 is a fact about the account,
@@ -132,25 +132,25 @@ def _send_with_retries(name: str, send: Callable, exc_cls: type):
     for attempt in range(1, _TRIES + 1):
         try:
             resp = send()
-        except exc_cls:
+        except PhotoroomError:
             raise
         except Exception as exc:  # noqa: BLE001 - network/timeout
             if attempt == _TRIES:
                 # The TYPE only, never str(exc): httpx puts the request URL in
                 # its messages.
-                raise exc_cls(
-                    f"Couldn't reach {name} ({type(exc).__name__}) — "
+                raise PhotoroomError(
+                    f"Couldn't reach Photoroom ({type(exc).__name__}) — "
                     "it may be down; the photo was kept as shot.") from exc
             wait = _backoff(None, attempt)
-            log.info("%s: network error (%s) — retry %d/%d in %.0fs",
-                     name, type(exc).__name__, attempt, _TRIES - 1, wait)
+            log.info("Photoroom: network error (%s) — retry %d/%d in %.0fs",
+                     type(exc).__name__, attempt, _TRIES - 1, wait)
             time.sleep(wait)
             continue
         retryable = resp.status_code == 429 or resp.status_code >= 500
         if retryable and attempt < _TRIES:
             wait = _backoff(resp, attempt)
-            log.info("%s: HTTP %d — retry %d/%d in %.0fs",
-                     name, resp.status_code, attempt, _TRIES - 1, wait)
+            log.info("Photoroom: HTTP %d — retry %d/%d in %.0fs",
+                     resp.status_code, attempt, _TRIES - 1, wait)
             time.sleep(wait)
             continue
         break
@@ -167,25 +167,23 @@ def jpeg_payload(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def _decode(body: bytes, sent: Image.Image, name: str, exc_cls: type,
-            ) -> Image.Image:
-    """The service's bytes as an RGBA cutout, or exc_cls with the reason.
+def _decode(body: bytes, sent: Image.Image) -> Image.Image:
+    """Photoroom's bytes as an RGBA cutout, or PhotoroomError with the reason.
 
     Pure: no network, so the tests that matter here need no httpx.
     """
     try:
         cut = Image.open(BytesIO(body)).convert("RGBA")
     except Exception as exc:  # noqa: BLE001 - whatever came back isn't an image
-        raise exc_cls(f"{name} returned an unreadable image.") from exc
+        raise PhotoroomError("Photoroom returned an unreadable image.") from exc
     if cut.split()[3].getbbox() is None:
-        raise NothingFound(f"{name} couldn't find an item in this photo — "
+        raise NothingFound("Photoroom couldn't find an item in this photo — "
                            "it was kept as shot.")
-    _check_not_preview(cut, sent, name, exc_cls)
+    _check_not_preview(cut, sent)
     return cut
 
 
-def _check_not_preview(cut: Image.Image, sent: Image.Image, name: str,
-                       exc_cls: type) -> None:
+def _check_not_preview(cut: Image.Image, sent: Image.Image) -> None:
     """Refuse a result that came back far smaller than what we sent.
 
     Shipping that would upscale a small cutout into a 1600px listing photo,
@@ -194,8 +192,8 @@ def _check_not_preview(cut: Image.Image, sent: Image.Image, name: str,
     if max(sent.size) <= 0:
         return
     if max(cut.size) < max(sent.size) * _PREVIEW_RATIO:
-        raise exc_cls(
-            f"{name} returned a {cut.width}x{cut.height} preview instead of "
+        raise PhotoroomError(
+            f"Photoroom returned a {cut.width}x{cut.height} preview instead of "
             "the full-size cutout. The photo was kept as shot.")
 
 
@@ -247,8 +245,7 @@ def photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     payload = jpeg_payload(img)
     sent = Image.open(BytesIO(payload))
-    resp = _send_with_retries("Photoroom", lambda: _segment(payload),
-                              PhotoroomError)
+    resp = _send_with_retries(lambda: _segment(payload))
     status = resp.status_code
     if status in (401, 403):
         log.error("photoroom: HTTP %d — the PHOTOROOM_API_KEY was refused "
@@ -271,7 +268,7 @@ def photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         log.warning("photoroom: HTTP %d: %s", status, _short_reason(resp))
         raise PhotoroomError(
             f"Photoroom error {status} — the photo was kept as shot.")
-    return _decode(resp.content, sent, "Photoroom", PhotoroomError)
+    return _decode(resp.content, sent)
 
 
 def engine_state() -> dict:
