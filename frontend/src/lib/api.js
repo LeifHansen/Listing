@@ -437,7 +437,7 @@ export async function downscaleAllForUpload(files, limit = 4) {
 // where their photo simply did not appear. It was missing .avif (which
 // current Android phones produce), .jfif and .jpe — `jpe?g` matches jpg and
 // jpeg, never jpe.
-export const IMAGE_EXT_RE =
+const IMAGE_EXT_RE =
   /\.(jpe|jpeg|jpg|jfif|png|webp|bmp|gif|tiff?|heic|heif|hif|avif)$/i;
 
 // What the file pickers advertise. One string, because two pickers that

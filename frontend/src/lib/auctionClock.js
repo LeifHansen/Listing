@@ -46,7 +46,7 @@ const DAY = 24 * HOUR;
  * seconds and the chip turns amber: the same threshold for both, so the
  * colour never has to be explained. Above it the seconds would be a moving
  * digit nobody reads on a grid of twenty cards. */
-export const ENDING_SOON_MS = HOUR;
+const ENDING_SOON_MS = HOUR;
 
 const pad = (n) => String(n).padStart(2, "0");
 

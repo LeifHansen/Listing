@@ -19,7 +19,7 @@ import { api } from "@/lib/api";
 import { isNative } from "@/lib/platform";
 
 export const EXPORT_PATH = "/api/listings/export.csv";
-export const EXPORT_MIME = "text/csv";
+const EXPORT_MIME = "text/csv";
 
 // What the file is called when the server's Content-Disposition can't be read
 // — an older proxy that drops the header, or a native fetch whose CORS

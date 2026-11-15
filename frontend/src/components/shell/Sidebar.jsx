@@ -61,7 +61,7 @@ function useNavTo() {
   };
 }
 
-export const APP_VERSION = "v2.0";
+const APP_VERSION = "v2.0";
 
 function Brand({ collapsed }) {
   const [imgOk, setImgOk] = useState(true);
