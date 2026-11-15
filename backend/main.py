@@ -10366,11 +10366,50 @@ def _keep_marked(rid: str, fields: list[str], uid: str) -> None:
                     rid, exc)
 
 
+class _OneRunPerAccount(dict):
+    """user id -> the job id of the one run of a kind the account has going.
+
+    Each bulk action that spends money or eBay calls runs once per account at
+    a time, because a second press while the first is going does the same
+    work twice: cuts the same prices again, pays twice to fill the same
+    blanks, puts the same listings on Etsy twice. A dict, so a test can clear
+    it or ask whether an account still holds its slot.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+
+    def reserve(self, uid: str, job_id: str) -> Optional[tuple[str, dict]]:
+        """Make `job_id` this account's run -- or, while an earlier one is
+        still going, leave the slot be and return (its id, its status) for
+        the caller to hand back instead.
+
+        Check and reserve are one critical section: a double tap that passed
+        the check twice would start two runs over the same listings.
+        """
+        with self.lock:
+            running = self.get(uid)
+            if running:
+                snap = jobstore.snapshot(running, uid)
+                if snap and not snap.get("done"):
+                    return running, snap
+            self[uid] = job_id
+        return None
+
+    def release(self, uid: str, job_id: str) -> None:
+        """Give the slot back, if `job_id` still holds it. A run that started
+        and then failed, or finished, frees it; without that the next press
+        is told "already running" for a run that is not."""
+        with self.lock:
+            if self.get(uid) == job_id:
+                self.pop(uid, None)
+
+
 # The price drops running right now: user id -> job id. One per account, and
 # not for tidiness — a second press while the first is still going would cut
 # the same prices twice, 20% off and then 20% off that.
-_REPRICE_JOBS: dict[str, str] = {}
-_REPRICE_LOCK = threading.Lock()
+_REPRICE_JOBS = _OneRunPerAccount()
 
 
 def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
@@ -10419,9 +10458,7 @@ def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish lowering these prices. Try again in a moment — "
             f"if it keeps happening, quote {reference} to support."))
     finally:
-        with _REPRICE_LOCK:
-            if _REPRICE_JOBS.get(uid) == job_id:
-                _REPRICE_JOBS.pop(uid, None)
+        _REPRICE_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/lower-prices")
@@ -10466,14 +10503,11 @@ def lower_prices(payload: dict, request: Request) -> dict:
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs over the same listings.
     job_id = storage.new_session_id()
-    with _REPRICE_LOCK:
-        running = _REPRICE_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True,
-                        "total": snap.get("total_items") or 0}
-        _REPRICE_JOBS[uid] = job_id
+    joined = _REPRICE_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
     try:
         wanted = set(ids)
         # The ids, asked for — never the seller's newest LIST_CAP records
@@ -10489,9 +10523,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _REPRICE_LOCK:
-            if _REPRICE_JOBS.get(uid) == job_id:
-                _REPRICE_JOBS.pop(uid, None)
+        _REPRICE_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "reprice", "phase": "repricing", "done": False,
@@ -10647,8 +10679,7 @@ def send_offers(payload: dict, request: Request) -> dict:
 # same reason as the price drop's: a second press mid-run would offer the
 # same watchers again, and eBay refuses a second seller offer while the first
 # is live — every one of those would come back as a refusal.
-_OFFER_JOBS: dict[str, str] = {}
-_OFFER_LOCK = threading.Lock()
+_OFFER_JOBS = _OneRunPerAccount()
 # The suggestion group "Send offers…" clears.
 SEND_OFFERS_ALL_TYPES = ("send_offers",)
 
@@ -10701,9 +10732,7 @@ def _run_send_offers_job(job_id: str, records: list[dict], uid: str,
             f"if it keeps happening, quote {reference} to support."))
     finally:
         http.close()
-        with _OFFER_LOCK:
-            if _OFFER_JOBS.get(uid) == job_id:
-                _OFFER_JOBS.pop(uid, None)
+        _OFFER_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/send-offers-all")
@@ -10736,14 +10765,10 @@ def send_offers_all(payload: dict, request: Request) -> dict:
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs offering the same watchers.
     job_id = storage.new_session_id()
-    with _OFFER_LOCK:
-        running = _OFFER_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _OFFER_JOBS[uid] = job_id
+    joined = _OFFER_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
         records = _suggestion_set(items, creds, SEND_OFFERS_ALL_TYPES)
@@ -10752,9 +10777,7 @@ def send_offers_all(payload: dict, request: Request) -> dict:
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _OFFER_LOCK:
-            if _OFFER_JOBS.get(uid) == job_id:
-                _OFFER_JOBS.pop(uid, None)
+        _OFFER_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "offers", "phase": "offering", "done": False,
@@ -10801,8 +10824,7 @@ def _bulk_caps() -> dict:
 # spends AI credits per listing, and two tabs firing it at the same store
 # would pay twice to fill the same blanks.
 # user id -> job id of the enrich currently running for them.
-_ENRICH_JOBS: dict[str, str] = {}
-_ENRICH_LOCK = threading.Lock()
+_ENRICH_JOBS = _OneRunPerAccount()
 
 
 def _drop_answered_missing_info(listing: Listing) -> int:
@@ -11031,9 +11053,7 @@ def _run_enrich_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish filling these in. Try again in a moment — if "
             f"it keeps happening, quote {reference} to support."))
     finally:
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
 
 
 @app.post("/api/listings/enrich")
@@ -11074,16 +11094,12 @@ def enrich_listings(payload: dict, request: Request) -> dict:
     # check twice -- both saw no job, both went off to read the listings,
     # both registered -- and the seller paid for the same blanks twice.
     job_id = storage.new_session_id()
-    with _ENRICH_LOCK:
-        running = _ENRICH_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                # Two tabs, or a double tap. Hand back the job already running
-                # rather than paying a second time to fill the same blanks.
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _ENRICH_JOBS[uid] = job_id
+    joined = _ENRICH_JOBS.reserve(uid, job_id)
+    if joined:
+        # Two tabs, or a double tap. Hand back the job already running
+        # rather than paying a second time to fill the same blanks.
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         # Ownership is enforced inside the read, and an id the seller doesn't
         # own is simply absent from the answer (see db.get_listings).
@@ -11097,9 +11113,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
         # The reservation stands for a job that will never start; without
         # this the next press is told "already running" until the snapshot
         # is looked up and found missing.
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "enrich", "phase": "enriching", "done": False,
@@ -11255,9 +11269,7 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
             "We couldn't finish your list. Try again in a moment — if it "
             f"keeps happening, quote {reference} to support."))
     finally:
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
 
 
 def _suggestion_set(items: list[dict], creds: Optional[dict],
@@ -11312,14 +11324,10 @@ def finish_all(request: Request) -> dict:
     # reservation: both spend AI credits on the same listings, and two of them
     # running at once would pay twice to fill the same blanks.
     job_id = storage.new_session_id()
-    with _ENRICH_LOCK:
-        running = _ENRICH_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "total": 0,
-                        "deferred": 0}
-        _ENRICH_JOBS[uid] = job_id
+    joined = _ENRICH_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "total": 0,
+                "deferred": 0}
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
         creds = deps.ebay_creds_for(request)
@@ -11330,9 +11338,7 @@ def finish_all(request: Request) -> dict:
     except BaseException:
         # The reservation stands for a job that will never start; without this
         # the next press is told "already running".
-        with _ENRICH_LOCK:
-            if _ENRICH_JOBS.get(uid) == job_id:
-                _ENRICH_JOBS.pop(uid, None)
+        _ENRICH_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "finish", "phase": "finishing", "done": False,
@@ -12469,8 +12475,7 @@ def _settle_ending(session_id: str, rec: dict, creds: dict,
 # The runs going right now: user id -> job id. One per account: a second
 # press while the first is still going would end the listings the first is
 # already ending, and the copy it has already made.
-_END_RELIST_JOBS: dict[str, str] = {}
-_END_RELIST_LOCK = threading.Lock()
+_END_RELIST_JOBS = _OneRunPerAccount()
 
 
 def _remove_draft_quietly(draft_id: str, uid: Optional[str], why: str) -> None:
@@ -12676,9 +12681,7 @@ def _run_end_and_relist_job(job_id: str, records: list[dict], uid: str,
             "Inactive tabs for where each one got to — if it keeps "
             f"happening, quote {reference} to support."))
     finally:
-        with _END_RELIST_LOCK:
-            if _END_RELIST_JOBS.get(uid) == job_id:
-                _END_RELIST_JOBS.pop(uid, None)
+        _END_RELIST_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/end-and-relist")
@@ -12715,14 +12718,11 @@ def end_and_relist(payload: dict, request: Request) -> dict:
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would end, and copy, the same listings twice.
     job_id = storage.new_session_id()
-    with _END_RELIST_LOCK:
-        running = _END_RELIST_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True,
-                        "total": snap.get("total_items") or 0}
-        _END_RELIST_JOBS[uid] = job_id
+    joined = _END_RELIST_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
     try:
         wanted = set(ids)
         mine = db.get_listings(ids, uid)
@@ -12735,9 +12735,7 @@ def end_and_relist(payload: dict, request: Request) -> dict:
     except BaseException:
         # The reservation stands for a job that will never start; without
         # this the next press is told "already running".
-        with _END_RELIST_LOCK:
-            if _END_RELIST_JOBS.get(uid) == job_id:
-                _END_RELIST_JOBS.pop(uid, None)
+        _END_RELIST_JOBS.release(uid, job_id)
         raise
     jobstore.register(job_id, {
         "id": job_id, "kind": "end-and-relist", "phase": "relisting",
@@ -12901,8 +12899,7 @@ IMPORT_LIMIT = listing_sync.ACTIVE_LIMIT
 
 # The store mirror runs as a background job, one per account at a time.
 # user id -> job id of the import currently running for them.
-_IMPORT_JOBS: dict[str, str] = {}
-_IMPORT_LOCK = threading.Lock()
+_IMPORT_JOBS = _OneRunPerAccount()
 
 
 def _run_import_job(job_id: str, token: str, uid: str,
@@ -12941,9 +12938,7 @@ def _run_import_job(job_id: str, token: str, uid: str,
             "We couldn't import your eBay listings just now. Try again in a "
             f"moment — if it keeps happening, quote {reference} to support."))
     finally:
-        with _IMPORT_LOCK:
-            if _IMPORT_JOBS.get(uid) == job_id:
-                _IMPORT_JOBS.pop(uid, None)
+        _IMPORT_JOBS.release(uid, job_id)
 
 
 @app.post("/api/ebay/import-listings")
@@ -12970,15 +12965,10 @@ def import_listings(request: Request) -> dict:
         raise HTTPException(503, "No database configured — imported listings need "
                                  "DATABASE_URL set.")
     uid = user["id"]
-    with _IMPORT_LOCK:
-        running = _IMPORT_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True}
-            _IMPORT_JOBS.pop(uid, None)
-        job_id = storage.new_session_id()
-        _IMPORT_JOBS[uid] = job_id
+    job_id = storage.new_session_id()
+    joined = _IMPORT_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True}
     jobstore.register(job_id, {
         "id": job_id, "kind": "ebay-import", "phase": "listing", "done": False,
         "error": None, "current": 0, "total_items": 0,
@@ -13350,8 +13340,7 @@ def etsy_suggest_taxonomy(session_id: str, request: Request, payload: dict) -> d
 # published through the same door /api/publish uses — never a second copy of
 # the fan-out, because the rules that stop a duplicate live listing live
 # there.
-_CROSSPOST_JOBS: dict[str, str] = {}
-_CROSSPOST_LOCK = threading.Lock()
+_CROSSPOST_JOBS = _OneRunPerAccount()
 # How long the worker waits between listings. Etsy's limit is 10 requests a
 # second for the whole app and a publish is a dozen of them, so a batch that
 # went flat out would spend the allowance every seller shares.
@@ -13461,13 +13450,9 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
     # double tap that passed the check twice would put every listing on Etsy
     # twice, which is the one mistake this whole feature must not make.
     job_id = storage.new_session_id()
-    with _CROSSPOST_LOCK:
-        running = _CROSSPOST_JOBS.get(uid)
-        if running:
-            snap = jobstore.snapshot(running, uid)
-            if snap and not snap.get("done"):
-                return {"job_id": running, "running": True, "joined": True}
-        _CROSSPOST_JOBS[uid] = job_id
+    joined = _CROSSPOST_JOBS.reserve(uid, job_id)
+    if joined:
+        return {"job_id": joined[0], "running": True, "joined": True}
     try:
         records = {r.get("id"): r for r in db.get_listings(
             [str(i["id"]) for i in items], uid)}
@@ -13476,9 +13461,7 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
             raise HTTPException(404, "None of those listings are here anymore.")
         base_url = _base_url(request)
     except BaseException:
-        with _CROSSPOST_LOCK:
-            if _CROSSPOST_JOBS.get(uid) == job_id:
-                _CROSSPOST_JOBS.pop(uid, None)
+        _CROSSPOST_JOBS.release(uid, job_id)
         raise
 
     jobstore.register(job_id, {
@@ -13598,9 +13581,7 @@ def _run_crosspost_job(job_id: str, uid: str, items: list[dict], mode: str,
         log.exception("crosspost %s: run failed", job_id)
         jobstore.update(job_id, done=True, phase="failed", error=str(exc))
     finally:
-        with _CROSSPOST_LOCK:
-            if _CROSSPOST_JOBS.get(uid) == job_id:
-                _CROSSPOST_JOBS.pop(uid, None)
+        _CROSSPOST_JOBS.release(uid, job_id)
 
 
 def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
@@ -13647,7 +13628,7 @@ def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
             "total_items": len(items), "items": items,
             "_ids": ids, "_mode": mode, "_done": done + inflight, "_inflight": [],
         }, uid=uid)
-        with _CROSSPOST_LOCK:
+        with _CROSSPOST_JOBS.lock:
             _CROSSPOST_JOBS[uid] = job_id
         queue = [{"id": i} for i in ids if i in owned]
         threading.Thread(
