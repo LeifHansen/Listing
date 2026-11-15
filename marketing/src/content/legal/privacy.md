@@ -1,7 +1,7 @@
 ---
 title: Privacy Policy
 description: What information Thryft Shop handles, how it is used, and how to delete it.
-updated: 2026-08-12
+updated: 2026-11-15
 ---
 
 Thryft Shop helps sellers create marketplace listings (eBay today) from
@@ -28,8 +28,14 @@ used.
 
 ## How we use it
 
-- Uploaded photos are sent to Anthropic's Claude API to identify the item and
-  draft the listing text.
+- Uploaded photos are sent to an AI service to identify the item and draft the
+  listing text: Anthropic's Claude, and Google's Gemini when we use it to
+  identify the item and research its price. Before your first upload the app
+  asks for your permission and names the service it will use. Nothing is sent
+  until you agree.
+- When an item looks like a print or a painting, we may run a reverse image
+  search to find the artist: a temporary link to the photo goes to SerpApi,
+  which asks Google Lens which web pages show the same image.
 - If you turn on background removal in Settings, the photos you choose to have
   their background removed are sent to Photoroom, which cuts the item out and
   sends it back. Nothing about your account is shared with Photoroom, and no
@@ -40,14 +46,17 @@ used.
   listing history is available when you log in.
 - Uploaded photos are stored on our server and in Cloudflare R2 object storage,
   which is also where eBay fetches them from when a listing is published.
+- If you read or answer eBay buyer messages in the app, they pass through our
+  server on their way between you and eBay. We don't keep them; eBay does.
+- When the app hits an error, it sends us a report — the error, the screen it
+  happened on, and your account id — so we can fix it.
 
 ## What we don't do
 
 - We do not sell your data or share it with anyone beyond the service providers
-  named above (Anthropic, Photoroom if you turn on background removal, the
-  marketplaces you connect — eBay today —
-  our payment processor Stripe, and our hosting/storage providers Fly.io, Neon,
-  and Cloudflare).
+  named above (Anthropic, Google, SerpApi, Photoroom if you turn on background
+  removal, the marketplaces you connect — eBay today — our payment processor
+  Stripe, and our hosting/storage providers Fly.io, Neon, and Cloudflare).
 - We do not use your photos or listings for advertising.
 
 ## eBay account deletion
@@ -65,8 +74,9 @@ the personal details it was about.
 
 ## Deleting your account
 
-You can delete your account yourself, from inside the app, at any time:
-**Settings → Delete account**. Your account, your listing drafts and your
+You can delete your account yourself at any time, in the mobile app or on the
+web at [app.thryftshop.com](https://app.thryftshop.com) (sign in, then
+**Settings → Delete account**). Your account, your listing drafts and your
 stored marketplace tokens are removed straight away. Your uploaded photos are
 then deleted from our image storage; that part runs just after, so it can take
 a short while to finish on a large account. You don't need to email anyone and
