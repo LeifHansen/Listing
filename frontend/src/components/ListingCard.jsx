@@ -313,6 +313,16 @@ function turnStyle(spin, square) {
   };
 }
 
+// The round icon button every card control is drawn as, at rest. Each one
+// adds its own hover colour: blue for the working controls, red for the two
+// that take a listing away (End and Delete).
+const ROUND_BUTTON = cn(
+  "grid place-items-center size-8 rounded-full cursor-pointer",
+  "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+);
+const HOVER_BLUE = "hover:text-blue hover:border-blue/40 transition-colors";
+const HOVER_RED = "hover:text-error hover:border-error/40 transition-colors";
+
 // ListingCard — one saved listing, as a grid tile (`layout="grid"`, the
 // default) or as a compact row (`layout="list"`). Click opens it in the
 // workflow; when onDelete is provided, a trash button removes it. The delete
@@ -524,9 +534,7 @@ export const ListingCard = memo(function ListingCard({
       aria-label="Rotate photo 90°"
       title="Rotate the photo 90° clockwise"
       className={cn(
-        "grid place-items-center size-8 rounded-full cursor-pointer",
-        "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-        "hover:text-blue hover:border-blue/40 transition-colors",
+        ROUND_BUTTON, HOVER_BLUE,
         turn.rotating && "cursor-wait text-blue",
         !list && "absolute bottom-3 right-3 pointer-events-auto",
       )}
@@ -587,11 +595,7 @@ export const ListingCard = memo(function ListingCard({
           onClick={(e) => { e.stopPropagation(); onSplit(item); }}
           aria-label="Split into two listings"
           title="Split — two items in one draft? Move the other item's photos to a new draft the AI writes"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-blue hover:border-blue/40 transition-colors",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_BLUE)}
         >
           <Split size={15} aria-hidden />
         </button>
@@ -606,11 +610,7 @@ export const ListingCard = memo(function ListingCard({
           onClick={(e) => { e.stopPropagation(); onDuplicate(item.id); }}
           aria-label="Duplicate this listing"
           title="Duplicate — start a new draft with this listing's details and photos"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-blue hover:border-blue/40 transition-colors",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_BLUE)}
         >
           <Copy size={15} aria-hidden />
         </button>
@@ -647,12 +647,7 @@ export const ListingCard = memo(function ListingCard({
           disabled={startingOver}
           aria-label="Start over — re-run the AI on these photos"
           title="Start over — re-run the AI on these photos"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-blue hover:border-blue/40 transition-colors",
-            startingOver && "cursor-wait text-blue",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_BLUE, startingOver && "cursor-wait text-blue")}
         >
           {startingOver
             ? <Loader2 size={15} className="animate-spin" aria-hidden />
@@ -675,12 +670,7 @@ export const ListingCard = memo(function ListingCard({
           title={keptWhenEnded(item)
             ? "End this listing on eBay — it moves to Inactive, where you can relist it"
             : "End this listing on eBay — its card is removed from here too"}
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-error hover:border-error/40 transition-colors",
-            ending && "cursor-wait text-error",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_RED, ending && "cursor-wait text-error")}
         >
           {ending
             ? <Loader2 size={15} className="animate-spin" aria-hidden />
@@ -692,11 +682,7 @@ export const ListingCard = memo(function ListingCard({
           onClick={(e) => { e.stopPropagation(); onDelete(item); }}
           aria-label="Delete listing"
           title="Delete listing"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-error hover:border-error/40 transition-colors",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_RED)}
         >
           <Trash2 size={15} aria-hidden />
         </button>
