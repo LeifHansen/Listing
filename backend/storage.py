@@ -160,13 +160,6 @@ def video_path(session_id: str) -> Path:
     return session_dir(session_id) / VIDEO_SUBDIR
 
 
-def list_videos(session_id: str) -> list[str]:
-    d = video_path(session_id)  # read-only — never mkdir on a lookup
-    if not d.is_dir():
-        return []
-    return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
-
-
 def history_dir(session_id: str) -> Path:
     d = session_dir(session_id) / "history"
     d.mkdir(parents=True, exist_ok=True)
