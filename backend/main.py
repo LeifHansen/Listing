@@ -10244,6 +10244,43 @@ def insights(request: Request) -> dict:
 BULK_SELECT_CAP = int(os.getenv("BULK_SELECT_CAP", "200") or "200")
 
 
+def _ticked_ids(payload: dict, none_picked: str) -> list[str]:
+    """The listing ids a bulk button was pressed over: trimmed, each once, in
+    the order sent -- or a 400, saying `none_picked` when there are none.
+
+    Bounded, because the bulk actions read their listings BY id, and an
+    unbounded body is an unbounded `IN (...)` -- a way to make one request
+    expensive for everyone. Nothing useful is lost: the cap is more than a
+    screen of ticks, and a run that takes fewer than it was handed gives the
+    rest back as `deferred` for a second run.
+    """
+    ids = [str(i).strip() for i in (payload.get("listing_ids") or [])
+           if str(i).strip()]
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise HTTPException(400, none_picked)
+    if len(ids) > BULK_SELECT_CAP:
+        raise HTTPException(
+            400, f"That's too many listings for one go — pick up to "
+                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    return ids
+
+
+def _ticked_records(ids: list[str], uid: str) -> list[dict]:
+    """The seller's records for `ids`, then a "missing" row for each id that
+    is not theirs or is gone -- reported by the run rather than silently
+    dropped from its totals.
+
+    The ids, asked for -- never the seller's newest LIST_CAP records filtered
+    down, which reported anything outside that window as "Listing not
+    found." Ownership is enforced inside the read (db.get_listings).
+    """
+    mine = db.get_listings(ids, uid)
+    found = {r["id"] for r in mine}
+    return mine + [{"id": rid, "status": "missing", "listing": {}}
+                   for rid in sorted(set(ids) - found)]
+
+
 def _lower_one(rec: dict, percent: float, uid: str, creds: dict,
                base_url: str, provider) -> dict:
     """Cut ONE listing's price by `percent` and push it to eBay.
@@ -10488,17 +10525,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
         percent = bulk_actions.validate_percent(payload.get("percent"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to reprice.")
-    # Bounded, because the lookup below is BY id, and an unbounded body is
-    # an unbounded `IN (...)` — a way to make one request expensive for
-    # everyone. Nothing useful is lost: this is more than a screen of ticks.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to reprice.")
     uid = user["id"]
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would start two runs over the same listings.
@@ -10509,16 +10536,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
         return {"job_id": running, "running": True, "joined": True,
                 "total": snap.get("total_items") or 0}
     try:
-        wanted = set(ids)
-        # The ids, asked for — never the seller's newest LIST_CAP records
-        # filtered down, which reported anything outside that window as
-        # "Listing not found." Ownership is enforced inside the read.
-        mine = db.get_listings(ids, uid)
-        # Listings the client asked for that aren't the seller's (or are
-        # gone) are reported rather than silently dropped from the totals.
-        missing = [{"id": rid, "status": "missing", "listing": {}}
-                   for rid in sorted(wanted - {r["id"] for r in mine})]
-        records = mine + missing
+        records = _ticked_records(ids, uid)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without this
@@ -10611,16 +10629,7 @@ def send_offers(payload: dict, request: Request) -> dict:
     # eBay refuses HTML and caps the note at 2,000 characters; cleaned here so
     # a seller finds out at the boundary rather than one listing at a time.
     message = ebay_offers.clean_message(payload.get("message"))
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to offer.")
-    # Same bound, for the same reason, as the bulk price drop: the lookup
-    # below is BY id, and an unbounded body is an unbounded `IN (...)`.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to offer.")
     wanted = set(ids)
     mine = db.get_listings(ids, user["id"])
     records, deferred = mine[:BULK_OFFER_CAP], mine[BULK_OFFER_CAP:]
@@ -11076,18 +11085,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
         raise HTTPException(401, "Log in first.")
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or []) if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to fill in.")
-    # Bounded for the same reason the price drop is: the lookup below is BY
-    # id, and an unbounded body is an unbounded `IN (...)`. Nothing useful is
-    # lost — a pass enriches at most BULK_ENRICH_CAP of them either way, and
-    # the remainder comes back as deferred for a second run.
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to fill in.")
     uid = user["id"]
     # Check AND reserve in one critical section, the way the import route
     # does. Releasing the lock between the two let a double tap pass the
@@ -12705,15 +12703,7 @@ def end_and_relist(payload: dict, request: Request) -> dict:
         raise HTTPException(
             400, "The fresh copy is written by the AI, which isn't set up on "
                  "this server (ANTHROPIC_API_KEY).")
-    ids = [str(i).strip() for i in (payload.get("listing_ids") or [])
-           if str(i).strip()]
-    ids = list(dict.fromkeys(ids))
-    if not ids:
-        raise HTTPException(400, "Pick at least one listing to end and relist.")
-    if len(ids) > BULK_SELECT_CAP:
-        raise HTTPException(
-            400, f"That's too many listings for one go — pick up to "
-                 f"{BULK_SELECT_CAP} and run it again for the rest.")
+    ids = _ticked_ids(payload, "Pick at least one listing to end and relist.")
     uid = user["id"]
     # Check AND reserve in one critical section: a double tap that passed the
     # check twice would end, and copy, the same listings twice.
@@ -12724,13 +12714,7 @@ def end_and_relist(payload: dict, request: Request) -> dict:
         return {"job_id": running, "running": True, "joined": True,
                 "total": snap.get("total_items") or 0}
     try:
-        wanted = set(ids)
-        mine = db.get_listings(ids, uid)
-        # Listings the client asked for that aren't the seller's (or are
-        # gone) are reported rather than silently dropped from the totals.
-        missing = [{"id": rid, "status": "missing", "listing": {}}
-                   for rid in sorted(wanted - {r["id"] for r in mine})]
-        records = mine + missing
+        records = _ticked_records(ids, uid)
         base_url = _base_url(request)
     except BaseException:
         # The reservation stands for a job that will never start; without
