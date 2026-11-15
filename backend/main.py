@@ -407,10 +407,8 @@ async def _unhandled(request: Request, exc: Exception):
         # arrives here instead, and is the same non-event: say so at INFO and
         # record nothing, rather than let the one path the handler cannot
         # cover put the row back in the feed.
-        log.info("client went away during %s %s",
-                 request.method, request.url.path)
-        return Response(status_code=499)
-    reference = errorlog.current_reference() or errorlog.new_reference()
+        return await _client_went_away(request, exc)
+    reference = deps.support_reference()
     # error, not exception: ServerErrorMiddleware re-raises after this, so
     # uvicorn prints the traceback anyway and log.exception would put a
     # second copy of it in the Fly window. The row below keeps its own.
@@ -5930,7 +5928,6 @@ def _studio_load(request: Request, session_id: str, name: str,
 
 
 def _data_url(img, fmt: str = "JPEG") -> str:
-    import base64
     from io import BytesIO
 
     buf = BytesIO()
@@ -11301,12 +11298,6 @@ def _suggestion_set(items: list[dict], creds: Optional[dict],
     return [it for it in items if it.get("id") in wanted]
 
 
-def _finish_all_set(items: list[dict], creds: Optional[dict]) -> list[dict]:
-    """The records "Finish everything" acts on: every listing the dashboard is
-    currently offering "Fill in details" for."""
-    return _suggestion_set(items, creds, FINISH_ALL_TYPES)
-
-
 @app.post("/api/listings/finish-all")
 def finish_all(request: Request) -> dict:
     """Clear the whole "what to do next" list in one press: fill in every
@@ -11340,7 +11331,7 @@ def finish_all(request: Request) -> dict:
     try:
         items = db.list_listings(limit=LIST_CAP, user_id=uid)
         creds = deps.ebay_creds_for(request)
-        records = _finish_all_set(items, creds)
+        records = _suggestion_set(items, creds, FINISH_ALL_TYPES)
         if not records:
             raise HTTPException(400, "There's nothing left on your list.")
         base_url = _base_url(request)
@@ -11459,8 +11450,9 @@ def _reachable(listing_id: str, names: list[str]) -> bool:
     caller re-downloads from eBay when this says no. Cheap enough to ask on
     every adoption, and a listing whose first photo is present has not been
     offloaded, so the common path costs a single stat."""
+    opt_dir = storage.optimized_dir(listing_id)
     for n in names:
-        if (storage.optimized_dir(listing_id) / n).is_file():
+        if (opt_dir / n).is_file():
             return True
     if not objstore.enabled():
         return False
@@ -11815,7 +11807,8 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     # Off this listing: its order first (the row is the truth), and only then
     # the bytes, so a save that cannot be written deletes nothing. Same order
     # as _drop_optimized_image, for the same reason.
-    remaining = [n for n in images if n not in set(copied)]
+    moved = set(copied)
+    remaining = [n for n in images if n not in moved]
     try:
         remaining = _save_image_order(listing_id, rec, remaining, uid)
     except Exception:
@@ -13816,13 +13809,12 @@ def marketplace_end_listing(marketplace: str, req: SessionOnlyRequest,
                 "your copy here — refresh in a moment to see the right "
                 "state.") from exc
         return {"ok": True, **res, "removed": removed}
-    new_status = (prev_status if prev_status in ("published", "live")
-                  else prev_status or "draft")
     # The marketplace really did end the listing, so `ok` is not the lie —
     # the lost write is. The record would still say `published`, and the app
     # would go on offering to revise and repromote something that is gone.
     # Same check the eBay end route already makes.
-    landed = db.upsert_listing(req.session_id, data, status=new_status,
+    landed = db.upsert_listing(req.session_id, data,
+                               status=prev_status or "draft",
                                user_id=uid or rec.get("user_id"))
     if db.enabled() and not landed:
         raise errors.StorageUnavailable(
