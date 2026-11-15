@@ -1942,6 +1942,23 @@ def _enrich_listing(listing: Listing, image_paths: list, tags: list = None,
     return added
 
 
+def _photo_path(session_id: str, name: str, *,
+                create: bool = True) -> Optional[Path]:
+    """Where the optimized photo `name` of this session lives, or None when
+    `name` would reach outside the session's photo folder ("../../etc/passwd").
+
+    The name is a path segment the caller controls, so every route that takes
+    one resolves it through here rather than joining it onto a directory.
+    `create=False` is for a read that must never write to the volume (the
+    public /media route, the studio's loads): it looks the folder up without
+    making it, where storage.optimized_dir would."""
+    folder = (storage.optimized_dir(session_id) if create
+              else storage.optimized_path(session_id))
+    opt_dir = folder.resolve()
+    path = (opt_dir / name).resolve()
+    return path if opt_dir in path.parents else None
+
+
 def _ensure_local(session_id: str, name: str, path: Path) -> bool:
     """Make sure the optimized photo exists on the volume, pulling it back from
     R2 if the reclaim pass already freed the local copy.
@@ -5708,10 +5725,8 @@ async def edit_image(
         log.warning("edit-image: missing session_id=%r or name=%r", session_id, name)
         raise HTTPException(400, "Lost track of which photo to save — reopen the clean-up editor.")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    # Guard against path traversal in `name`.
-    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
+    path = _photo_path(session_id, name)
+    if path is None or not await run_in_threadpool(_ensure_local, session_id, name, path):
         log.warning("edit-image: image not found (session=%s name=%s)", session_id, name)
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     data = await file.read()
@@ -5786,9 +5801,8 @@ async def image_restore_original(
     if not session_id or not name:
         raise HTTPException(400, "Lost track of which photo to restore.")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:  # path-traversal guard
+    path = _photo_path(session_id, name)
+    if path is None:
         raise HTTPException(400, "Invalid image name")
 
     def _restore() -> None:
@@ -5894,9 +5908,8 @@ def _studio_load(request: Request, session_id: str, name: str,
     # photos. The inline-`file` path above is the editor's own canvas blob and
     # touches nothing stored, so it stays open to the logged-out flows.
     deps.assert_session_owner(session_id, request)
-    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not _ensure_local(session_id, name, path):
+    path = _photo_path(session_id, name, create=False)
+    if path is None or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     return Image.open(path)
 
@@ -5925,9 +5938,8 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     if not session_id or not name:
         raise HTTPException(400, "session_id and name are required")
     await run_in_threadpool(deps.assert_session_owner, session_id, request)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents or not await run_in_threadpool(_ensure_local, session_id, name, path):
+    path = _photo_path(session_id, name)
+    if path is None or not await run_in_threadpool(_ensure_local, session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
     def _rotate() -> None:
@@ -7074,9 +7086,8 @@ def _drop_optimized_image(session_id: str, name: str,
         images = [n for n in stored if n != name]
         if images != stored:
             images = _save_image_order(session_id, rec, images, uid)
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:  # path-traversal guard
+    path = _photo_path(session_id, name)
+    if path is None:
         raise HTTPException(400, "Invalid image name")
     if path.is_file():
         try:
@@ -11694,9 +11705,8 @@ def _unlink_optimized(session_id: str, name: str) -> None:
     mirror, once nothing refers to them any more. Best-effort: the listing
     has already been saved without the photo, and a file that outlives it is
     a tidiness problem for the reclaim pass, not the seller's."""
-    opt_dir = storage.optimized_dir(session_id).resolve()
-    path = (opt_dir / name).resolve()
-    if opt_dir not in path.parents:
+    path = _photo_path(session_id, name)
+    if path is None:
         return
     try:
         if path.is_file():
@@ -13093,10 +13103,8 @@ def _is_unmodified(request: Optional[Request], etag: str, mtime: float) -> bool:
 
 @app.get("/media/{session_id}/optimized/{name}")
 def media(session_id: str, name: str, request: Request = None, v: str = ""):
-    opt_dir = storage.optimized_path(session_id).resolve()  # read-only: no mkdir
-    path = (opt_dir / name).resolve()
-    # Guard against path traversal in `name` (e.g. "../../etc/passwd").
-    if opt_dir not in path.parents:
+    path = _photo_path(session_id, name, create=False)
+    if path is None:
         raise HTTPException(404, "Not found")
     if path.is_file():
         st = path.stat()
