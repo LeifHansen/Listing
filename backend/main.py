@@ -822,6 +822,13 @@ def _base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _truthy(value) -> bool:
+    """A yes from a form field, a query string or a JSON body: the boolean
+    itself, or "1", "true", "yes" or "on" in any case. Everything else -- a
+    "false", a blank, a missing value, a typo -- is no."""
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.get("/api/health")
 async def health() -> dict:
     """Liveness, and nothing else.
@@ -2357,7 +2364,7 @@ def _mark_native_flow(resp, request: Request, native: str) -> None:
     """Remember that this OAuth flow began inside the native shell, so the
     callback can send the webview back into the app instead of leaving the
     user stranded on the website. Rides a cookie exactly like the nonce."""
-    if str(native).lower() in ("1", "true", "yes"):
+    if _truthy(native):
         resp.set_cookie(NATIVE_RETURN_COOKIE, "app", max_age=600, httponly=True,
                         samesite="lax", secure=request.url.scheme == "https")
 
@@ -2389,7 +2396,7 @@ def _offsite_connect(request: Request, uid: str, path: str, native: str):
     if not config.oauth_return_ok(here):
         return None
     params = {"ticket": auth.make_ticket(uid, "connect"), "return_to": here}
-    if str(native).lower() in ("1", "true", "yes"):
+    if _truthy(native):
         params["native"] = "1"
     log.info("connect: bouncing %s to the OAuth origin, returning to %s",
              path, here)
@@ -2799,11 +2806,7 @@ def _flag(payload: Optional[dict], key: str, *, default: bool) -> bool:
     that never mentions it. Same vocabulary as _international: the JSON
     boolean, or the "1"/"true" a form would send."""
     value = (payload or {}).get(key)
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
+    return default if value is None else _truthy(value)
 
 
 def _choice(value, choices, default: int, what: str) -> int:
@@ -2832,10 +2835,7 @@ def _international(payload: Optional[dict]) -> bool:
     Accepts the JSON boolean the dialog sends and the "1"/"true" a form or a
     query string would, and nothing else counts as yes.
     """
-    value = (payload or {}).get("international_shipping")
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+    return _truthy((payload or {}).get("international_shipping"))
 
 
 @app.get("/api/ebay/policy-preview")
@@ -5406,10 +5406,10 @@ async def upload(
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_UPLOAD_FILES} per listing)")
 
-    run_pipeline = str(pipeline).lower() in ("true", "1", "yes", "on")
+    run_pipeline = _truthy(pipeline)
     if run_pipeline and not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    strip_bg = _truthy(remove_bg)
     # Uploading + optimizing stays free; background removal is switched on
     # per seller and metered per photo. Cleared before any disk work so a
     # seller who hasn't switched it on, is out of this month's allowance, or
@@ -5570,7 +5570,7 @@ async def upload_more(
                       key=storage.natural_key)
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
+    strip_bg = _truthy(remove_bg)
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
     held, spent = (await run_in_threadpool(_start_cutouts, request, len(files))
@@ -8574,7 +8574,8 @@ async def bulk_upload(
     # Same reason for background removal: the worker counts the cutouts
     # against the month's allowance, but whether this seller may have any at
     # all is answered here, while there is still a request to say no on.
-    if str(remove_bg).lower() in ("true", "1", "yes", "on"):
+    strip_bg = _truthy(remove_bg)
+    if strip_bg:
         try:
             await run_in_threadpool(
                 bg_removal.check, await run_in_threadpool(deps.uid, request))
@@ -8622,7 +8623,6 @@ async def bulk_upload(
     # Capture per-request context now — the worker thread has no Request.
     uid = await run_in_threadpool(deps.uid, request)
     job_id = storage.new_session_id()
-    strip_bg = str(remove_bg).lower() in ("true", "1", "yes", "on")
     await run_in_threadpool(_register_bulk_job, job_id, {
         "id": job_id, "phase": "uploading", "done": False,
         "error": None, "items": [], "total_items": 0, "current": 0,
