@@ -2257,9 +2257,7 @@ def account_summary(request: Request) -> dict:
     give, so an unreachable database is reported as unknown, not as zero --
     both when db_status says it is down and when the read itself fails.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     counted = db.db_status().get("connected", False)
     # Counted in SQL, not measured off a page. These used to be
     # `len(db.list_listings(limit=LIST_CAP))` and a Python sum over the same
@@ -2302,9 +2300,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     grant is theirs to revoke in eBay's settings. Both facts are stated in the
     confirm dialog and the privacy policy rather than quietly assumed.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     uid = user["id"]
 
     # Password-guessing here is the same attack as on /login, with a worse
@@ -2363,9 +2359,7 @@ def connect_ticket(request: Request) -> dict:
     flow from the native shell, where the connect NAVIGATION can carry
     neither the Bearer header nor the cross-origin session cookie. Scoped so
     a leaked URL is useless for anything but opening a connect screen."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     return {"ticket": auth.make_ticket(uid, "connect")}
 
 
@@ -2712,9 +2706,7 @@ def release_foreign_listings(request: Request,
     items is still the one connected. Publishes stamp the owner now, so this
     legacy pool only ever shrinks.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     include_unowned = bool((payload or {}).get("include_unowned"))
     acct = db.get_ebay_account(uid) or {}
     connected = (acct.get("ebay_username") or "").strip()
@@ -3093,9 +3085,7 @@ def ebay_diagnose_block(req: PublishRequest, request: Request) -> dict:
     Everything eBay said comes back verbatim under `ebay`, so the answer can
     be read here, quoted to eBay Customer Service, or pasted into a bug report.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
@@ -3236,9 +3226,7 @@ def set_ebay_policies(request: Request, payload: dict) -> dict:
     """Save the account's default shipping/payment/return policy selections and
     (optionally) a ship-from ZIP, which we use to create the eBay inventory
     location that publishing requires."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     fields = {
         k: str(payload.get(k) or "")
         for k in ("fulfillment_policy_id", "payment_policy_id", "return_policy_id")
@@ -3628,9 +3616,7 @@ def _distill_reference_row(record_id: str, attempt: int = 0) -> None:
 @app.get("/api/profile")
 def get_profile(request: Request) -> dict:
     """The logged-in user's profile + eBay connection summary for Settings."""
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     acct = db.get_ebay_account(user["id"]) or {}
     connected = bool(acct.get("refresh_token"))
     return {
@@ -3652,9 +3638,7 @@ def get_profile(request: Request) -> dict:
 @app.post("/api/profile")
 def save_profile(request: Request, payload: dict) -> dict:
     """Save profile customizations (currently: display name)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     display_name = str(payload.get("display_name", "")).strip()[:80]
     updated = db.update_user(uid, display_name=display_name)
     if not updated:
@@ -3721,9 +3705,7 @@ _PRICING_STRATEGIES = {"", "quick_flip", "median", "long_sale"}
 @app.get("/api/prefs")
 def get_prefs(request: Request) -> dict:
     """The user's new-listing defaults (weight/dims/quantity/condition)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     return {"prefs": db.get_prefs(uid)}
 
 
@@ -3743,9 +3725,7 @@ def save_prefs(request: Request, payload: dict) -> dict:
     that saves itself the moment it changes sends one key and nothing else is
     touched. The alias just says so in the method.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     clean: dict = {}
     for key, (typ, lo, hi) in _PREF_FIELDS.items():
         if key not in payload:
@@ -3885,9 +3865,7 @@ def _clean_listing_views(raw: object) -> list:
 @app.get("/api/listing-views")
 def listing_views(request: Request) -> dict:
     """The seller's saved listing views."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # Strict: this screen REPORTS what is saved, and `[]` from a failed read
     # is a claim that the seller has saved nothing — the same mistake as
     # rendering a failed /api/listings as an empty store.
@@ -3902,9 +3880,7 @@ def put_listing_views(request: Request, payload: dict) -> dict:
     short list the client already holds, and a per-view endpoint would need
     its own merge rules for a race that a single write does not have.
     """
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     views = _clean_listing_views((payload or {}).get("views"))
     if not db.save_listing_views(uid, views):
         raise HTTPException(
@@ -5020,9 +4996,7 @@ def _apply_listing_defaults(listing: Listing, uid: Optional[str],
 def sync_profile_from_ebay(request: Request) -> dict:
     """Auto-pull profile info from the connected eBay account: identity
     (username/email), business policies, and inventory location."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -5062,9 +5036,7 @@ def sync_profile_from_ebay(request: Request) -> dict:
 def ebay_disconnect(request: Request) -> dict:
     """Unlink the current user's eBay account so they can connect a different
     one (or the correct one, if the wrong account got linked)."""
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # Keep saved policy/location prefs so reconnecting the same account restores
     # them; a different account overwrites them on connect (see the callback).
     ebay_account.forget_verified(uid)
@@ -5166,8 +5138,7 @@ def ebay_payments_status(request: Request) -> dict:
     The raw detail is not discarded; it goes to the log under `reference`,
     which comes back to the seller so support can join the two.
     """
-    if not deps.uid(request):
-        raise HTTPException(401, "Log in first.")
+    deps.signed_in_uid(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "eBay is not connected for this account.")
@@ -10059,9 +10030,7 @@ def dismiss_duplicate_listings(request: Request,
     happens to find a second later; a fingerprint matching no current group is
     ignored. Omit it to dismiss every group the scan finds right now.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     groups = _scan_duplicates(user["id"])
     current = {g["fingerprint"] for g in groups}
     asked = {str(f) for f in ((payload or {}).get("fingerprints") or []) if f}
@@ -10523,9 +10492,7 @@ def lower_prices(payload: dict, request: Request) -> dict:
     per account at a time: a second press while one is running joins it
     rather than cutting the same prices twice.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -10767,9 +10734,7 @@ def send_offers_all(payload: dict, request: Request) -> dict:
 
     Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -11088,9 +11053,7 @@ def enrich_listings(payload: dict, request: Request) -> dict:
     does for a price drop, because every listing this touches spends AI
     credits. Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     ids = _ticked_ids(payload, "Pick at least one listing to fill in.")
@@ -11314,9 +11277,7 @@ def finish_all(request: Request) -> dict:
 
     Returns {"job_id"} immediately; poll /api/bulk/status/{job_id}.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     if not config.anthropic_ready():
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured.")
     uid = user["id"]
@@ -12689,9 +12650,7 @@ def end_and_relist(payload: dict, request: Request) -> dict:
     and two eBay calls — and returns {"job_id"} at once; poll
     /api/bulk/status/{job_id} for progress and the per-listing report.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     creds = deps.ebay_creds_for(request)
     if not creds:
         raise HTTPException(400, "Connect eBay first.")
@@ -13260,9 +13219,7 @@ def etsy_settings_options(request: Request) -> dict:
 @app.post("/api/etsy/settings-options")
 def save_etsy_settings_options(request: Request, payload: dict) -> dict:
     _marketplace_or_404("etsy")
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     fields = {k: str(payload.get(k) or "").strip()
               for k in ETSY_SETTING_KEYS if k in payload}
     if not fields:
@@ -13331,9 +13288,7 @@ def _etsy_provider_for(request: Request):
     """The Etsy provider and this user's credentials, or a 400 saying which
     part is missing — withheld, not connected, or not yet seated by Etsy."""
     provider = _marketplace_or_404("etsy")
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     pending, note = marketplaces.access_pending(provider, uid)
     if pending:
         raise HTTPException(400, note or "Etsy hasn't opened this app to your shop yet.")
@@ -13733,9 +13688,7 @@ def marketplace_status(marketplace: str, request: Request) -> dict:
 @app.post("/api/{marketplace}/disconnect")
 def marketplace_disconnect(marketplace: str, request: Request) -> dict:
     provider = _marketplace_or_404(marketplace)
-    uid = deps.uid(request)
-    if not uid:
-        raise HTTPException(401, "Log in first.")
+    uid = deps.signed_in_uid(request)
     # A disconnect that did not land is a failed disconnect, and saying so
     # is the whole point: the seller is told nothing changed and can retry,
     # instead of reloading onto a card that still says connected after being
