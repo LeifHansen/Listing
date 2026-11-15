@@ -163,30 +163,34 @@ def _route(conversation_id: str):
     return _provider_for(key), raw
 
 
-def get_conversation(uid: str, conversation_id: str, limit: int = 50) -> dict:
+def _routed(conversation_id: str):
+    """(provider, raw_id) for a conversation that can be opened, or raise."""
     p, raw = _route(conversation_id)
     if p is None:
         raise LookupError("That conversation's marketplace isn't available.")
-    out = p.get_conversation(uid, raw, limit=limit) or {}
+    return p, raw
+
+
+def _tagged(p, raw: str, out: Optional[dict]) -> dict:
+    """A provider's thread answer, its conversation stamped with where it
+    came from and its namespaced id."""
+    out = out or {}
     conv = out.get("conversation") or {}
     conv["marketplace"] = p.key
     conv["marketplace_label"] = getattr(p, "label", p.key)
     conv["id"] = messaging.qualify(p.key, conv.get("raw_id") or raw)
     out["conversation"] = conv
     return out
+
+
+def get_conversation(uid: str, conversation_id: str, limit: int = 50) -> dict:
+    p, raw = _routed(conversation_id)
+    return _tagged(p, raw, p.get_conversation(uid, raw, limit=limit))
 
 
 def send(uid: str, conversation_id: str, text: str) -> dict:
-    p, raw = _route(conversation_id)
-    if p is None:
-        raise LookupError("That conversation's marketplace isn't available.")
-    out = p.send_message(uid, raw, text) or {}
-    conv = out.get("conversation") or {}
-    conv["marketplace"] = p.key
-    conv["marketplace_label"] = getattr(p, "label", p.key)
-    conv["id"] = messaging.qualify(p.key, conv.get("raw_id") or raw)
-    out["conversation"] = conv
-    return out
+    p, raw = _routed(conversation_id)
+    return _tagged(p, raw, p.send_message(uid, raw, text))
 
 
 def mark_read(uid: str, conversation_id: str) -> bool:
