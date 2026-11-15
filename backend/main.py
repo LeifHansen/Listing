@@ -5422,7 +5422,7 @@ async def upload(
     # the event loop so photo processing doesn't stall every other request.
     opt_results = await run_in_threadpool(
         images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
-    optimized = storage.list_optimized(session_id)
+    optimized = await run_in_threadpool(storage.list_optimized, session_id)
     if not optimized:
         await run_in_threadpool(_refund_cutouts, spent, held)
         errs = "; ".join(r["error"] for r in opt_results if r.get("error"))
@@ -5495,8 +5495,8 @@ async def upload_more(
     # holds them is never offloaded.
     rec = await run_in_threadpool(db.get_listing_best_effort, session_id)
     recorded = await run_in_threadpool(_listing_image_order, session_id, rec)
-    existing = sorted(set(recorded or []) | set(storage.list_optimized(session_id)),
-                      key=storage.natural_key)
+    on_disk = await run_in_threadpool(storage.list_optimized, session_id)
+    existing = sorted(set(recorded or []) | set(on_disk), key=storage.natural_key)
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = _truthy(remove_bg)
