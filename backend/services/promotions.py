@@ -264,6 +264,34 @@ def _rule_based_refusal(resp: httpx.Response) -> str | None:
     return None
 
 
+def _bulk_ad_ok(resp: httpx.Response, statuses: tuple[int, ...]) -> bool:
+    """Whether a bulk ad call worked for the one listing it carried.
+
+    eBay answers the bulk ad calls with a result per listing in the body --
+    {"responses": [{"listingId", "statusCode", "adId", "errors"}]} -- and a
+    207 Multi-Status can carry that listing's refusal. The test used to be
+    that the body did not contain the word "error", which an empty "errors"
+    list on a success also fails, and which never read the listing's own
+    statusCode. The entries are read now; a body that is not that shape gets
+    the old test, so an unfamiliar answer is judged as it always was."""
+    if resp.status_code not in statuses:
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    entries = body.get("responses") if isinstance(body, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return "error" not in resp.text.lower()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("errors"):
+            return False
+        code = entry.get("statusCode")
+        if code is not None and not (isinstance(code, int) and 200 <= code < 300):
+            return False
+    return True
+
+
 def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
                                     campaign_id: str, listing_id: str,
                                     rate: float) -> dict:
@@ -276,7 +304,7 @@ def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
     r = client.post(
         f"{base}{_MARKETING}/ad_campaign/{campaign_id}/bulk_create_ads_by_listing_id",
         headers=_headers(token), json={"requests": [req]})
-    if r.status_code in (200, 201, 207) and "error" not in r.text.lower():
+    if _bulk_ad_ok(r, (200, 201, 207)):
         return {"ok": True}
     if is_scope_error(r):
         raise _ScopeError()
@@ -287,7 +315,7 @@ def _create_or_update_ad_by_listing(client: httpx.Client, base: str, token: str,
     u = client.post(
         f"{base}{_MARKETING}/ad_campaign/{campaign_id}/bulk_update_ads_bid_by_listing_id",
         headers=_headers(token), json={"requests": [req]})
-    if u.status_code in (200, 207) and "error" not in u.text.lower():
+    if _bulk_ad_ok(u, (200, 207)):
         return {"ok": True, "updated": True}
     return {"ok": False, "detail": (r.text or u.text)[:300]}
 

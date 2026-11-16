@@ -5919,8 +5919,21 @@ async def image_remove_bg(
     if data and len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(400, "Image too large")
 
+    # The photo first, and only then the charge. Loading by session is where
+    # the ownership check runs (and where a photo that is gone answers 404),
+    # so charging first meant a request for someone else's photo spent a
+    # token and a slot of the month's allowance before being refused, and
+    # got them back only through the refund below.
+    # Called directly inside a local function, not handed to the threadpool
+    # by reference: the owner-check scan
+    # (test_every_scoped_route_checks_the_owner.py) follows calls, and this
+    # call is where the check lives.
+    def _load():
+        return _studio_load(request, session_id, name, data)
+
+    img = await run_in_threadpool(_load)
+
     def _run() -> dict:
-        img = _studio_load(request, session_id, name, data)
         out, engine = images.remove_background_white(img)
         return {"ok": True, "image": _data_url(out), "engine": engine}
 
