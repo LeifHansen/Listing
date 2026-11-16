@@ -2799,7 +2799,12 @@ def add_notification(user_id: str, kind: str, title: str, body: str = "",
             s.add(row)
             try:
                 s.commit()
-            except Exception:  # noqa: BLE001 - lost the dedupe race; fine
+            except IntegrityError:
+                # Lost the dedupe race: another writer recorded this same
+                # event between the read above and this commit. Expected.
+                # Only this: a blanket except here also took a dropped
+                # connection for "already recorded", so a sale's
+                # notification could vanish without a line in the log.
                 s.rollback()
                 return None
             return _notification_to_dict(row)
