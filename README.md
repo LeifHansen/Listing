@@ -1,9 +1,10 @@
 # Thryft Shop
 
-**Snap it · AI writes it · list it everywhere.**
+**Snap it · AI writes it · list it on eBay.**
 
-Turn product photos into a complete, ready-to-publish listing — on eBay,
-Etsy, and Depop, individually or all at once.
+Turn product photos into a complete, ready-to-publish eBay listing. Etsy and
+Depop publishing is built too, but switched off for the launch — see
+[Marketplaces](#marketplaces-ebay--etsy--depop).
 
 Upload one or more images → the app **optimizes** them for eBay, **asks you
 what each item is** (one optional box per item, with its photos on screen),
