@@ -77,7 +77,7 @@ export function MessagesView() {
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="font-display font-bold text-[22px] text-ink">Messages</h1>
         <span className="text-[12px] text-ink-secondary">
-          Questions from buyers — never eBay's own mail.
+          Questions from buyers — never marketplace system mail.
         </span>
         <div className="ml-auto">
           <SourceTabs
@@ -107,7 +107,7 @@ export function MessagesView() {
               {messages.reason === "not_connected" && (
                 <Button variant="soft" size="sm" className="mt-3"
                   onClick={() => openSettings("ebay-account")}>
-                  Connect eBay
+                  Connect a marketplace
                 </Button>
               )}
             </div>
