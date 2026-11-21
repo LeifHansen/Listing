@@ -70,7 +70,7 @@ export function appLink(href) {
 
 export const site = {
   name: "Thryft Shop",
-  tagline: "Snap it · AI writes it · list it everywhere.",
+  tagline: "Snap it · AI writes it · list it on eBay.",
   description:
     "Turn product photos into complete, ready-to-publish eBay listings — " +
     "title, description, item specifics, category and price, from a photo.",
@@ -202,7 +202,7 @@ export const pipeline = [
   {
     key: "optimize",
     step: "02",
-    title: "Cleaned up for the marketplace",
+    title: "Cleaned up for eBay",
     blurb:
       "Auto-orient, cut the background onto a white canvas with a soft contact shadow, square-frame the item at the photo's own scale — never a crop-in zoom — resize to 1600px and finish with a sharpen.",
     detail: "Pillow · eBay's own image recommendations",

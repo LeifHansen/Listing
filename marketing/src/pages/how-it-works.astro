@@ -23,7 +23,7 @@ const description =
 const jsonLd = ({ ids, canonical }) => ({
   "@type": "HowTo",
   "@id": `${canonical}#howto`,
-  name: "How to turn a photo of an item into a live marketplace listing",
+  name: "How to turn a photo of an item into a live eBay listing",
   description,
   image: { "@id": ids.primaryImage },
   mainEntityOfPage: { "@id": ids.webpage },
@@ -45,7 +45,7 @@ const jsonLd = ({ ids, canonical }) => ({
         </p>
         <h1 class="mt-4 text-4xl sm:text-5xl">From a photo to a live listing</h1>
         <p class="mt-6 text-lg text-ink-secondary">
-          Five stages run between the shutter and the marketplace. Four of them
+          Five stages run between the shutter and eBay. Four of them
           are automatic. The fifth is you, checking the draft — which is the one
           step that should never be automated.
         </p>
@@ -63,7 +63,7 @@ const jsonLd = ({ ids, canonical }) => ({
     tone="sunken"
     eyebrow="The photo pipeline"
     title="Why the images matter as much as the words"
-    lede="Marketplace search ranks on photo quality, and a bad cutout costs you the sale. This is what happens to every image before it is attached to a listing."
+    lede="eBay buyers judge a listing by its photos first, and a bad cutout costs you the sale. This is what happens to every image before it is attached to a listing."
   >
     <div class="mt-14 grid gap-5 sm:grid-cols-2">
       <div class="rounded-card border border-line bg-card p-6 shadow-card">
@@ -85,7 +85,7 @@ const jsonLd = ({ ids, canonical }) => ({
         </p>
       </div>
       <div class="rounded-card border border-line bg-card p-6 shadow-card">
-        <h3 class="text-lg">Sized to the marketplace's own advice</h3>
+        <h3 class="text-lg">Sized to eBay's own advice</h3>
         <p class="mt-2 text-ink-secondary">
           Auto-oriented from EXIF, resized to 1600px on the long edge, and given
           a finishing sharpen — the dimensions eBay itself recommends for search
@@ -97,7 +97,7 @@ const jsonLd = ({ ids, canonical }) => ({
         <p class="mt-2 text-ink-secondary">
           Photograph the size and care label and the draft picks up brand, size,
           fabric and country of manufacture from it — the item specifics that
-          are tedious to type and that marketplace search actually filters on.
+          are tedious to type and that eBay search actually filters on.
         </p>
       </div>
     </div>
@@ -106,7 +106,7 @@ const jsonLd = ({ ids, canonical }) => ({
   <Section
     eyebrow="Publishing"
     title="One draft, straight to eBay"
-    lede="Review the draft and publish once — as an eBay draft or a live listing — with your business policies applied and the category resolved for you. More marketplaces will appear here as they are added."
+    lede="Review the draft and publish once — as an eBay draft or a live listing — with your business policies applied and the category resolved for you."
   >
     <div class="mt-14 grid gap-5 sm:grid-cols-3">
       {marketplaces.map((m) => {
@@ -127,7 +127,7 @@ const jsonLd = ({ ids, canonical }) => ({
       })}
     </div>
     <p class="mx-auto mt-10 max-w-2xl text-center text-ink-secondary">
-      Haven't connected a marketplace yet? The app generates the exact API
+      Haven't connected eBay yet? The app generates the exact API
       payload it would have sent, so you can see precisely what would go out
       before you connect anything.
     </p>

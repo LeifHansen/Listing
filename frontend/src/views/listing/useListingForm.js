@@ -810,7 +810,9 @@ export function useListingForm() {
 
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
-    setAiBusy(["Checking everything the marketplaces require…"]);
+    setAiBusy([chipTargets && chipTargets.length > 1
+      ? "Checking everything the marketplaces require…"
+      : "Checking everything eBay requires…"]);
     try {
       // The mode the PUBLISH will actually run in: an edit to a live listing
       // is a revise, and the server checks a revise against what it resends,
