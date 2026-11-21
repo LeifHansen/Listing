@@ -99,8 +99,8 @@ const svg = `
   <rect width="${W}" height="${H}" fill="url(#wash-b)" />
 
   <text x="96" y="330" font-family="Fredoka" font-weight="700" font-size="82" fill="${c.ink}">Thryft Shop</text>
-  <text x="98" y="396" font-family="Fredoka" font-weight="600" font-size="34" fill="${c.inkSecondary}">Snap it · AI writes it · list it everywhere.</text>
-  <text x="98" y="452" font-family="Fredoka" font-weight="600" font-size="27" fill="${c.blue}">eBay · Etsy · Depop</text>
+  <text x="98" y="396" font-family="Fredoka" font-weight="600" font-size="34" fill="${c.inkSecondary}">Snap it · AI writes it · list it on eBay.</text>
+  <text x="98" y="452" font-family="Fredoka" font-weight="600" font-size="27" fill="${c.blue}">Built for eBay sellers</text>
 
   <rect x="0" y="${H - 14}" width="${W}" height="14" fill="url(#bar)" />
 </svg>`;
