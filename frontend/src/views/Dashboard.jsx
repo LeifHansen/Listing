@@ -1186,7 +1186,7 @@ export function Dashboard() {
               illustration={ListingsIllustration}
               title="No listings yet"
               message={user
-                ? "Let's create your first listing — snap a few photos and the AI writes the rest."
+                ? "Let's create your first eBay listing — snap a few photos and the AI writes the rest."
                 : "Log in to keep your listings, or jump straight in and create one."}
               action={
                 <Button variant="primary" size="lg" onClick={openUploader}>
