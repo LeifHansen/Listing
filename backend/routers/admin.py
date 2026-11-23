@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import config, db, errors, objstore, storage
-from ..services import deletion_queue, errorlog, owed_refunds
+from ..services import cutout_api, deletion_queue, errorlog, owed_refunds
 from . import deps
 
 router = APIRouter()
@@ -81,6 +81,12 @@ def _diagnostics() -> dict:
         # is actually on, what's still missing before money can move, and which
         # Stripe mode the keys are in — a test key on a production deploy
         # accepts nothing and otherwise looks identical to a working one.
+        # Background removal. A seller is told only that it is "unavailable"
+        # whether the key was refused or the account ran out of images, since
+        # neither is theirs to fix; this is where the operator reads which it
+        # was -- the status, Photoroom's own words, and when. Since the last
+        # restart, from memory, so it answers with the database down.
+        "photoroom": cutout_api.health(),
         "tokens_enabled": config.tokens_enabled(),
         "tokens_missing": config.tokens_missing(),
         "stripe_live_mode": config.stripe_live_mode(),
