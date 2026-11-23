@@ -27,8 +27,8 @@ frame, in focus.
 
 That single photo is doing something none of the others can: it turns brand,
 size, fabric composition and country of manufacture from *guesses* into
-*facts*. Those are item specifics, and item specifics are what marketplace
-search filters on. A buyer narrowing to "Medium" never sees a listing where
+*facts*. Those are item specifics, and item specifics are what eBay search
+filters on. A buyer narrowing to "Medium" never sees a listing where
 size is blank — no matter how good the title is.
 
 It is also the most tedious part of listing by hand, which makes it the part
