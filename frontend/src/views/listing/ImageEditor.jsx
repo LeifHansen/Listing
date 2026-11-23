@@ -422,8 +422,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     cropStart.current = null;
     clearOverlay();
     commitOperation(rotateQuarter(canvas));
-    toast("Rotated — Undo to take it back, Save to keep it.", { kind: "success" });
-  }, [aiBusy, clearOverlay, commitOperation, toast]);
+  }, [aiBusy, clearOverlay, commitOperation]);
 
   // Crop applies the moment you release the drag — no separate Apply button.
   useEffect(() => {
