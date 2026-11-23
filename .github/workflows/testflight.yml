@@ -1,0 +1,245 @@
+name: iOS → TestFlight
+
+# Archives a signed App Store build of the iOS app and uploads it to App
+# Store Connect, where it appears in TestFlight once Apple has processed it
+# (5–30 minutes; Apple emails). No Mac, no Xcode account: signing comes from
+# four repository secrets — see MOBILE.md, "From GitHub Actions" — and
+# frontend/scripts/ios-signing.mjs, which uses the App Store Connect API to
+# find (or the first time, make) the distribution certificate and profile.
+#
+# Run it from the Actions tab: iOS → TestFlight → Run workflow, on main —
+# main is what production runs, so it is what testers should test. The build
+# number is the minute it was built, so every run uploads a new build.
+#
+# The secrets reach only the steps that need them, and the keys are on disk
+# only as long as they are needed: the certificate's key until it is in the
+# build keychain, the API key for the upload alone. The build steps between
+# run the npm packages' code, which is not trusted with either.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One upload at a time; a second run waits rather than cancelling one that
+# may be mid-upload.
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  testflight:
+    name: Archive and upload
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Secrets are set
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          IOS_DISTRIBUTION_KEY: ${{ secrets.IOS_DISTRIBUTION_KEY }}
+        run: |
+          missing=""
+          for name in APP_STORE_CONNECT_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY IOS_DISTRIBUTION_KEY; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. See MOBILE.md, \"From GitHub Actions\"."
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::warning::Uploading a build of ${GITHUB_REF#refs/heads/}, not main. Say so in TestFlight's \"What to Test\"."
+          fi
+          {
+            echo "SIGNING=$RUNNER_TEMP/signing"
+            echo "LOGS=$RUNNER_TEMP/logs"
+            echo "ARCHIVE=$RUNNER_TEMP/App.xcarchive"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The newest RELEASED Xcode on the image: App Store Connect rejects a
+      # build made with a beta, and wants a current SDK.
+      - name: Newest Xcode
+        run: |
+          xcode=$(printf "%s\n" /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          mkdir -p "$LOGS"
+
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+
+      - name: Certificate and profile
+        id: signing
+        working-directory: frontend
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          IOS_DISTRIBUTION_KEY: ${{ secrets.IOS_DISTRIBUTION_KEY }}
+        run: node scripts/ios-signing.mjs --out "$SIGNING"
+
+      # A keychain of its own, holding the certificate, its key and Apple's
+      # intermediate certificate (without which the identity is not valid for
+      # signing). The key may be used by codesign alone; the key file and the
+      # .p12 are deleted as soon as it is in.
+      - name: Keychain
+        env:
+          ISSUER_URL: ${{ steps.signing.outputs.issuer_url }}
+          PROFILE_UUID: ${{ steps.signing.outputs.profile_uuid }}
+        run: |
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          keychain_pass=$(openssl rand -hex 24)
+          p12_pass=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_pass"
+          echo "::add-mask::$p12_pass"
+
+          # macOS's own openssl (LibreSSL) writes the .p12 encryption that
+          # `security import` reads; an OpenSSL 3 needs -legacy for it.
+          ossl=/usr/bin/openssl
+          legacy=""
+          [[ "$("$ossl" version)" == "OpenSSL 3"* ]] && legacy="-legacy"
+          "$ossl" pkcs12 -export $legacy -inkey "$SIGNING/key.pem" -in "$SIGNING/distribution.pem" \
+            -name "Thryft Shop distribution" -out "$SIGNING/distribution.p12" -passout "pass:$p12_pass"
+          rm -f "$SIGNING/key.pem"
+
+          security create-keychain -p "$keychain_pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_pass" "$keychain"
+          security import "$SIGNING/distribution.p12" -k "$keychain" -P "$p12_pass" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$SIGNING/distribution.p12"
+          curl -fsSL --retry 3 -o "$SIGNING/issuer.cer" "$ISSUER_URL"
+          security import "$SIGNING/issuer.cer" -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_pass" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain"
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          identities=$(security find-identity -v -p codesigning "$keychain")
+          if [[ "$identities" != *"Apple Distribution"* ]]; then
+            security find-identity -p codesigning "$keychain"
+            echo "::error::The distribution certificate is in the keychain but not valid for signing."
+            exit 1
+          fi
+          echo "$identities"
+
+          # Xcode 16 reads profiles from UserData; earlier ones from MobileDevice.
+          for dir in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" \
+                     "$HOME/Library/MobileDevice/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            cp "$SIGNING/profile.mobileprovision" "$dir/$PROFILE_UUID.mobileprovision"
+          done
+
+      - name: Prepare
+        working-directory: frontend
+        run: npm run native:ios
+        env:
+          THRYFT_APPLE_TEAM_ID: ${{ steps.signing.outputs.team_id }}
+          THRYFT_IOS_PROFILE: ${{ steps.signing.outputs.profile_name }}
+
+      - name: Archive
+        working-directory: frontend/ios/App
+        run: |
+          if ! xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+              -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
+              -derivedDataPath "$RUNNER_TEMP/dd" archive > "$LOGS/archive.log" 2>&1; then
+            grep -E "error:|ARCHIVE FAILED" "$LOGS/archive.log" | head -40 || true
+            tail -60 "$LOGS/archive.log"
+            echo "::error::The archive failed (full log in the build-logs artifact)."
+            exit 1
+          fi
+          tail -3 "$LOGS/archive.log"
+          app="$ARCHIVE/Products/Applications/App.app"
+          codesign -dvv "$app" 2>&1 | grep -E "^(Identifier|Authority|TeamIdentifier)="
+          test -f "$app/PrivacyInfo.xcprivacy" \
+            || { echo "::error::PrivacyInfo.xcprivacy is missing from App.app"; exit 1; }
+          {
+            echo "VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")"
+            echo "BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")"
+          } >> "$GITHUB_ENV"
+
+      - name: Export
+        run: |
+          if ! xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$RUNNER_TEMP/export" \
+              -exportOptionsPlist "$SIGNING/ExportOptions.plist" > "$LOGS/export.log" 2>&1; then
+            tail -60 "$LOGS/export.log"
+            echo "::error::Exporting the .ipa failed (full log in the build-logs artifact)."
+            exit 1
+          fi
+          ipa=$(ls "$RUNNER_TEMP"/export/*.ipa)
+          ls -l "$ipa"
+          echo "IPA=$ipa" >> "$GITHUB_ENV"
+
+      # altool finds the key in ./private_keys. It has been known to exit 0
+      # after a failed upload, so the verdict is read from what it printed.
+      - name: Upload
+        working-directory: frontend
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_ID: ${{ steps.signing.outputs.app_id }}
+          BUNDLE_ID: ${{ steps.signing.outputs.bundle_id }}
+        run: |
+          keys="$RUNNER_TEMP/asc"
+          node scripts/ios-signing.mjs --api-key-only --out "$keys"
+          cd "$keys"
+          set +e
+          # --apple-id names the app outright: without it, Xcode 26's altool
+          # can upload to another app whose bundle id shares the prefix.
+          xcrun altool --upload-package "$IPA" --type ios \
+            --apple-id "$APP_ID" --bundle-id "$BUNDLE_ID" \
+            --bundle-version "$BUILD" --bundle-short-version-string "$VERSION" \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            > "$LOGS/upload.log" 2>&1
+          status=$?
+          set -e
+          cd /
+          rm -rf "$keys"
+          cat "$LOGS/upload.log"
+          if [ "$status" -ne 0 ] || ! grep -qE "UPLOAD SUCCEEDED|No errors uploading" "$LOGS/upload.log"; then
+            echo "::error::The upload to App Store Connect failed; Apple's answer is above."
+            exit 1
+          fi
+          {
+            echo "### Thryft Shop $VERSION ($BUILD) uploaded"
+            echo
+            echo "Apple processes it next (5–30 minutes, then an email); it then appears in"
+            echo "[TestFlight](https://appstoreconnect.apple.com/apps/$APP_ID/testflight/ios)."
+            echo "Built from \`${GITHUB_SHA::12}\` on \`${GITHUB_REF#refs/heads/}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The .ipa, for Transporter if the upload step ever can't, and the logs.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: success() || env.IPA != ''
+        with:
+          name: ios-app-store-ipa
+          path: ${{ env.IPA }}
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: build-logs
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up
+        if: always()
+        run: |
+          [ -n "$KEYCHAIN" ] && security delete-keychain "$KEYCHAIN" || true
+          rm -rf "$SIGNING" "$RUNNER_TEMP/asc"
