@@ -102,7 +102,7 @@ export const TABS = [
       + "archive (finished listings sit at the end)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
-      message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
+      message: "Let's create your first eBay listing — snap a few photos and the AI writes the rest.",
       action: { label: "Create Listing", icon: PlusCircle, go: "new" },
     },
   },
