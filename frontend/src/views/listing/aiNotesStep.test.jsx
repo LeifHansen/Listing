@@ -179,7 +179,9 @@ describe("the guidance step", () => {
     const sent = await reachTheQuestion();
     await type(host.querySelector("textarea"), LINE);
 
-    await press("Write my listing");
+    // Typed text turns Approve into Submit Changes; with no Google on this
+    // server to ask again, submitting it keeps the note and writes the item.
+    await press("Submit Changes");
 
     expect(sent).toHaveLength(1);
     expect(sent[0].url).toContain("/api/bulk/notes/j1");
@@ -189,7 +191,7 @@ describe("the guidance step", () => {
   it("is never a wall: pressing on with an empty box still drafts", async () => {
     const sent = await reachTheQuestion();
 
-    await press("Write my listing");
+    await press("Approve");
 
     expect(sent[0].body).toEqual({ notes: {} });
     // ...and the draft it produced is the one the editor opens, exactly as it
@@ -197,10 +199,11 @@ describe("the guidance step", () => {
     expect(host.textContent).not.toContain("Anything the photos don't show?");
   });
 
-  it("says the box is optional rather than leaving it to be guessed", async () => {
+  it("says the box is optional, and what approving does", async () => {
     await reachTheQuestion();
 
-    expect(host.textContent).toContain("Every box is optional");
+    expect(host.textContent).toContain("optional");
+    expect(host.textContent).toContain("Approving writes your listing.");
   });
 
   it("keeps the question up when the answer can't be sent", async () => {
@@ -230,7 +233,9 @@ describe("the guidance step", () => {
     await press("Identify with AI");
     await type(host.querySelector("textarea"), LINE);
 
-    await press("Write my listing");
+    // Typed text turns Approve into Submit Changes; with no Google on this
+    // server to ask again, submitting it keeps the note and writes the item.
+    await press("Submit Changes");
 
     expect(host.textContent).toContain("Anything the photos don't show?");
     expect(host.querySelector("textarea").value).toBe(LINE);
@@ -256,7 +261,7 @@ describe("a question the seller walked away from", () => {
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
     // ...and it is the SAME job, so answering it still drafts those photos.
     await type(host.querySelector("textarea"), LINE);
-    await press("Write my listing");
+    await press("Submit Changes");
     expect(sent[0].url).toContain("/api/bulk/notes/j1");
     expect(sent[0].body).toEqual({ notes: { 0: LINE } });
   });
@@ -330,7 +335,7 @@ describe("a question the server has already answered", () => {
     await press("Identify with AI");
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
 
-    await press("Write my listing");
+    await press("Approve");
 
     expect(host.textContent).not.toContain("Anything the photos don't show?");
     expect(host.textContent).toContain("Drag photos here");

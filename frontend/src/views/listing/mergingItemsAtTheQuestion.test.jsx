@@ -185,6 +185,7 @@ describe("merging items at the guidance step", () => {
       // The one that wasn't merged keeps its own.
       expect(after[1].value).toBe("Avon, 1970s");
 
+      await click(button("Approve all"));
       await click(button("Write 2 listings"));
       expect(submitted).toEqual([{
         0: "Cloisonne, Japanese. small chip on the rim",
