@@ -310,6 +310,66 @@ class BgRemovalUsage(Base):
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
 
 
+class CutoutPhoto(Base):
+    """One listing photo whose background is to be taken off ON THE SELLER'S
+    DEVICE, and how that went.
+
+    A photo uploaded with "remove background" on a device that can do it is
+    kept as shot by the server's photo pass and written down here as
+    `pending`. The app works through the pending rows -- serially, on the
+    phone or in the browser, for free -- and each one ends `done` (a matte
+    came back and was composited; services/cutouts), `skipped` (the seller
+    edited or restored the photo meanwhile, so their edit wins, or the
+    listing went live) or `failed` (the device could not cut it, with the
+    reason). A row the app never reached simply stays pending, and the app
+    picks it up the next time it opens: nothing is ever handed to Photoroom
+    because the app was closed.
+
+    `kind` is what the screen said: "item", or "art" for a picture, whose
+    matte is only ever used to LOCATE its edge. `working_sha` is the SHA-256
+    of the working copy the row's cutout produced, for an operator asking
+    which bytes a "done" row refers to.
+    """
+
+    __tablename__ = "cutout_photos"
+    __table_args__ = (
+        Index("ix_cutout_photos_user_state", "user_id", "state"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(8), default="item")
+    state: Mapped[str] = mapped_column(String(10), default="pending")
+    provider: Mapped[str] = mapped_column(String(32), default="")
+    platform: Mapped[str] = mapped_column(String(16), default="")
+    error: Mapped[str] = mapped_column(String(255), default="")
+    working_sha: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CutoutUsage(Base):
+    """How many photos each background-removal engine cut in one calendar
+    month (UTC, "YYYY-MM"), across every seller: Apple Vision, ML Kit and the
+    browser model, which cost nothing, and Photoroom, which costs the app
+    PHOTOROOM_COST_PER_IMAGE a photo and is held to
+    PHOTOROOM_MONTHLY_BUDGET_USD by this count (services/bg_removal).
+
+    Per seller is bg_removal_usage's job (the backstop on one seller); this is
+    the whole app's bill, so it counts every Photoroom call -- including the
+    ones old app builds make and the ones that only locate a picture's edge.
+    """
+
+    __tablename__ = "cutout_usage"
+
+    period: Mapped[str] = mapped_column(String(7), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    platform: Mapped[str] = mapped_column(String(16), primary_key=True)
+    photos: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Notification(Base):
     """An in-app alert for one user — today that means "your item sold".
 
@@ -1619,6 +1679,8 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             s.execute(delete(Notification).where(Notification.user_id == user_id))
             s.execute(delete(BgRemovalUsage)
                       .where(BgRemovalUsage.user_id == user_id))
+            s.execute(delete(CutoutPhoto)
+                      .where(CutoutPhoto.user_id == user_id))
             # Bought labels carry a buyer's name and address; they go with
             # the seller who bought them.
             s.execute(delete(ShippingLabel).where(ShippingLabel.user_id == user_id))
@@ -2309,20 +2371,26 @@ def get_listing_strict(listing_id: str):
         return UNAVAILABLE
 
 
-def touch_listing(listing_id: str) -> None:
+def touch_listing(listing_id: str) -> Optional[str]:
     """Bump updated_at (no other changes) so list thumbnails — versioned by
-    updated_at — refetch after an image-only edit like rotate. Never raises."""
+    updated_at — refetch after an image-only edit like rotate. Returns the
+    new updated_at (ISO) when a row was touched, so a caller can hand the
+    client the exact version to show without reloading the whole list.
+    Never raises."""
     try:
         eng = _get_engine()
         if eng is None:
-            return
+            return None
         with Session(eng) as s:
             rec = s.get(ListingRecord, listing_id)
             if rec is not None:
                 rec.updated_at = _now()
+                stamp = rec.updated_at.isoformat()
                 s.commit()
+                return stamp
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: touch_listing failed: {exc}")
+    return None
 
 
 def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
@@ -2353,6 +2421,10 @@ def delete_listing(listing_id: str, user_id: Optional[str] = None) -> bool:
             if rec.user_id and rec.user_id != user_id:
                 return False
             s.delete(rec)
+            # In the same transaction: a photo of a listing that no longer
+            # exists must never be waiting for a device to cut it.
+            s.execute(delete(CutoutPhoto)
+                      .where(CutoutPhoto.session_id == listing_id))
             s.commit()
             return True
     except Exception as exc:  # noqa: BLE001
@@ -2486,6 +2558,282 @@ def bg_release(user_id: str, period: str, photos: int) -> bool:
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: bg_release failed: {exc}")
         return False
+
+
+# --- On-device cutouts ---------------------------------------------------------
+# The queue of photos waiting for the seller's device (CutoutPhoto) and the
+# app-wide count per engine (CutoutUsage). Best-effort like the rest of this
+# module's bookkeeping: a write that fails is logged and answered False/None,
+# and the photo it was about stays as shot -- never lost.
+
+CUTOUT_STATES = ("pending", "done", "skipped", "failed")
+# Listing states whose photos the queue may still change. A live listing's
+# photos are already on the marketplace; changing them under it is the
+# seller's call in the studio, never a background job's.
+CUTOUT_LISTING_STATES = ("draft", "unlisted")
+
+
+def cutout_mark(rows: Sequence[dict], user_id: Optional[str]) -> bool:
+    """Write `rows` ({session_id, name, kind}) as pending, replacing any row
+    for the same photo. True when written (or there is no database)."""
+    if not rows:
+        return True
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return True
+        now = _now()
+        with Session(eng) as s:
+            for r in rows:
+                key = (str(r["session_id"]), str(r["name"]))
+                row = s.get(CutoutPhoto, key)
+                if row is None:
+                    row = CutoutPhoto(session_id=key[0], name=key[1],
+                                      created_at=now)
+                    s.add(row)
+                row.user_id = user_id
+                row.kind = "art" if r.get("kind") == "art" else "item"
+                row.state = "pending"
+                row.provider = row.platform = row.error = ""
+                row.working_sha = ""
+                row.updated_at = now
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_mark failed: {exc}")
+        return False
+
+
+def cutout_get(session_id: str, name: str) -> Optional[dict]:
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return None
+        with Session(eng) as s:
+            row = s.get(CutoutPhoto, (session_id, name))
+            return _cutout_dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_get failed: {exc}")
+        return None
+
+
+def _cutout_dict(row: CutoutPhoto) -> dict:
+    return {"session_id": row.session_id, "name": row.name,
+            "user_id": row.user_id, "kind": row.kind, "state": row.state,
+            "provider": row.provider, "platform": row.platform,
+            "error": row.error, "working_sha": row.working_sha,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None}
+
+
+def cutout_pending(user_id: str, limit: int = 500) -> Optional[list[dict]]:
+    """This seller's photos still waiting for their device, oldest first --
+    only those of listings that still exist and are not live. None on a
+    database error."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(
+                select(CutoutPhoto, ListingRecord.status)
+                .join(ListingRecord, ListingRecord.id == CutoutPhoto.session_id)
+                .where(CutoutPhoto.user_id == user_id,
+                       CutoutPhoto.state == "pending",
+                       ListingRecord.status.in_(CUTOUT_LISTING_STATES))
+                .order_by(CutoutPhoto.created_at, CutoutPhoto.session_id,
+                          CutoutPhoto.name)
+                .limit(max(1, min(limit, 2000)))
+            ).all()
+            return [_cutout_dict(r[0]) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_pending failed: {exc}")
+        return None
+
+
+def cutout_set(session_id: str, name: str, state: str, *,
+               provider: str = "", platform: str = "", error: str = "",
+               working_sha: str = "") -> bool:
+    """Move one photo's row to `state`. A photo with no row is left alone
+    (False): there was nothing pending for it."""
+    if state not in CUTOUT_STATES:
+        raise ValueError(f"unknown cutout state {state!r}")
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            row = s.get(CutoutPhoto, (session_id, name), with_for_update=True)
+            if row is None:
+                return False
+            row.state = state
+            row.provider = (provider or "")[:32]
+            row.platform = (platform or "")[:16]
+            row.error = (error or "")[:255]
+            row.working_sha = (working_sha or "")[:64]
+            row.updated_at = _now()
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_set failed: {exc}")
+        return False
+
+
+def cutout_retire(session_id: str, name: str, why: str) -> bool:
+    """A PENDING photo the seller changed themselves (an edit, a restore):
+    their edit wins, so the device must not cut over it. Rows in any other
+    state are history and are left as they are."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return False
+        with Session(eng) as s:
+            row = s.get(CutoutPhoto, (session_id, name), with_for_update=True)
+            if row is None or row.state != "pending":
+                return False
+            row.state = "skipped"
+            row.error = (why or "")[:255]
+            row.updated_at = _now()
+            s.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_retire failed: {exc}")
+        return False
+
+
+def cutout_copy(src_session: str, dst_session: str,
+                mapping: dict[str, str], user_id: Optional[str]) -> bool:
+    """Copy the rows of `mapping`'s photos from one session to another under
+    their new names -- the bulk split. Idempotent: a row already there is
+    overwritten with the source's, so a split retried after a restart lands
+    the same rows."""
+    if not mapping:
+        return True
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return True
+        now = _now()
+        with Session(eng) as s:
+            src = {r.name: r for r in s.execute(
+                select(CutoutPhoto).where(
+                    CutoutPhoto.session_id == src_session,
+                    CutoutPhoto.name.in_(list(mapping)))).scalars()}
+            for old, new in mapping.items():
+                row = src.get(old)
+                if row is None:
+                    continue
+                dst = s.get(CutoutPhoto, (dst_session, new))
+                if dst is None:
+                    dst = CutoutPhoto(session_id=dst_session, name=new,
+                                      created_at=row.created_at or now)
+                    s.add(dst)
+                dst.user_id = user_id if user_id is not None else row.user_id
+                for col in ("kind", "state", "provider", "platform", "error",
+                            "working_sha"):
+                    setattr(dst, col, getattr(row, col))
+                dst.updated_at = now
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_copy failed: {exc}")
+        return False
+
+
+def cutout_forget(session_id: str, names: Optional[Sequence[str]] = None) -> bool:
+    """Drop a session's rows -- or just `names`' -- (photos deleted, a
+    staging pile purged)."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return True
+        with Session(eng) as s:
+            q = delete(CutoutPhoto).where(CutoutPhoto.session_id == session_id)
+            if names is not None:
+                q = q.where(CutoutPhoto.name.in_(list(names)))
+            s.execute(q)
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_forget failed: {exc}")
+        return False
+
+
+def cutout_prune_orphans(older_than_seconds: int = 7 * 86400) -> int:
+    """Delete rows with no listing behind them any more (a staging pile that
+    was purged, a session never saved) once they are old enough that no batch
+    can still be about to split them. Returns how many went."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return 0
+        cutoff = _now() - _dt.timedelta(seconds=older_than_seconds)
+        with Session(eng) as s:
+            listed = select(ListingRecord.id)
+            res = s.execute(delete(CutoutPhoto).where(
+                CutoutPhoto.updated_at < cutoff,
+                CutoutPhoto.session_id.not_in(listed)))
+            s.commit()
+            return int(res.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_prune_orphans failed: {exc}")
+        return 0
+
+
+def cutout_usage_add(period: str, provider: str, platform: str,
+                     photos: int, cap: Optional[int] = None) -> Optional[dict]:
+    """Count `photos` for one engine on one platform this month, atomically.
+
+    With `cap`, that row may not pass it: {"ok": False, "used": n} and
+    nothing counted when it would. The cap is per ROW, which for Photoroom
+    -- always called by the server, platform "server" -- is the whole app's
+    month, serialised by the row lock. A negative `photos` gives back (never
+    below zero). None on a database error."""
+    key = (period, (provider or "")[:32], (platform or "")[:16])
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return {"ok": True, "used": 0}
+        with Session(eng) as s:
+            row = s.get(CutoutUsage, key, with_for_update=True)
+            if row is None:
+                row = CutoutUsage(period=key[0], provider=key[1],
+                                  platform=key[2], photos=0, updated_at=_now())
+                s.add(row)
+                try:
+                    s.flush()
+                except IntegrityError:
+                    s.rollback()
+                    row = s.get(CutoutUsage, key, with_for_update=True)
+                    if row is None:
+                        raise
+            if cap is not None and photos > 0 and row.photos + photos > cap:
+                used = int(row.photos)
+                s.commit()
+                return {"ok": False, "used": used}
+            row.photos = max(0, int(row.photos) + int(photos))
+            row.updated_at = _now()
+            s.commit()
+            return {"ok": True, "used": int(row.photos)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_usage_add failed: {exc}")
+        return None
+
+
+def cutout_usage(period: str) -> Optional[list[dict]]:
+    """Every engine's count for `period`: [{provider, platform, photos}]."""
+    try:
+        eng = _get_engine()
+        if eng is None:
+            return []
+        with Session(eng) as s:
+            rows = s.execute(select(CutoutUsage).where(
+                CutoutUsage.period == period).order_by(
+                CutoutUsage.provider, CutoutUsage.platform)).scalars().all()
+            return [{"provider": r.provider, "platform": r.platform,
+                     "photos": int(r.photos)} for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: cutout_usage failed: {exc}")
+        return None
 
 
 def token_status(user_id: str, period: str, free_quota: int) -> Optional[dict]:

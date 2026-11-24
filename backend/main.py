@@ -8032,7 +8032,8 @@ class _BulkProgress:
 def _carry_photo_extras(src_opt: Path, dst_opt: Path,
                         mapping: dict[str, str]) -> None:
     """Copy what sits BESIDE each optimized photo -- the faithful as-shot copy
-    behind a cutout -- from a staging pile into an item's own session, under
+    behind a cutout, its matte, what the screen said about it -- from a
+    staging pile into an item's own session, under
     the item's names.
 
     The split used to copy optimized/ alone, and the staging pile is purged
@@ -8045,19 +8046,24 @@ def _carry_photo_extras(src_opt: Path, dst_opt: Path,
     it, and a copy that kept its old timestamp would be older than the
     working copy written a moment before it. Best-effort -- a photo is never
     worth failing an item over a copy beside it."""
-    for sub in ("as_shot",):
+    # The matte rides with it (mask/<stem>.png, under the same rule), and so
+    # does what the screen said about each photo -- a picture, a close-up --
+    # which the studio and the device queue both honour later.
+    for sub, rename in (("as_shot", lambda n: n),
+                        ("mask", lambda n: Path(n).stem + ".png")):
         src_dir, dst_dir = src_opt.parent / sub, dst_opt.parent / sub
         if not src_dir.is_dir():
             continue
         for old, new in mapping.items():
-            src = src_dir / old
+            src = src_dir / rename(old)
             if not src.is_file():
                 continue
             try:
                 dst_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dst_dir / new)
+                shutil.copyfile(src, dst_dir / rename(new))
             except OSError as exc:
                 log.info("bulk split: couldn't carry %s/%s (%s)", sub, old, exc)
+    images.carry_flags(src_opt, dst_opt, mapping)
 
 
 def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool]:

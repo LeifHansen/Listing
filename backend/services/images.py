@@ -34,11 +34,12 @@ never silently left with its background on.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, NamedTuple, Optional
 
 from PIL import Image, ImageFile, ImageFilter, ImageOps
 
@@ -175,19 +176,39 @@ def _contact_shadow(alpha: Image.Image) -> Image.Image:
     return shifted
 
 
-def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
-    """The item on white under a soft contact shadow.
+def compose(rgb: Image.Image, alpha: Image.Image,
+            background: tuple[int, int, int] = WHITE) -> Image.Image:
+    """The item on a solid `background` (white unless the seller chose a
+    colour) under a soft contact shadow.
 
-    The last step of every cutout, Photoroom's or the art path's geometry:
-    whatever produced the matte, what ships is the same composite. Photoroom
-    could draw the white and the shadow itself, but only on its Image Editing
-    plan at about five times the price of the matte alone.
+    The last step of EVERY cutout -- Photoroom's, the art path's geometry, or
+    a mask made on the seller's own phone or browser (services/cutouts):
+    whatever produced the matte, what ships is the same composite, so a pile
+    cut by three different engines still looks like one shoot. Photoroom
+    could draw the background and the shadow itself, but only on its Image
+    Editing plan at about five times the price of the matte alone.
     """
-    canvas = Image.new("RGB", rgb.size, WHITE)
+    canvas = Image.new("RGB", rgb.size, background)
     canvas.paste(Image.new("RGB", rgb.size, _SHADOW_INK), (0, 0),
                  _contact_shadow(alpha))
     canvas.paste(rgb, (0, 0), alpha)
     return canvas
+
+
+def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
+    """compose() on white: the listing default, and eBay's."""
+    return compose(rgb, alpha, WHITE)
+
+
+class Cut(NamedTuple):
+    """A cutout and what made it: the composite that ships, the matte it was
+    composited through (kept beside the photo, so the same cut can be put on
+    another colour or exported transparent without being made again), and
+    the engine's name."""
+
+    image: Image.Image
+    alpha: Image.Image
+    engine: str
 
 
 def _coverage(alpha: Image.Image, size: tuple[int, int]) -> float:
@@ -196,8 +217,18 @@ def _coverage(alpha: Image.Image, size: tuple[int, int]) -> float:
     return sum(alpha.histogram()[128:]) / float(size[0] * size[1])
 
 
-def cutout_with_engine(rgb: Image.Image) -> tuple[Image.Image, str]:
-    """The item on white, cut out by Photoroom, and the engine's name.
+def cutout_with_engine(rgb: Image.Image,
+                       background: tuple[int, int, int] = WHITE
+                       ) -> tuple[Image.Image, str]:
+    """The item on white (or `background`), cut out by Photoroom, and the
+    engine's name. See _engine_cut."""
+    cut = _engine_cut(rgb, background)
+    return cut.image, cut.engine
+
+
+def _engine_cut(rgb: Image.Image,
+                background: tuple[int, int, int] = WHITE) -> Cut:
+    """The item on white, cut out by Photoroom, as a Cut.
 
     Never None: every way this can fail raises cutout_api.CutoutApiError
     with a sentence a seller can read — no key configured, a key Photoroom
@@ -235,10 +266,20 @@ def cutout_with_engine(rgb: Image.Image) -> tuple[Image.Image, str]:
         raise cutout_api.NothingFound(
             "Photoroom found no item in this photo — it was kept as shot.")
     log.info("bg-removal: photoroom kept %.3f of the frame", coverage)
-    return _compose_on_white(cut.convert("RGB"), alpha), "photoroom"
+    return Cut(compose(cut.convert("RGB"), alpha, background), alpha,
+               "photoroom")
 
 
-def _cutout_or_border(rgb: Image.Image) -> tuple[Image.Image, str]:
+def _cutout_or_border(rgb: Image.Image,
+                      background: tuple[int, int, int] = WHITE
+                      ) -> tuple[Image.Image, str]:
+    """_cutout_or_border_cut, as (image, engine)."""
+    cut = _cutout_or_border_cut(rgb, background)
+    return cut.image, cut.engine
+
+
+def _cutout_or_border_cut(rgb: Image.Image,
+                          background: tuple[int, int, int] = WHITE) -> Cut:
     """Photoroom's cutout, or -- when Photoroom found NOTHING -- the item cut
     to its own rectangular outline ("border"). A tray, a sign, a plaque, a
     boxed set: a cutout fixes on the picture printed on its face and keeps
@@ -250,12 +291,12 @@ def _cutout_or_border(rgb: Image.Image) -> tuple[Image.Image, str]:
     Any OTHER failure is re-raised untouched: an outage or an empty Photoroom
     account is said, never papered over with geometry."""
     try:
-        return cutout_with_engine(rgb)
+        return _engine_cut(rgb, background)
     except cutout_api.NothingFound:
-        rescued = _rectangle_cutout(rgb)
+        rescued = _rectangle_cut(rgb, "border", background)
         if rescued is None:
             raise
-        return rescued, "border"
+        return rescued
 
 
 # What a photo of ART gets instead of a cutout when its outline cannot be
@@ -275,8 +316,25 @@ ART_NO_BORDER_KEPT_AS_SHOT = (
     "kept as shot. A backdrop that contrasts with the frame or edge helps.")
 
 
-def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
-    """The photo cut to the outer outline of the FLAT RECTANGULAR THING in it
+def _rectangle_cutout(rgb: Image.Image,
+                      background: tuple[int, int, int] = WHITE
+                      ) -> Optional[Image.Image]:
+    """_rectangle_cut's composite, or None."""
+    cut = _rectangle_cut(rgb, "border", background)
+    return cut.image if cut is not None else None
+
+
+def _rectangle_cut(rgb: Image.Image, engine: str,
+                   background: tuple[int, int, int] = WHITE) -> Optional[Cut]:
+    """_rectangle_alpha composited, as a Cut named `engine`, or None."""
+    alpha = _rectangle_alpha(rgb)
+    if alpha is None:
+        return None
+    return Cut(compose(rgb, alpha, background), alpha, engine)
+
+
+def _rectangle_alpha(rgb: Image.Image) -> Optional[Image.Image]:
+    """The matte of the photo cut to the outer outline of the FLAT RECTANGULAR THING in it
     — or of each, when there are two side by side — kept whole on white; or
     None when there isn't one.
 
@@ -294,10 +352,19 @@ def _rectangle_cutout(rgb: Image.Image) -> Optional[Image.Image]:
         return None
     log.info("art cutout: kept everything inside the outline %s of a %dx%d "
              "photo", quads, rgb.width, rgb.height)
-    return _compose_on_white(rgb, artwork.outline_matte(rgb.size, quads))
+    return artwork.outline_matte(rgb.size, quads)
 
 
-def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
+def art_cutout(rgb: Image.Image, locate: Optional[Callable] = None,
+               background: tuple[int, int, int] = WHITE
+               ) -> Optional[Image.Image]:
+    """art_cut's composite, or None. See art_cut."""
+    cut = art_cut(rgb, locate, background)
+    return cut.image if cut is not None else None
+
+
+def art_cut(rgb: Image.Image, locate: Optional[Callable] = None,
+            background: tuple[int, int, int] = WHITE) -> Optional[Cut]:
     """A PICTURE on white: everything inside its outer border, kept whole.
 
     The separate path for paintings, prints, posters, drawings, photographs
@@ -331,12 +398,15 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
     here that can remove a pixel from inside the outline.
 
     That matte is Photoroom's, asked for by _border_alpha, and only when
-    outline() found nothing.
+    outline() found nothing -- unless the caller hands its own `locate`: a
+    mask made on the seller's device (services/cutouts) is offered the same
+    way, used the same way, and costs nothing. `locate(rgb)` answers
+    (alpha or None, who).
     """
-    out = _rectangle_cutout(rgb)
+    out = _rectangle_cut(rgb, "art", background)
     if out is not None:
         return out
-    alpha, who = _border_alpha(rgb)
+    alpha, who = (locate or _border_alpha)(rgb)
     if alpha is None:
         return None
     # Four corners rather than a box, because the photo that gets here is the
@@ -348,7 +418,8 @@ def art_cutout(rgb: Image.Image) -> Optional[Image.Image]:
         return None
     log.info("art cutout: kept the picture whole inside %s (located by the "
              "%s engine) of a %dx%d photo", corners, who, rgb.width, rgb.height)
-    return _compose_on_white(rgb, artwork.quad(rgb.size, corners))
+    solid = artwork.quad(rgb.size, corners)
+    return Cut(compose(rgb, solid, background), solid, "art")
 
 
 def _border_alpha(rgb: Image.Image) -> tuple[Optional[Image.Image], str]:
@@ -529,8 +600,148 @@ def as_shot(path: Path) -> Path:
     return path
 
 
+# --- the matte the cutout was made through -------------------------------------
+#
+# Kept beside the photo as mask/<stem>.png -- one small greyscale PNG -- for
+# the same reason as the as-shot copy and under the same mtime rule: it
+# speaks for the working copy only while it is at least as new as it. With
+# both kept, a cut photo can be put on another colour, or handed over as a
+# transparent PNG, without anyone paying for the cut a second time.
+_MASK = "mask"
+
+
+def mask_file(path: Path) -> Path:
+    """Where the matte behind the optimized photo `path` is kept."""
+    return path.parent.parent / _MASK / (path.stem + ".png")
+
+
+def _keep_mask(dst: Path, alpha: Image.Image) -> None:
+    """Keep `alpha` as the matte behind the photo written to `dst`.
+    Best-effort, like _keep_as_shot, and only for a real session photo."""
+    if dst.parent.name != "optimized":
+        return
+    try:
+        out = mask_file(dst)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f".{out.name}.{os.getpid():x}.{threading.get_ident():x}.tmp")
+        try:
+            alpha.convert("L").save(tmp, "PNG", optimize=True)
+            os.replace(tmp, out)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except Exception as exc:  # noqa: BLE001 - a cache is never worth a photo
+        log.info("mask copy skipped for %s: %s", dst.name, exc)
+
+
+def current_mask(path: Path) -> Optional[Path]:
+    """The matte behind `path` while it still speaks for it -- kept, and at
+    least as new as the working copy -- else None."""
+    if path.parent.name != "optimized":
+        return None
+    kept = mask_file(path)
+    try:
+        if kept.stat().st_mtime >= path.stat().st_mtime:
+            return kept
+    except OSError:
+        pass
+    return None
+
+
+# --- what the screen said about each photo --------------------------------------
+#
+# orient.screen decides, per photo, whether it is a close-up of a detail and
+# whether the item is a picture -- and those answers used to live exactly as
+# long as the batch did. The studio's Remove background, pressed later on the
+# same photo, knew neither, so a painting opened in the editor and cut got
+# the subject lifted out of it: the very failure the batch path was built to
+# prevent. So the answers are written down beside the photos, by name, in one
+# small JSON file per session. Only "true" is ever written: a photo the screen
+# never saw, or saw as an ordinary item, has no entry, which is what it had
+# before any of this existed.
+_FLAGS = "photo_flags.json"
+_flags_lock = threading.Lock()
+
+
+def _flags_file(path: Path) -> Path:
+    return path.parent.parent / _FLAGS
+
+
+def photo_flags(path: Path) -> dict:
+    """{"art": bool, "detail": bool} for the optimized session photo `path`.
+    Both False when nothing was recorded, or for any other path."""
+    out = {"art": False, "detail": False}
+    if path.parent.name != "optimized":
+        return out
+    try:
+        data = json.loads(_flags_file(path).read_text())
+        rec = data.get(path.name) if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        out["art"] = bool(rec.get("art"))
+        out["detail"] = bool(rec.get("detail"))
+    return out
+
+
+def note_flags(path: Path, art: bool = False, detail: bool = False) -> None:
+    """Record what the screen said about `path`. Best-effort; a no-op for a
+    plain photo or a path outside a session."""
+    if path.parent.name != "optimized" or not (art or detail):
+        return
+    flags = {k: True for k, v in (("art", art), ("detail", detail)) if v}
+    _merge_flags(_flags_file(path), {path.name: flags})
+
+
+def carry_flags(src_opt: Path, dst_opt: Path, mapping: dict[str, str]) -> None:
+    """Copy the recorded flags of `mapping`'s photos from one session's
+    optimized/ to another's, renamed -- the bulk split, which moves photos
+    from the staging pile into each item's own session."""
+    try:
+        data = json.loads((src_opt.parent / _FLAGS).read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    moved = {new: data[old] for old, new in mapping.items()
+             if isinstance(data.get(old), dict)}
+    if moved:
+        _merge_flags(dst_opt.parent / _FLAGS, moved)
+
+
+def forget_flags(path: Path) -> None:
+    """Drop what was recorded about `path` (the photo was deleted)."""
+    if path.parent.name != "optimized":
+        return
+    _merge_flags(_flags_file(path), {path.name: None})
+
+
+def _merge_flags(file: Path, changes: dict) -> None:
+    with _flags_lock:
+        try:
+            data = json.loads(file.read_text())
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        for name, rec in changes.items():
+            if rec is None:
+                data.pop(name, None)
+            else:
+                data[name] = rec
+        try:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = file.with_name(f".{file.name}.{os.getpid():x}.{threading.get_ident():x}.tmp")
+            tmp.write_text(json.dumps(data, sort_keys=True))
+            os.replace(tmp, file)
+        except OSError as exc:
+            log.info("photo flags not written (%s)", exc)
+
+
 def optimize(src: Path, dst: Path, remove_bg: bool = False,
-             rotate: int = 0, detail: bool = False, art: bool = False) -> dict:
+             rotate: int = 0, detail: bool = False, art: bool = False,
+             device: bool = False,
+             background: tuple[int, int, int] = WHITE) -> dict:
     """One photo: as shot, or cut out on white; sized for eBay; no EXIF.
     Returns what was done. A cutout that cannot be had — no key, an account
     out of images, an outage, nothing found — keeps the photo as shot and
@@ -567,7 +778,18 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     border and never asks the engine which part of a painting is interesting.
     Same reason as `detail`, one step further: on a picture the engine's
     answer is not merely useless, it is confidently wrong in a way no guard
-    reading the matte can see. See orient._art and services/artwork."""
+    reading the matte can see. See orient._art and services/artwork.
+
+    `device` (with remove_bg) says the seller's own phone or browser will
+    make the matte -- free -- so nothing here may spend a Photoroom call. The
+    screening still decides: a close-up is kept as shot, as above; a picture
+    is cut by its scanned border, which is geometry and costs nothing, and
+    otherwise waits (`bg_pending` "art") for a device mask to LOCATE its edge;
+    everything else is kept as shot for now with `bg_pending` "item". The
+    caller records what is pending; services/cutouts finishes it.
+
+    `background` is the solid colour a cutout is composited onto: white
+    unless the seller chose another (prefs `cutout_background`)."""
     img, shot = _load(src)
     turn = int(rotate or 0) % 360
     turn = turn if turn in CW_TRANSPOSE else 0
@@ -575,9 +797,20 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
         img = img.transpose(CW_TRANSPOSE[turn])
     bg_removed, bg_error = False, None
     bg_engine = ""
+    bg_pending = ""
     faithful = None
+    matte = None
     if remove_bg and detail:
         bg_error = DETAIL_KEPT_AS_SHOT
+    elif remove_bg and device:
+        # Nothing here is paid for. A picture whose border the scan can find
+        # is cut now, by geometry; anything else waits for the device.
+        cut = _rectangle_cut(img, "art", background) if art else None
+        if cut is not None:
+            faithful, img, matte = img, cut.image, cut.alpha
+            bg_removed, bg_engine = True, cut.engine
+        else:
+            bg_pending = "art" if art else "item"
     elif remove_bg:
         try:
             # A picture never reaches the engine as a cutout. Its border
@@ -587,21 +820,25 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
             # Photoroom may help FIND that border (see art_cutout); it never
             # supplies the matte for a picture.
             if art:
-                out, bg_engine = art_cutout(img), "art"
-                if out is None:
+                cut = art_cut(img, background=background)
+                if cut is None:
                     bg_error = ART_NO_BORDER_KEPT_AS_SHOT
             else:
-                out, bg_engine = _cutout_or_border(img)
+                cut = _cutout_or_border_cut(img, background)
+            out = cut.image if cut is not None else None
+            if cut is not None:
+                bg_engine, matte = cut.engine, cut.alpha
         except cutout_api.CutoutApiError as exc:
             # Already a sentence for the seller: "unavailable right now",
             # "busy, try again in a minute", "found no item".
             log.info("bg-removal: keeping %s as shot (%s)", src.name, exc)
-            out, bg_error = None, str(exc)
+            out, matte, bg_error = None, None, str(exc)
         except Exception as exc:  # noqa: BLE001 - a photo must never fail for its cutout
             log.warning("bg-removal: keeping %s as shot (%s)",
                         src.name, type(exc).__name__)
-            out, bg_error = None, ("Background removal failed — the photo "
-                                   "was kept as shot.")
+            out, matte = None, None
+            bg_error = ("Background removal failed — the photo was kept as "
+                        "shot.")
         if out is not None:
             # Hold on to what the camera saw before the cutout replaces it.
             # This is the only moment it exists in the right form — upright,
@@ -625,10 +862,23 @@ def optimize(src: Path, dst: Path, remove_bg: bool = False,
     # a later edit in the studio win automatically.
     if faithful is not None:
         _keep_as_shot(dst, faithful)
+    # And the matte after both, under the same rule.
+    if matte is not None:
+        _keep_mask(dst, matte)
     out = {"file": dst.name, "original_size": shot, "output_size": img.size,
            "background_removed": bg_removed}
     if turn:
         out["rotated"] = turn
+    # What the screen said about this photo, for whoever records it (the
+    # studio honours it later: a picture is cut by its border, a close-up is
+    # asked about first). Only when true, so a plain photo's result is
+    # unchanged.
+    if art:
+        out["art"] = True
+    if detail:
+        out["detail"] = True
+    if bg_pending:
+        out["bg_pending"] = bg_pending
     if bg_removed:
         # Which path actually cut it: "photoroom"; "art" for a picture cut to
         # its own border; "border" for a flat rectangular item Photoroom
@@ -644,7 +894,9 @@ _EXTS = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".webp", ".bmp", ".gif",
 
 
 def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
-                 progress=None, should_stop=None) -> list[dict]:
+                 progress=None, should_stop=None, device: bool = False,
+                 background: tuple[int, int, int] = WHITE,
+                 on_result=None) -> list[dict]:
     """Every image in src_dir, in shooting order, as img_NNN.jpg in dst_dir.
 
     `progress(done, total)` is called after each photo. `should_stop()` is
@@ -680,7 +932,8 @@ def optimize_all(src_dir: Path, dst_dir: Path, remove_bg: bool = False,
     results.update(zip(pending, optimize_batch(
         [(src, dst) for _i, src, dst in todo], remove_bg=remove_bg,
         progress=progress, should_stop=should_stop,
-        done_already=len(results), grand_total=len(jobs))))
+        done_already=len(results), grand_total=len(jobs),
+        device=device, background=background, on_result=on_result)))
     return [results[i] for i, _src in jobs]
 
 
@@ -724,7 +977,10 @@ def source_for(src_dir: Path, name: str) -> Optional[Path]:
 
 def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
                    progress=None, done_already: int = 0,
-                   grand_total: int = 0, should_stop=None) -> list[dict]:
+                   grand_total: int = 0, should_stop=None,
+                   device: bool = False,
+                   background: tuple[int, int, int] = WHITE,
+                   on_result=None) -> list[dict]:
     """(src, dst) jobs in order; a failed photo yields {"file", "error"}
     instead of raising. Serial: a decode, one Photoroom call, a composite and
     an encode per photo, and a batch is already one of several running in
@@ -732,7 +988,13 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
 
     `done_already`/`grand_total` describe work this call is NOT doing — the
     photos a resumed batch found already finished — so `progress` keeps
-    saying "38 of 40" across a restart instead of dropping to "0 of 2"."""
+    saying "38 of 40" across a restart instead of dropping to "0 of 2".
+
+    `device`/`background` are optimize()'s. `on_result(dst, result)` is
+    called as each photo is finished -- before the next starts -- so a caller
+    can write down what is pending for the device as it happens, and a batch
+    the machine dies in the middle of has recorded every photo it finished.
+    It must not raise; if it does, it is logged and the batch goes on."""
     total = grand_total or len(jobs)
     done = done_already
     results = []
@@ -754,9 +1016,19 @@ def optimize_batch(jobs: list[tuple[Path, Path]], remove_bg: bool = False,
             result = optimize(src, dst, remove_bg,
                               rotate=turns.get(src.name, 0),
                               detail=src.name in details,
-                              art=src.name in art)
+                              art=src.name in art,
+                              device=device, background=background)
         except Exception as exc:  # noqa: BLE001 - keep going on a bad image
             result = {"file": src.name, "error": str(exc)}
+        else:
+            note_flags(dst.with_suffix(".jpg"), art=bool(result.get("art")),
+                       detail=bool(result.get("detail")))
+        if on_result is not None:
+            try:
+                on_result(dst.with_suffix(".jpg"), result)
+            except Exception as exc:  # noqa: BLE001 - bookkeeping never costs a photo
+                log.warning("photo pass: on_result failed for %s (%s)",
+                            dst.name, type(exc).__name__)
         results.append(result)
         done += 1
         if progress:
