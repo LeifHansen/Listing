@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { BulkAmountPanel } from "@/components/ui/BulkAmountPanel";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingFilters } from "@/components/ListingFilters";
+import { SavedViewTabs } from "@/components/SavedViewTabs";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -20,10 +21,13 @@ import { cn, formatMoney } from "@/lib/utils";
 import { reasonLines } from "@/lib/bulkReport";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
-  endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listingsView,
-  MARKET_FILTERS, orderListings,
+  endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listedAt,
+  listingsView, MARKET_FILTERS,
 } from "@/lib/listingsView";
 import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
+import { sortListings, sortMeta } from "@/lib/listingSort";
+import { ebayCategoryOptions, storeCategoryOptions } from "@/lib/categoryOptions";
+import { useStoreCategories } from "@/lib/useStoreCategories";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
@@ -44,9 +48,11 @@ const CrosspostWizard = lazy(() => import("@/views/crosspost/CrosspostWizard")
    What is on screen above the grid, top to bottom, and nothing else:
 
      1. the lifecycle tabs, with the grid/list toggle at their right end;
-     2. the filter bar — Filters, Save view, the saved views, and (for a
-        seller on more than one marketplace) where-it-lives at its right;
-     3. the chips for what is on, with "Showing N of M";
+        and the seller's saved views after a divider (SavedViewTabs);
+     2. the filter bar — Filters, the store / eBay category pickers, Sort,
+        and (for a seller on more than one marketplace) where-it-lives at
+        its right;
+     3. the chips for what is on, "Save view", and "Showing N of M";
      4. the selection bar, only while something is ticked;
      5. the "older listings" notice, only when the page is cut.
 
@@ -145,7 +151,7 @@ export function ListingsView({ search = "" }) {
     rotateListingPhoto, duplicateListing,
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     listingsTab, setListingsTab, listingsLayout, setListingsLayout,
-    listingFilters, clearListingFilters,
+    listingFilters, clearListingFilters, listingsSort,
     health,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     marketplaces, connectedMarketplaces,
@@ -247,29 +253,46 @@ export function ListingsView({ search = "" }) {
   }, [confirm, health, loadListings, toast]);
 
   const q = search.trim().toLowerCase();
-  // Newest first, except that a listing a buyer has bid or made an offer on
-  // goes to the top and the archive goes to the bottom: see
-  // lib/listingsView.orderListings. The card itself says why it is where it
-  // is (the green glow and its chip, or a Sold / Ended badge, in ListingCard).
+  // The tab, the marketplace and the search box: each about one field, and
+  // all of them BEFORE the filter bar — so the category pickers can count
+  // their choices off this list and a tick in one does not empty the rest.
+  const base = useMemo(() => listingsState.items
+    .filter((i) => inTab(tab, i))
+    .filter((i) => inMarketFilter(marketId, i))
+    .filter((i) => !q
+      || (i.listing?.title || i.title || "").toLowerCase().includes(q)
+      || (i.listing?.brand || "").toLowerCase().includes(q)
+      || (i.listing?.description || "").toLowerCase().includes(q)),
+  [listingsState.items, tab, marketId, q]);
+
+  // The filter bar's cut on top, then the order. Every predicate lives in
+  // lib/listingFilters and every order in lib/listingSort, so the grid, the
+  // "showing N of M" line and the empty state below all ask the same
+  // question of the same list. The default order ("Recommended") is the one
+  // the grid always had: a listing a buyer has bid or made an offer on goes
+  // to the top and the archive to the bottom (lib/listingsView.orderListings),
+  // and the card itself says why it is where it is.
   // Memoized for the same reason as the drafts grid above it on this screen:
-  // two passes and a sort over every listing the seller owns, re-run on every
+  // passes and a sort over every listing the seller owns, re-run on every
   // render, and the app context hands this component a new value on each
   // background poll whether or not a listing changed.
-  const items = useMemo(() => {
-    const shown = listingsState.items
-      .filter((i) => inTab(tab, i))
-      .filter((i) => inMarketFilter(marketId, i))
-      .filter((i) => !q
-        || (i.listing?.title || i.title || "").toLowerCase().includes(q)
-        || (i.listing?.brand || "").toLowerCase().includes(q)
-        || (i.listing?.description || "").toLowerCase().includes(q));
-    // The filter bar's cut, last: the tab, the marketplace and the search box
-    // are each about one field, and this is the one that stacks. Every
-    // predicate lives in lib/listingFilters, so the grid, the "showing N of M"
-    // line and the empty state below all ask the same question of the same
-    // list.
-    return orderListings(filterListings(shown, listingFilters), metricsById);
-  }, [listingsState.items, tab, marketId, q, metricsById, listingFilters]);
+  const items = useMemo(() => sortListings(
+    // `now` left to its default: the age windows measure against the moment
+    // this list is worked out, and the memo above decides when that is.
+    filterListings(base, listingFilters, undefined, { metricsById }),
+    listingsSort, metricsById,
+  ), [base, listingFilters, listingsSort, metricsById]);
+
+  // The category pickers' choices, counted off `base` (see above).
+  const storeCats = useStoreCategories();
+  const storeOptions = useMemo(
+    () => storeCategoryOptions(storeCats.categories, base),
+    [storeCats.categories, base]);
+  const ebayOptions = useMemo(() => ebayCategoryOptions(base), [base]);
+  // Only for a seller with shelves to pick from — or a listing already on
+  // one, which is how a store that could not be read still gets the filter.
+  const showStore = storeCats.categories.length > 0
+    || base.some((i) => String(i.listing?.store_category_id || "").replace(/^0$/, ""));
 
   // Ticks on the live listings, on the tabs that show them. They used to
   // wait for a second marketplace, because the crosspost was the only thing
@@ -535,7 +558,8 @@ export function ListingsView({ search = "" }) {
               onRotate={isDraft(item) ? rotateListingPhoto : undefined}
               skipped={skippedDraftIds.has(item.id)}
               stale={isLive(item)
-                && dayAge(item.created_at) >= STALE_DAYS}
+                && dayAge(listedAt(item)) >= STALE_DAYS}
+              meta={sortMeta(item, listingsSort)}
               metrics={metricsById[item.id]}
               showEbayChip={otherMarketplaces}
               selectable={selectable && isLive(item)}
@@ -676,6 +700,7 @@ export function ListingsView({ search = "" }) {
               </span>
             </button>
           ))}
+          <SavedViewTabs />
         </div>
         <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
       </div>
@@ -688,7 +713,8 @@ export function ListingsView({ search = "" }) {
           right end, so every narrowing control is on one line. */}
       <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
         total={view.kind === "unavailable" ? null : marketCounts[marketId]}
-        trailing={marketControl} />
+        trailing={marketControl}
+        storeOptions={storeOptions} ebayOptions={ebayOptions} showStore={showStore} />
 
       {/* The live listings' bulk bar: arrives with the first tick on a live
           listing and leaves with the last. Two rows, so three or four

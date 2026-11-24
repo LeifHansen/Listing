@@ -2359,12 +2359,42 @@ have I not priced*, *everything Nike under $20*, *the drafts still missing
 photos* — and a seller who worked one of those out by scrolling had to work it
 out again the next morning.
 
-**Filters**, on the Sell screen beside the tabs, stack on top of whichever tab
+**Filters**, on the Manage tab under the tabs, stack on top of whichever tab
 is open: format, condition, price range, brand, category, photos, how recently
 it was listed, and *still needs work*. Every predicate lives in one module
 (`frontend/src/lib/listingFilters.js`) because the grid, the count beside it
 and the empty state below all have to agree about what is showing — three
 components each doing their own filtering is three chances to disagree.
+
+**Category quick filters.** Beside the Filters button sit two pickers —
+**Store category** (the shelves in the seller's own eBay Store, in the order
+they arranged them, from `GET /api/ebay/store-categories`, plus *No store
+category* for what eBay files at the top level) and **eBay category** (the
+leaf categories the listings are actually filed under, counted off the
+listings themselves — there is no "categories I use" endpoint and none is
+needed). Each is a ticked list with a count beside every choice and a search
+box once it is long. The counts are taken *before* the filters, so ticking
+one shelf does not zero every other choice out of the list. Picks are stored
+by **id**, not name, so a shelf renamed in Seller Hub stays the same pick; a
+shelf the store no longer has still shows (in italics, under the name the
+listing remembers) because a listing still points at it. On a phone the
+pickers are sections of the Filters panel, which has the width to read them;
+from small screens up they are popovers on the filter row, which wraps rather
+than scrolls so a popover is never clipped by its own row. The old free-text
+box stays as *Category name contains*, for a word that spans both systems.
+The logic is `frontend/src/lib/categoryOptions.js`.
+
+**Buyer interest** — *Has watchers* (the shortlist a Send offers reaches) and
+*Offers or bids* (money on the table: the same test as the green glow on a
+card). A listing eBay could not be asked about is neither watched nor
+unwatched, so it fails the filter, per the rule below.
+
+**"Listed" means listed.** The *Listed within* windows, the stale-listing
+clock and the date sorts all read `listedAt` (`lib/listingsView.js`): eBay's
+own start time, then this app's publish time, then the record's birth — the
+order `services/duplicates._listed_at` uses. They used to read `created_at`,
+which on an imported listing is the night of the first store sync, so a store
+imported yesterday filtered as listed yesterday, all of it.
 
 **A filter narrows; it never invents.** Each one is asked of a fact the record
 carries, and a listing the fact is missing from *fails* it rather than passing
@@ -2387,12 +2417,35 @@ filtered tab says it is empty *because of the filters* and offers **Clear
 filters**, rather than showing "No listings yet" and a button to create a first
 listing to a seller who has three hundred.
 
+**Sort.** The grid's order is a menu on the filter row — *Sort: Recommended ▾*
+(an icon on a phone). **Recommended** is the order the grid always had: a
+listing a buyer has bid on or made an offer on first, then everything still in
+play, then the archive, most recently changed first within each. The others
+are *Newest / Oldest listed*, *Price high→low / low→high*, *Title A–Z / Z–A*,
+*Most watchers*, *Most views*, *Ending soonest* (auctions) and *Recently
+changed*. Two rules hold for all of them (`frontend/src/lib/listingSort.js`):
+a listing that cannot answer the question — an unpriced draft, a listing eBay
+has reported no watchers for — goes **last in both directions**, so "lowest
+price" never opens on a row of blanks; and ties fall back to the default's own
+tie-break, so the grid does not shuffle between renders. Under a date sort
+each card says the date it is sorted by ("Listed Mar 12"), which it does not
+otherwise show; price, title and traffic are already on the card. Unlike the
+filters, the sort **is** remembered on the device (`localStorage`,
+`listings-sort`), like the grid/list toggle: a sort hides nothing and the
+button always names the order that is on, so a remembered one can never look
+like missing listings.
+
 **Save view** keeps the cut under a name. A saved view is the tab *and* the
 filters — restoring only the filters would land the seller on whichever tab
-they happened to be on, which is a different list under the same name — and
-the pill for the view currently on screen reads as pressed. Saving again under
-an existing name updates that view in place rather than making a second pill
-with the same name.
+they happened to be on, which is a different list under the same name — and,
+when it was saved in anything but the default order, the **sort** too. The
+views sit with the lifecycle tabs, after a divider (Shopify's admin keeps its
+saved views in the same place): a view is a list to pick, which is what that
+row is for, and the filter row is left for the controls that make a cut. The
+one currently on screen reads as pressed — in its own order only, when it has
+one. *Save view* is offered beside the filter chips, once there is a question
+to name. Saving again under an existing name updates that view in place rather
+than making a second pill with the same name.
 
 **A view is a question, not a snapshot.** It stores the filters and never the
 listings that matched them, so "Needs photos" empties itself as the photos get
@@ -2406,7 +2459,8 @@ Settings can never overwrite a seller's views). Unlike the grid/list toggle,
 which is a per-device viewing preference in `localStorage`, a named list is
 work — and work that only exists on the laptop it was made on is work done
 twice. The server bounds what it stores (twenty views, a 40-character name, a
-flat filter object) but deliberately does *not* police the filter vocabulary:
+flat filter object, a 24-character sort id) but deliberately does *not* police
+the filter or sort vocabulary:
 that is the frontend's, validated on the way in and again on the way out, and
 a second copy of the same list in Python is a copy that goes out of step the
 first time a filter is added.

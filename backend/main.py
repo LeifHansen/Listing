@@ -3779,6 +3779,11 @@ def _clean_listing_views(raw: object) -> list:
             "name": name,
             "tab": str(item.get("tab") or "active")[:24],
             "filters": _clean_view_filters(item.get("filters")),
+            # The order the view was saved in (frontend lib/listingSort), or
+            # "" for one that never asked for an order. Opaque here, like the
+            # filters: the client decides what a sort id means and falls back
+            # to its default for one it does not know.
+            "sort": str(item.get("sort") or "")[:24],
             "created_at": str(item.get("created_at") or "")[:40],
         }
         if len(json.dumps(view)) > _VIEW_JSON_MAX:

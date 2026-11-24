@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  Bookmark, BookmarkPlus, SlidersHorizontal, Trash2, X,
+  BookmarkPlus, ChevronDown, SlidersHorizontal, X,
 } from "lucide-react";
 import { useApp } from "@/store";
-import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
+import { Popover } from "@/components/ui/Popover";
+import { CategoryChecklist } from "@/components/CategoryChecklist";
+import { SortMenu } from "@/components/SortMenu";
 import { Field, Input, Toggle } from "@/components/ui/fields";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { FORMAT_CHIP_LABELS } from "@/lib/listingFormat";
 import {
-  AGE_CHOICES, FORMAT_CHOICES, MAX_SAVED_VIEWS, PHOTO_CHOICES, VIEW_NAME_MAX,
-  activeFilterCount, clearFilter, filterChips, isEmptyFilters, matchingViewId,
+  AGE_CHOICES, FORMAT_CHOICES, INTEREST_CHOICES, MAX_SAVED_VIEWS, PHOTO_CHOICES,
+  VIEW_NAME_MAX, activeFilterCount, clearFilter, filterChips, isEmptyFilters,
 } from "@/lib/listingFilters";
+import { optionNamer } from "@/lib/categoryOptions";
 import { cn } from "@/lib/utils";
 
 /* The filter bar over the listings grid, and the saved views beside it.
@@ -25,11 +28,17 @@ import { cn } from "@/lib/utils";
  * Three rows, each of which earns its space or isn't drawn:
  *
  *   1. The Filters button (badged with how many dimensions are narrowing),
- *      Save view, the saved views — and, at the right end, whatever the
- *      caller passes as `trailing` (the Manage tab puts its where-it-lives
- *      control there, so every narrowing control is on one line).
+ *      the two category quick-pickers (from small screens up — on a phone
+ *      they live in the panel), the Sort menu, and at the right end whatever
+ *      the caller passes as `trailing` (the Manage tab puts its
+ *      where-it-lives control there, so every control that shapes the list
+ *      is on one line). The row WRAPS rather than scrolling sideways: a
+ *      popover opened from a scrolling row is clipped by it.
  *   2. The panel, when it's open.
- *   3. The chips for what's on, with "Showing N of M" beside them.
+ *   3. The chips for what's on, "Save view", and "Showing N of M".
+ *
+ * The saved views themselves sit with the lifecycle tabs (SavedViewTabs):
+ * a view is a list to pick, which is what that row is for.
  *
  * Row 3 is the one that has to exist. A filtered grid and an unfiltered one
  * look identical — fewer cards is also what an outage, a failed sync and a
@@ -71,13 +80,47 @@ function ChipRow({ label, children }) {
   );
 }
 
-export function ListingFilters({ shown, total, hasListings = true, trailing = null }) {
+/* "Store category ▾" with a count of what is ticked, opening the checklist.
+   From small screens up only: on a phone the same list is a section of the
+   Filters panel, where it has the width to be read. */
+function CategoryPicker({ label, options, selected, onToggle, onClear }) {
+  const n = selected.length;
+  return (
+    <Popover
+      label={label}
+      className="hidden sm:inline-flex"
+      buttonProps={{ variant: n ? "soft" : "ghost", size: "sm" }}
+      trigger={(
+        <>
+          {label}
+          {n > 0 && (
+            <span className="font-display tabular-nums text-[11px] font-bold rounded-full bg-blue text-on-accent px-1.5 min-w-5 h-5 grid place-items-center">
+              {n}
+            </span>
+          )}
+          <ChevronDown aria-hidden />
+        </>
+      )}
+    >
+      <CategoryChecklist label={label} options={options} selected={selected}
+        onToggle={onToggle} onClear={onClear} />
+    </Popover>
+  );
+}
+
+/* `storeOptions` / `ebayOptions` are the category choices for the list the
+   filters sit over (lib/categoryOptions), counted before the filters so the
+   menus don't empty as things are ticked. `showStore` is false for a seller
+   with no Store shelves and no listing on one — a picker with only "No store
+   category" in it is a question with one answer. */
+export function ListingFilters({
+  shown, total, hasListings = true, trailing = null,
+  storeOptions = [], ebayOptions = [], showStore = false,
+}) {
   const {
     listingFilters: filters, setListingFilters, clearListingFilters,
-    listingsTab, savedViews, saveListingView, deleteListingView,
-    applyListingView, user,
+    savedViews, saveListingView, user,
   } = useApp();
-  const { confirm } = useToast();
 
   const [open, setOpen] = useState(false);
   const [naming, setNaming] = useState(false);
@@ -86,13 +129,12 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
   const nameBox = useRef(null);
 
   const count = activeFilterCount(filters);
-  const chips = filterChips(filters);
+  const names = useMemo(() => ({
+    storeCategory: optionNamer(storeOptions),
+    ebayCategory: optionNamer(ebayOptions),
+  }), [storeOptions, ebayOptions]);
+  const chips = filterChips(filters, names);
   const empty = isEmptyFilters(filters);
-  // Which saved view, if any, the screen is showing right now — so its pill
-  // reads as pressed rather than as something still to be applied.
-  const showingId = useMemo(
-    () => matchingViewId(savedViews.items, listingsTab, filters),
-    [savedViews.items, listingsTab, filters]);
 
   // A filter cleared from under an open name box leaves nothing worth saving,
   // so the box goes with it. Derived rather than an effect that puts `naming`
@@ -124,29 +166,20 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
     }
   };
 
-  const askDelete = async (view) => {
-    if (await confirm({
-      title: `Delete “${view.name}”?`,
-      message: "The view is removed from every device. Your listings aren't "
-        + "touched — a view is only a saved set of filters.",
-      confirmLabel: "Delete view",
-      danger: true,
-    })) deleteListingView(view.id);
-  };
-
   const views = savedViews.items;
 
   // Nothing here belongs to a signed-out visitor: the views are account data
   // and the grid below is the sign-in prompt. Nor to an empty store — there
-  // is nothing to narrow — unless a filter or a saved view is already there,
-  // in which case the controls are exactly what is needed to get back out.
+  // is nothing to narrow or order — unless a filter is already on, in which
+  // case the controls are exactly what is needed to get back out.
   if (!user) return null;
-  if (!hasListings && empty && !views.length) return trailing
+  if (!hasListings && empty) return trailing
     ? <div className="flex justify-end">{trailing}</div> : null;
 
   // How many more views can be saved — said on the button that would fail,
   // as its tooltip, rather than as a sentence on the row.
   const full = views.length >= MAX_SAVED_VIEWS;
+  const hasEbayCategories = ebayOptions.length > 1;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -168,81 +201,23 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
           )}
         </Button>
 
-        {/* Offered only once there is a question to name. Saving a bare tab
-            would make a pill that does nothing when pressed. */}
-        {!empty && !showNameBox && (
-          <Button variant="ghost" size="sm" onClick={() => setNaming(true)}
-            disabled={full}
-            title={full ? `${MAX_SAVED_VIEWS} views saved — delete one to make room.` : undefined}>
-            <BookmarkPlus aria-hidden /> Save view
-          </Button>
+        {showStore && (
+          <CategoryPicker label="Store category" options={storeOptions}
+            selected={filters.storeCategory}
+            onToggle={(id) => toggleIn("storeCategory", id)}
+            onClear={() => set({ storeCategory: [] })} />
+        )}
+        {hasEbayCategories && (
+          <CategoryPicker label="eBay category" options={ebayOptions}
+            selected={filters.ebayCategory}
+            onToggle={(id) => toggleIn("ebayCategory", id)}
+            onClear={() => set({ ebayCategory: [] })} />
         )}
 
-        {showNameBox && (
-          <form onSubmit={submitName} className="flex items-center gap-2">
-            <Input
-              ref={nameBox}
-              value={name}
-              maxLength={VIEW_NAME_MAX}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Name this view"
-              aria-label="Name this view"
-              className="h-9 w-48 text-sm"
-            />
-            <Button type="submit" variant="primary" size="sm" loading={saving}>
-              Save
-            </Button>
-            <Button variant="ghost" size="sm"
-              onClick={() => { setNaming(false); setName(""); }}>
-              Cancel
-            </Button>
-          </form>
-        )}
-
-        {/* The saved strip. Each pill applies its own tab AND its filters, so
-            pressing one lands on the same list it was saved from. A neutral
-            pressed state — blue is the lifecycle tab's — and the delete only
-            on the pill that is showing: a row of bookmarks each with its own
-            bin read as a row of things to be careful of. */}
-        {views.map((v) => {
-          const showing = v.id === showingId;
-          return (
-            <span key={v.id} className={cn(
-              "inline-flex items-center rounded-full border transition-colors duration-150",
-              showing
-                ? "bg-bg-sunken border-line-strong"
-                : "bg-card border-line hover:border-line-strong",
-            )}>
-              <button
-                type="button"
-                onClick={() => applyListingView(v)}
-                aria-pressed={showing}
-                title={`Show “${v.name}”`}
-                className={cn(
-                  "inline-flex items-center gap-1.5 h-8 pl-3 rounded-full",
-                  "text-[13px] font-semibold cursor-pointer max-w-52",
-                  showing ? "pr-1.5 rounded-r-none text-ink" : "pr-3 text-ink-secondary hover:text-ink",
-                )}
-              >
-                <Bookmark size={13} aria-hidden className="shrink-0" />
-                <span className="truncate">{v.name}</span>
-              </button>
-              {showing && (
-                <button
-                  type="button"
-                  onClick={() => askDelete(v)}
-                  aria-label={`Delete the view “${v.name}”`}
-                  title={`Delete “${v.name}”`}
-                  className="grid place-items-center size-8 pr-1 rounded-r-full cursor-pointer text-ink-faint hover:text-error"
-                >
-                  <Trash2 size={13} aria-hidden />
-                </button>
-              )}
-            </span>
-          );
-        })}
-
-        {trailing && <div className="ml-auto">{trailing}</div>}
+        <div className="ml-auto flex items-center gap-2">
+          <SortMenu />
+          {trailing}
+        </div>
       </div>
 
       <AnimatePresence initial={false}>
@@ -255,6 +230,31 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
             className="overflow-hidden"
           >
             <div className="rounded-card border border-line bg-card p-4 flex flex-col gap-4">
+              {(showStore || hasEbayCategories) && (
+                <div className="grid sm:grid-cols-2 gap-4">
+                  {showStore && (
+                    <ChipRow label="Store category">
+                      <div className="w-full">
+                        <CategoryChecklist label="Store category" options={storeOptions}
+                          selected={filters.storeCategory} limit={12}
+                          onToggle={(id) => toggleIn("storeCategory", id)}
+                          onClear={() => set({ storeCategory: [] })} />
+                      </div>
+                    </ChipRow>
+                  )}
+                  {hasEbayCategories && (
+                    <ChipRow label="eBay category">
+                      <div className="w-full">
+                        <CategoryChecklist label="eBay category" options={ebayOptions}
+                          selected={filters.ebayCategory} limit={12}
+                          onToggle={(id) => toggleIn("ebayCategory", id)}
+                          onClear={() => set({ ebayCategory: [] })} />
+                      </div>
+                    </ChipRow>
+                  )}
+                </div>
+              )}
+
               <ChipRow label="Format">
                 {FORMAT_CHOICES.map((f) => (
                   <ChipToggle key={f} on={filters.format.includes(f)}
@@ -279,7 +279,8 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
                     className="h-10 text-sm"
                     onChange={(e) => set({ brand: e.target.value })} />
                 </Field>
-                <Field label="Category" hint="contains">
+                <Field label="Category name" hint="contains"
+                  help="Matches the words in either category — eBay's or your Store's.">
                   <Input value={filters.category} placeholder="Shirts"
                     className="h-10 text-sm"
                     onChange={(e) => set({ category: e.target.value })} />
@@ -296,6 +297,18 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
                     onChange={(e) => set({ priceMax: e.target.value })} />
                 </Field>
               </div>
+
+              <ChipRow label="Buyer interest">
+                {INTEREST_CHOICES.map(([id, label]) => (
+                  <ChipToggle key={id || "any"} on={filters.interest === id}
+                    onClick={() => set({ interest: id })}
+                    title={id === "watchers"
+                      ? "Listings eBay says somebody is watching — the ones a Send offers reaches."
+                      : undefined}>
+                    {label}
+                  </ChipToggle>
+                ))}
+              </ChipRow>
 
               <ChipRow label="Photos">
                 {PHOTO_CHOICES.map(([id, label]) => (
@@ -366,7 +379,40 @@ export function ListingFilters({ shown, total, hasListings = true, trailing = nu
               · Showing {shown} of {total}
             </span>
           )}
+
+          {/* Offered only once there is a question to name — here, beside the
+              chips that ARE the question. Saving a bare tab would make a pill
+              that does nothing when pressed. */}
+          {!showNameBox && (
+            <Button variant="ghost" size="sm" className="ml-auto h-7"
+              onClick={() => setNaming(true)}
+              disabled={full}
+              title={full ? `${MAX_SAVED_VIEWS} views saved — delete one to make room.` : undefined}>
+              <BookmarkPlus aria-hidden /> Save view
+            </Button>
+          )}
         </div>
+      )}
+
+      {showNameBox && (
+        <form onSubmit={submitName} className="flex flex-wrap items-center gap-2">
+          <Input
+            ref={nameBox}
+            value={name}
+            maxLength={VIEW_NAME_MAX}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Name this view"
+            aria-label="Name this view"
+            className="h-9 w-48 text-sm"
+          />
+          <Button type="submit" variant="primary" size="sm" loading={saving}>
+            Save
+          </Button>
+          <Button variant="ghost" size="sm"
+            onClick={() => { setNaming(false); setName(""); }}>
+            Cancel
+          </Button>
+        </form>
       )}
     </div>
   );

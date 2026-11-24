@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AGE_CHOICES, EMPTY_FILTERS, MAX_SAVED_VIEWS, VIEW_NAME_MAX, activeFilterCount,
+  AGE_CHOICES, EMPTY_FILTERS, MAX_SAVED_VIEWS, NO_STORE_CATEGORY, VIEW_NAME_MAX, activeFilterCount,
   addSavedView, clearFilter, filterChips, filterListings, filterPrice,
   isEmptyFilters, matchesFilters, matchingViewId, needsWork, normalizeFilters,
   normalizeSavedView, normalizeSavedViews, photoCount, removeSavedView,
@@ -281,7 +281,7 @@ describe("a saved view", () => {
     // the photos get taken.
     const { views } = addSavedView([], { name: "Nike under 20", tab: "all", filters });
     expect(Object.keys(views[0]).sort())
-      .toEqual(["created_at", "filters", "id", "name", "tab"]);
+      .toEqual(["created_at", "filters", "id", "name", "sort", "tab"]);
     expect(JSON.stringify(views[0])).not.toContain("listing");
   });
 
@@ -392,5 +392,108 @@ describe("which view the screen is showing", () => {
 
   it("answers nothing when nothing is saved", () => {
     expect(matchingViewId([], "active", filters)).toBe("");
+  });
+});
+
+describe("the category quick filters", () => {
+  const shelved = (id, rest = {}) => item({ store_category_id: id, ...rest });
+
+  it("keeps the listings on the ticked shelves, by id", () => {
+    expect(keeps(shelved("11"), { storeCategory: ["11", "12"] })).toBe(true);
+    expect(keeps(shelved("13"), { storeCategory: ["11", "12"] })).toBe(false);
+  });
+
+  it("finds the listings on no shelf at all, eBay's 0 included", () => {
+    expect(keeps(shelved(""), { storeCategory: [NO_STORE_CATEGORY] })).toBe(true);
+    expect(keeps(shelved("0"), { storeCategory: [NO_STORE_CATEGORY] })).toBe(true);
+    expect(keeps(shelved("11"), { storeCategory: [NO_STORE_CATEGORY] })).toBe(false);
+  });
+
+  it("matches eBay's category by id, and a listing with none fails", () => {
+    expect(keeps(item({ category_id: "15687" }), { ebayCategory: ["15687"] })).toBe(true);
+    expect(keeps(item({ category_id: "" }), { ebayCategory: ["15687"] })).toBe(false);
+  });
+
+  it("holds the picks in one order, so a view lights up however they were ticked", () => {
+    expect(sameFilters(on({ storeCategory: ["b", "a"] }), on({ storeCategory: ["a", "b", "a"] })))
+      .toBe(true);
+    expect(normalizeFilters({ ebayCategory: Array.from({ length: 60 }, (_, i) => `c${i}`) })
+      .ebayCategory).toHaveLength(40);
+  });
+
+  it("names the shelves on the chip, and says when one is gone", () => {
+    const names = { storeCategory: (id) => ({ 11: "Vintage Tees", 12: "Beanies" })[id] || "" };
+    const [chip] = filterChips(on({ storeCategory: ["11", "12", "99"] }), names);
+    expect(chip.label).toBe("Store: Vintage Tees, Beanies +1");
+    const [gone] = filterChips(on({ storeCategory: ["99"] }), names);
+    expect(gone.label).toBe("Store: Removed category");
+  });
+
+  it("counts each picker as one filter", () => {
+    expect(activeFilterCount(on({ storeCategory: ["1", "2"], ebayCategory: ["3"] }))).toBe(2);
+  });
+});
+
+describe("buyer interest", () => {
+  const watched = (n) => ({ watchers: n });
+
+  it("keeps a listing somebody is watching", () => {
+    expect(matchesFilters(item(), on({ interest: "watchers" }), NOW,
+      { metrics: watched(3) })).toBe(true);
+    expect(matchesFilters(item(), on({ interest: "watchers" }), NOW,
+      { metrics: watched(0) })).toBe(false);
+  });
+
+  it("does not count a listing eBay could not be asked about as unwatched or watched", () => {
+    expect(matchesFilters(item(), on({ interest: "watchers" }), NOW, {})).toBe(false);
+  });
+
+  it("reads the store sync's copy on an imported listing", () => {
+    const imported = item({ source: "ebay", watch_count: 2 });
+    expect(matchesFilters(imported, on({ interest: "watchers" }), NOW, {})).toBe(true);
+  });
+
+  it("keeps the listings a buyer has put money on", () => {
+    expect(matchesFilters(item(), on({ interest: "offers" }), NOW,
+      { metrics: { offers: 1 } })).toBe(true);
+    expect(matchesFilters(item(), on({ interest: "offers" }), NOW,
+      { metrics: { offers: 0, bids: 0 } })).toBe(false);
+  });
+
+  it("is passed each listing's own traffic by filterListings", () => {
+    const a = item({}, { id: "a" }), b = item({}, { id: "b" });
+    const kept = filterListings([a, b], on({ interest: "watchers" }), NOW,
+      { metricsById: { a: watched(1), b: watched(0) } });
+    expect(kept.map((i) => i.id)).toEqual(["a"]);
+  });
+});
+
+describe("listed within", () => {
+  it("measures when the listing went up on eBay, not when it was imported", () => {
+    // Imported last night, listed on eBay three months ago.
+    const imported = item({ ebay_start_time: daysAgo(90) }, { created_at: daysAgo(1) });
+    expect(keeps(imported, { within: "7" })).toBe(false);
+    expect(keeps(imported, { within: "30" })).toBe(false);
+    const fresh = item({ ebay_start_time: daysAgo(2) }, { created_at: daysAgo(1) });
+    expect(keeps(fresh, { within: "7" })).toBe(true);
+  });
+});
+
+describe("a saved view's order", () => {
+  const view = (sort) => ({ id: "v1", name: "N", tab: "active", filters: { brand: "Nike" }, sort });
+
+  it("is kept with the view", () => {
+    expect(normalizeSavedView(view("price-asc")).sort).toBe("price-asc");
+    const { views } = addSavedView([], { name: "Cheap", tab: "active",
+      filters: { brand: "Nike" }, sort: "price-asc" });
+    expect(views[0].sort).toBe("price-asc");
+  });
+
+  it("lights the view only in its own order, when it has one", () => {
+    const f = { brand: "Nike" };
+    expect(matchingViewId([view("price-asc")], "active", f, "price-asc")).toBe("v1");
+    expect(matchingViewId([view("price-asc")], "active", f, "title-asc")).toBe("");
+    // A view saved without an order never asked for one.
+    expect(matchingViewId([view("")], "active", f, "title-asc")).toBe("v1");
   });
 });

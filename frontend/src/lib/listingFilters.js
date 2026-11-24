@@ -32,7 +32,7 @@
  * first time it was used, which is the one thing a saved list must not do.
  */
 
-import { isArchived } from "@/lib/listingsView";
+import { buyerWaiting, isArchived, listedAt } from "@/lib/listingsView";
 import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import {
   AUCTION, AUCTION_BIN, FIXED_PRICE, FORMAT_CHIP_LABELS, askingPrice,
@@ -53,7 +53,9 @@ export const PHOTO_CHOICES = [
   ["without", "No photos"],
 ];
 
-// How recently the listing was CREATED. Rolling windows, and the labels say
+// How recently the listing went UP (lib/listingsView.listedAt — eBay's start
+// time where there is one, not the night the store sync first imported it).
+// Rolling windows, and the labels say
 // "last N" so none of them can be read as a calendar month — the same wording
 // rule the sold-tile ranges follow (lib/sales.SOLD_RANGES).
 export const AGE_CHOICES = [
@@ -63,6 +65,25 @@ export const AGE_CHOICES = [
   ["30", "Last 30 days"],
   ["90", "Last 90 days"],
 ];
+
+// Buyer interest: has anybody looked hard at it? "Has watchers" is the
+// shortlist for "Send offers"; "Offers or bids" is money on the table — the
+// same question the green glow on a card answers (listingsView.buyerWaiting).
+export const INTEREST_CHOICES = [
+  ["", "Any"],
+  ["watchers", "Has watchers"],
+  ["offers", "Offers or bids"],
+];
+
+// The store-category pick for a listing on no shelf at all. eBay files those
+// at the top of the Store ("Other items"); a seller tidying their shelves
+// wants exactly that list. A word rather than "" because "" is what an empty
+// multi-select already means, and the two must not collide.
+export const NO_STORE_CATEGORY = "none";
+
+// How many category ids one filter may hold. The same bound the server
+// applies to any list in a saved view (main._VIEW_LIST_MAX).
+const ID_LIST_MAX = 40;
 
 // Text fields are capped before they are stored: these ride in a saved view,
 // which rides in the user's prefs JSON, and an unbounded string there is a
@@ -82,6 +103,11 @@ export const EMPTY_FILTERS = Object.freeze({
   photos: "any",
   within: "",
   needsWork: false,
+  // Category picks, by id — not by name, because a shelf can be renamed in
+  // the Store and a picked id should keep meaning the same shelf.
+  storeCategory: [],
+  ebayCategory: [],
+  interest: "",
 });
 
 /* ---------- reading a filter set ---------- */
@@ -123,6 +149,16 @@ const pick = (raw, allowed) => {
 
 const choiceIds = (choices) => choices.map(([id]) => id);
 
+/* A list of ids as a filter should hold it: strings, each once, bounded, and
+   SORTED — the open set has no canonical order the way formats do, and two
+   sets with the same members have to compare equal for a saved view to light
+   up as the one showing (sameFilters). */
+const idList = (raw) => [...new Set(
+  (Array.isArray(raw) ? raw : [])
+    .map((v) => String(v ?? "").trim().slice(0, 40))
+    .filter(Boolean),
+)].sort().slice(0, ID_LIST_MAX);
+
 /* A filter object with only the keys this module knows, each a value it can
    act on. Everything that arrives from outside goes through here: the store's
    setter, a saved view read back from the server, and the tests. */
@@ -130,6 +166,7 @@ export function normalizeFilters(raw) {
   const f = raw && typeof raw === "object" ? raw : {};
   const photos = String(f.photos ?? "any");
   const within = String(f.within ?? "");
+  const interest = String(f.interest ?? "");
   return {
     format: pick(f.format, FORMAT_CHOICES),
     condition: pick(f.condition, CONDITIONS),
@@ -140,6 +177,9 @@ export function normalizeFilters(raw) {
     photos: choiceIds(PHOTO_CHOICES).includes(photos) ? photos : "any",
     within: choiceIds(AGE_CHOICES).includes(within) ? within : "",
     needsWork: f.needsWork === true,
+    storeCategory: idList(f.storeCategory),
+    ebayCategory: idList(f.ebayCategory),
+    interest: choiceIds(INTEREST_CHOICES).includes(interest) ? interest : "",
   };
 }
 
@@ -157,6 +197,9 @@ function activeFilterKeys(filters) {
   if (f.photos !== "any") on.push("photos");
   if (f.within) on.push("within");
   if (f.needsWork) on.push("needsWork");
+  if (f.storeCategory.length) on.push("storeCategory");
+  if (f.ebayCategory.length) on.push("ebayCategory");
+  if (f.interest) on.push("interest");
   return on;
 }
 
@@ -231,8 +274,11 @@ const has = (value, needle) =>
 /* Does one listing survive the filters?
  *
  * `now` is injected so the age windows are testable and so a grid rendered
- * in one pass measures every listing against the same instant. */
-export function matchesFilters(item, filters, now = Date.now()) {
+ * in one pass measures every listing against the same instant.
+ *
+ * `ctx.metrics` is eBay's traffic read for THIS listing (store.metricsById),
+ * which the buyer-interest filter needs and the record does not carry. */
+export function matchesFilters(item, filters, now = Date.now(), ctx = {}) {
   const f = normalizeFilters(filters);
   const listing = item?.listing || {};
 
@@ -269,32 +315,71 @@ export function matchesFilters(item, filters, now = Date.now()) {
   if (f.photos === "without" && photoCount(listing) > 0) return false;
 
   if (f.within) {
-    const made = Date.parse(item?.created_at || "");
-    // Same rule as the price: a record that cannot say when it was made is
-    // not evidence that it was made this week.
-    if (Number.isNaN(made)) return false;
-    if (now - made > Number(f.within) * 86400000) return false;
+    const listed = Date.parse(listedAt(item));
+    // Same rule as the price: a record that cannot say when it went up is
+    // not evidence that it went up this week.
+    if (Number.isNaN(listed)) return false;
+    if (now - listed > Number(f.within) * 86400000) return false;
   }
 
   if (f.needsWork && !needsWork(item)) return false;
 
+  if (f.storeCategory.length) {
+    const shelf = String(listing.store_category_id || "").trim();
+    // eBay reads "0" as the top level too (ebay_trading reads it as "").
+    const key = shelf && shelf !== "0" ? shelf : NO_STORE_CATEGORY;
+    if (!f.storeCategory.includes(key)) return false;
+  }
+
+  if (f.ebayCategory.length
+      && !f.ebayCategory.includes(String(listing.category_id || "").trim())) return false;
+
+  if (f.interest) {
+    const m = ctx.metrics;
+    if (f.interest === "offers" && !buyerWaiting(item, m)) return false;
+    if (f.interest === "watchers") {
+      // eBay's read first, the sync's copy on an imported listing second;
+      // neither is "nobody", it is "we don't know" — and a filter narrows.
+      const w = m && m.watchers != null ? Number(m.watchers)
+        : listing.source === "ebay" && listing.watch_count != null
+          ? Number(listing.watch_count) : null;
+      if (!(w > 0)) return false;
+    }
+  }
+
   return true;
 }
 
-export function filterListings(items, filters, now = Date.now()) {
+export function filterListings(items, filters, now = Date.now(), ctx = {}) {
   if (isEmptyFilters(filters)) return items || [];
-  return (items || []).filter((i) => matchesFilters(i, filters, now));
+  const metrics = ctx.metricsById || {};
+  return (items || []).filter((i) => matchesFilters(i, filters, now, {
+    ...ctx, metrics: metrics[i.id],
+  }));
 }
 
 /* ---------- saying what is on ---------- */
 
 const listOf = (values, label) => values.map(label).join(", ");
 
+/* "Vintage Tees, Beanies +2": the first two picks by name and a count for
+   the rest, so a chip stays one line however many shelves are ticked. */
+const namedList = (ids, nameOf) => {
+  const names = ids.map((id) => nameOf(id));
+  return names.length > 2
+    ? `${names.slice(0, 2).join(", ")} +${names.length - 2}`
+    : names.join(", ");
+};
+
 /* One chip per active dimension, in a fixed order, each carrying the key its
    × clears. A chip per dimension rather than per VALUE: picking three
    conditions is one decision, and three chips for it reads as three filters
-   the seller has to dismiss one at a time. */
-export function filterChips(filters) {
+   the seller has to dismiss one at a time.
+
+   `names` turns category ids back into what the seller calls them; without
+   it (or for an id the store no longer has) the chip says so rather than
+   showing a number. */
+export function filterChips(filters, names = {}) {
   const f = normalizeFilters(filters);
   const chips = [];
   if (f.format.length) {
@@ -324,6 +409,21 @@ export function filterChips(filters) {
       label: AGE_CHOICES.find(([id]) => id === f.within)[1] });
   }
   if (f.needsWork) chips.push({ key: "needsWork", label: "Needs work" });
+  if (f.storeCategory.length) {
+    const nameOf = (id) => (id === NO_STORE_CATEGORY ? "No store category"
+      : names.storeCategory?.(id) || "Removed category");
+    chips.push({ key: "storeCategory",
+      label: `Store: ${namedList(f.storeCategory, nameOf)}` });
+  }
+  if (f.ebayCategory.length) {
+    const nameOf = (id) => names.ebayCategory?.(id) || `#${id}`;
+    chips.push({ key: "ebayCategory",
+      label: `eBay: ${namedList(f.ebayCategory, nameOf)}` });
+  }
+  if (f.interest) {
+    chips.push({ key: "interest",
+      label: INTEREST_CHOICES.find(([id]) => id === f.interest)[1] });
+  }
   return chips;
 }
 
@@ -358,6 +458,9 @@ export function normalizeSavedView(raw) {
     name,
     tab: String(v.tab || DEFAULT_TAB).slice(0, 24) || DEFAULT_TAB,
     filters: normalizeFilters(v.filters),
+    // The order the view was saved in, or "" for a view saved before sorts
+    // existed — which applies its filters and leaves the sort alone.
+    sort: String(v.sort || "").slice(0, 24),
     created_at: String(v.created_at || ""),
   };
 }
@@ -386,10 +489,14 @@ export function sameFilters(a, b) {
 }
 
 /* The saved view the screen is currently showing, or "". What lets the pill
-   for it read as pressed instead of as something still to be applied. */
-export function matchingViewId(views, tab, filters) {
+   for it read as pressed instead of as something still to be applied.
+
+   A view with a sort is showing only in that sort; one saved without a sort
+   never asked for one, so any order matches it. */
+export function matchingViewId(views, tab, filters, sort = "") {
   const hit = normalizeSavedViews(views).find(
-    (v) => v.tab === tab && sameFilters(v.filters, filters));
+    (v) => v.tab === tab && sameFilters(v.filters, filters)
+      && (!v.sort || !sort || v.sort === sort));
   return hit ? hit.id : "";
 }
 
@@ -404,7 +511,7 @@ export function matchingViewId(views, tab, filters) {
  * a seller who tunes a view and saves it again means "this is what that list
  * is now", and the alternative is two pills with one name, which is worse
  * than either reading of the press. */
-export function addSavedView(views, { name, tab, filters, now = Date.now() } = {}) {
+export function addSavedView(views, { name, tab, filters, sort = "", now = Date.now() } = {}) {
   const current = normalizeSavedViews(views);
   const clean = String(name ?? "").trim().slice(0, VIEW_NAME_MAX);
   if (!clean) return { ok: false, error: "Give this view a name first." };
@@ -414,6 +521,7 @@ export function addSavedView(views, { name, tab, filters, now = Date.now() } = {
     name: clean,
     tab: String(tab || DEFAULT_TAB),
     filters: normalizeFilters(filters),
+    sort: String(sort || "").slice(0, 24),
     created_at: new Date(now).toISOString(),
   };
 

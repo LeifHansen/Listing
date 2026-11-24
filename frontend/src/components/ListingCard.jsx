@@ -349,6 +349,10 @@ const HOVER_RED = "hover:text-error hover:border-error/40 transition-colors";
 // toggle: the panel (views/listing/QuickEdit) is the caller's to place, under
 // the card, where the grid can make room for it without stretching the cards
 // beside it.
+// `meta` is one short muted line under the title — the fact the grid is
+// currently ordered by when the card does not otherwise show it ("Listed
+// Mar 12" under a date sort; lib/listingSort.sortMeta). A string, so the memo
+// below still holds.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
 // every unread-count refresh re-rendered the whole tree -- one framer-motion
 // card per listing, reconciled once a minute for a bell badge, and once every
@@ -358,7 +362,7 @@ export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   onDuplicate, onSplit, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   onQuickEdit, quickEditOpen = false,
-  showEbayChip = false,
+  showEbayChip = false, meta = "",
   layout = "grid", className,
 }) {
   const list = layout === "list";
@@ -759,6 +763,13 @@ export const ListingCard = memo(function ListingCard({
         <span className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </span>
+        {/* The row has the width the tile does not: where the listing sits in
+            the seller's own Store, beside whatever the grid is sorted by. */}
+        {(meta || l.store_category_name) && (
+          <span className="text-[12px] text-ink-faint truncate">
+            {[meta, l.store_category_name].filter(Boolean).join(" · ")}
+          </span>
+        )}
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           {/* A live auction is one chip: status, format, bids and clock. Any
               other listing keeps its status, and — beside it, because it
@@ -851,6 +862,7 @@ export const ListingCard = memo(function ListingCard({
         <p className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </p>
+        {meta && <p className="text-[12px] text-ink-faint -mt-1">{meta}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 empty:hidden">
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />

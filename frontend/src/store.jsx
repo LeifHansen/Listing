@@ -7,6 +7,7 @@ import {
   normalizeSavedViews, removeSavedView,
 } from "@/lib/listingFilters";
 import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
+import { DEFAULT_SORT, normalizeSort } from "@/lib/listingSort";
 import { isDraft } from "@/lib/listingsView";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
@@ -255,6 +256,18 @@ export function AppProvider({ children }) {
     setMarket(id);
     try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
   }, []);
+  // The order of the Manage grid (lib/listingSort). Remembered per device
+  // like the layout, and for the same reason the filters below are NOT: a
+  // sort hides nothing, and the Sort button always names the one that is on,
+  // so a remembered order can never look like missing listings.
+  const [listingsSort, setSort] = useState(() => {
+    try { return normalizeSort(readLocal("listings-sort")); } catch (e) { return DEFAULT_SORT; }
+  });
+  const setListingsSort = useCallback((next) => {
+    const id = normalizeSort(next);
+    setSort(id);
+    try { writeLocal("listings-sort", id); } catch (e) { /* a preference */ }
+  }, []);
   // The ticks on the LIVE listings (the drafts have draftSelection below):
   // an id -> true map of what the seller picked for a bulk action on the
   // Manage tab (End & relist, or a crosspost). Memory-only, and held here so
@@ -331,8 +344,11 @@ export function AppProvider({ children }) {
   }, []);
 
   const saveListingView = useCallback(async (name) => {
+    // The order rides along only when it is not the default: a view saved
+    // in "Recommended" is a list, not an instruction to re-sort.
     const result = addSavedView(savedViews.items, {
       name, tab: listingsTab, filters: listingFilters,
+      sort: listingsSort === DEFAULT_SORT ? "" : listingsSort,
     });
     if (!result.ok) {
       toast(result.error, { kind: "warning" });
@@ -348,7 +364,7 @@ export function AppProvider({ children }) {
       : `Saved “${result.view.name}” — it's on every device you sign in from.`,
     { kind: "success" });
     return result;
-  }, [savedViews.items, listingsTab, listingFilters, writeSavedViews, toast]);
+  }, [savedViews.items, listingsTab, listingFilters, listingsSort, writeSavedViews, toast]);
 
   const deleteListingView = useCallback(async (id) => {
     const gone = savedViews.items.find((v) => v.id === id);
@@ -370,7 +386,8 @@ export function AppProvider({ children }) {
     if (!v) return;
     setListingsTab(v.tab);
     setFilters(v.filters);
-  }, []);
+    if (v.sort) setListingsSort(v.sort);
+  }, [setListingsSort]);
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
@@ -1925,6 +1942,7 @@ export function AppProvider({ children }) {
     settingsSection, openSettings, clearSettingsSection,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
+    listingsSort, setListingsSort,
     listingFilters, setListingFilters, clearListingFilters,
     savedViews, saveListingView, deleteListingView,
     applyListingView,
@@ -1960,6 +1978,7 @@ export function AppProvider({ children }) {
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,
+    listingsSort, setListingsSort,
     listingFilters, setListingFilters, clearListingFilters,
     savedViews, saveListingView, deleteListingView,
     applyListingView,
