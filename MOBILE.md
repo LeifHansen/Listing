@@ -214,6 +214,32 @@ release to **Closed testing** for the 12-tester requirement, then to
 
 ---
 
+## The app's own plugin: background removal on the device
+
+`frontend/native/thryft-cutout` is a Capacitor plugin that lives in this repo
+and is installed as a `file:` dependency, so `npx cap sync` registers it like
+any other plugin and nothing in the generated `ios/` or `android/` is edited
+by hand.
+
+- **iOS:** Apple's Vision framework, `VNGenerateForegroundInstanceMaskRequest`
+  (iOS 17+; the app's floor stays iOS 15 and older phones report
+  themselves unsupported). It does not run in the **Simulator** — test on a
+  device.
+- **Android:** Google ML Kit subject segmentation (`16.0.0-beta1`, still
+  published as a beta). The model is delivered by **Google Play services**:
+  the plugin's manifest asks for it at install, and the app downloads it on
+  demand if it is missing. A phone without Play services falls back.
+
+Both answer only a soft greyscale mask of the photo; the server composites it
+exactly as it composites Photoroom's cutouts. Which platforms may use their
+engine is the server's `BG_LOCAL_PROVIDERS`, read on every app start — so an
+engine is switched off **without an app release** if it misbehaves. The web
+build's own engine (BiRefNet in the browser) is compiled out of the apps
+(`VITE_NATIVE=1`, set by the build script).
+
+The privacy manifest needs nothing new: the plugin calls Vision, ImageIO and
+CoreVideo only, none of them "required reason" APIs.
+
 ## Smoke test on a device
 
 Run on both platforms before promoting a build.
@@ -239,6 +265,19 @@ Run on both platforms before promoting a build.
       the dashboard, then puts the app in the background — never quits from
       the middle of a screen
 - [ ] Airplane mode: launching shows *something*, not an endless spinner
+- [ ] **Background removal on the device** (with `BG_LOCAL_PROVIDERS`
+      including the platform): Settings → Background removal says "Ready"
+      (Android may first say it is downloading — Play services fetches ML
+      Kit's model). Upload two photos with **Remove background** ticked and
+      cloud removal **off**: the banner counts them, each tile turns to the
+      cutout on white, and Settings' Photoroom count does not move. A pair
+      of shoes keeps both shoes. Kill the app mid-pile and reopen: the rest
+      carry on. In the studio, **Remove BG**, then **Colour**, **PNG** and
+      **Save**; reopen and **Remove BG** again — it cuts from the shot, not
+      the white composite.
+- [ ] Background removal on a device that can't (an iPhone on iOS 16, an
+      Android phone without Play services): Settings says why, and with cloud
+      removal on, photos go to Photoroom instead
 - [ ] If billing is on (`TOKENS_ENABLED`): on iOS, **Buy tokens** opens Safari
       (not in-app) and the balance updates on return (needs
       `STRIPE_WEBHOOK_SECRET`); on Android there is no buy button at all

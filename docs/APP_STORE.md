@@ -96,7 +96,8 @@ BUILT FOR PEOPLE WHO LIST A LOT
 • Manage live listings: edit them, lower prices, send offers to watchers,
   end and relist.
 • Read and answer buyer messages.
-• Optional background removal for clean product photos.
+• Optional background removal for clean product photos — done on your
+  phone where it can be, free, without sending the photo anywhere.
 
 YOUR ACCOUNT, YOUR DATA
 • Your sign-in is kept in your phone's secure storage.
@@ -188,6 +189,14 @@ usage analytics.
 **Shared: none.** Play doesn't count sending data to service providers that
 process it on your behalf (the AI providers, Photoroom, hosting), or sending
 it somewhere at the user's explicit request (publishing to eBay), as sharing.
+
+Background removal runs **on the device** where it can (Apple Vision on
+iPhone, ML Kit on Android — Google Play services downloads ML Kit's model;
+it is Google's own component, not a data recipient). Only a black-and-white
+mask of the item goes to our server, which already holds the photo. Photoroom
+receives a photo only for a seller who switched cloud background removal on,
+and only for a photo the device could not cut or the seller sent to the cloud
+on purpose.
 
 **Collected** (all **required** except Name and Purchase history, which are
 optional; none processed ephemerally except messages):

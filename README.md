@@ -323,7 +323,34 @@ curl -s -H "x-admin-token: $ADMIN_TOKEN" \
   `REMOVEBG_API_KEY`, `LEONARDO_API_KEY` or `LIGHTROOM_API_KEY` still set on
   the app are dead credentials and can be unset (and
   `/data/.canva_token.json` deleted).
-- **Background removal is switched on per seller.** Photoroom has no API for
+- **Background removal runs on the seller's device first.** The iPhone app
+  uses Apple's Vision framework, the Android app Google's ML Kit, and the web
+  app a BiRefNet Lite model in the browser (WebGPU). The device makes only a
+  soft greyscale mask; the server composites it with the same code it uses
+  for Photoroom's cutouts (`backend/services/cutouts.py`), so a pile cut by
+  three engines looks like one shoot. It is free — no token, no monthly count
+  — and nothing leaves the device but the mask, so there is no switch to turn
+  on. Which engines may run is **`BG_LOCAL_PROVIDERS`** (`ios`, `android`,
+  `web`; empty by default), read by the apps on every start, so an engine is
+  switched off here without an app release. Keep **`web` off until legal
+  signs off on BiRefNet**: its weights are MIT, but its DIS5K training data
+  forbids commercial use. The browser engine also needs `BG_WEB_MODEL_URL` and
+  `BG_WEB_MODEL_SHA256` (an fp16 ONNX export, ~115 MB, on the R2 bucket's
+  public URL with CORS for the app's origins). An upload asks for device
+  cutouts as `remove_bg=false&cutout=device`; the photo pass keeps those
+  photos as shot and writes them into the `cutout_photos` queue, and the app
+  works through them — on that visit, or the next time it opens. Nothing is
+  handed to Photoroom because the app was closed.
+- **Photoroom is the cloud fallback, and its bill is capped.** It is used for
+  a seller who switched it on, for a photo their device could not cut, and on
+  an explicit "Enhance". Every Photoroom call — old app builds' included — is
+  counted in `cutout_usage`; **`PHOTOROOM_MONTHLY_BUDGET_USD`** (at
+  **`PHOTOROOM_COST_PER_IMAGE`**, default $0.02) stops cloud cutouts for the
+  rest of the month when it is reached, **`PHOTOROOM_ENABLED=false`** stops
+  them without unsetting the key, and **`PHOTOROOM_MAX_CONCURRENCY`** (4)
+  caps calls in flight. Admin → System shows the month per engine and the
+  spend against the budget.
+- **Cloud background removal is switched on per seller.** Photoroom has no API for
   creating an account or a key on someone else's behalf, so sellers do not
   get Photoroom accounts: the app cuts on its own, and each seller turns the
   feature on once in **Settings → Background removal**, which is where they
@@ -1119,6 +1146,12 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `GET`  | `/api/ready` | Can this machine do photo work right now: storage, disk, database, object storage. **503** when not. Public; what `health-watch.yml` alerts on |
 | `GET`  | `/api/admin/diagnostics` | Every integration's state, the missing variables by name, config warnings, backlogs. Needs `x-admin-token`; fails closed when `ADMIN_TOKEN` is unset |
 | `POST` | `/api/upload` | Upload images (multipart) → optimize → `session_id`. Add `pipeline=true` to return as soon as the files are saved and run optimize **and** identify as one background job → `job_id`. `notes=` carries the seller's comma-separated hints, saved with the session so every later re-draft still has them |
+| `GET`  | `/api/image/file/{sid}/{name}` | One photo's bytes, streamed (never a redirect) for code that reads pixels. `?which=source` is what a background mask must be made from (the photo as shot behind a cutout). `X-Source-Sha256` names the bytes; `X-Photo-Kind` is `art`/`detail` when the screen said so |
+| `POST` | `/api/cutout/apply` | Save a background mask made on the seller's device → the listing photo, composited here. Free. 409 when the photo changed since `source_sha` |
+| `POST` | `/api/cutout/compose` | The studio's preview of a device mask, on any colour or `transparent`. Writes nothing |
+| `POST` | `/api/cutout/cloud` | Photoroom for one stored photo the device could not cut: consent, token and monthly count as every cloud cutout; never paid twice for an unchanged photo |
+| `GET`  | `/api/cutout/pending` · `POST /api/cutout/skip` | The device queue: photos waiting for this seller's device; give up on one with its reason |
+| `GET`  | `/api/image/cutout/{sid}/{name}` | A cut photo as a transparent PNG, from the kept shot and mask (409 once they are gone) |
 | `POST` | `/api/identify/{session_id}` | Vision → listing draft (synchronous; Shop Mode's alone). Which model looks at the photos is `config.identify_provider()`'s call — Gemini where `GOOGLE_API_KEY` is set, Claude otherwise. Records the result as `scanned`, not `draft` — see `db.SCANNED` |
 | `POST` | `/api/identify-async/{session_id}` | The same draft as a polled job → `job_id` |
 | `POST` | `/api/bulk/upload` | One photo pile → many drafts, as a job → `job_id`. Takes the same `notes=` hints, which tell the grouping pass how many separate items to expect |
@@ -1459,6 +1492,20 @@ contact shadow), and it sizes the result for eBay -- the longest side to
 seller's home never rides along to a listing. The frame the seller composed is
 the frame that ships; cropping and fixing a cutout Photoroom got wrong are the
 seller's, in the photo studio.
+
+**Where the matte comes from.** On the seller's device wherever it can
+(Apple Vision, ML Kit, BiRefNet in the browser — `services/cutouts.py` takes
+the mask), Photoroom otherwise. Either way it is composited here on the
+seller's colour (`cutout_background`, white by default) and the photo as shot
+and the matte are kept beside the listing photo, so the cut can be put on
+another colour, downloaded transparent, or cut again from the shot rather
+than from the composite. A device matte is resized to the photo bicubically,
+clamped at the extremes and otherwise kept as soft as it came — never
+thresholded. What the screen below says about each photo (a picture, a
+close-up) is written down (`photo_flags.json`), so the studio honours it too:
+the studio used to cut every photo the same way, which is how a painting the
+batch had spared got its subject lifted out the moment the seller pressed
+Remove background on it.
 
 **A matte is judged on one thing only: did it keep anything.** The in-house
 model this replaced had a stack of gates fitted to its failures — is the kept

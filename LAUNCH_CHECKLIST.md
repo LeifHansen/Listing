@@ -298,6 +298,31 @@ Ordered by what it costs a seller.
          Settings card already carries).
       7. After the first deploy at the new 2 GB VM size (fly.toml), watch the
          memory graph through a bulk batch.
+      8. Cap the bill: `PHOTOROOM_MONTHLY_BUDGET_USD` (with
+         `PHOTOROOM_COST_PER_IMAGE` matching the plan). Admin → System shows
+         the month's spend against it.
+- [ ] **Background removal on the device.** Built, and off until listed in
+      `BG_LOCAL_PROVIDERS` (read by the apps on every start; no release
+      needed to switch an engine on or off).
+      1. **iOS and Android** need an app build that contains the
+         `thryft-cutout` plugin (this branch onward). Run the device checklist
+         in MOBILE.md on a real iPhone (iOS 17+) and an Android phone with
+         Play services, then set `BG_LOCAL_PROVIDERS=ios,android`. Older app
+         builds ignore it and keep using Photoroom.
+      2. **The web engine (`web`) waits for legal.** BiRefNet Lite's code and
+         weights are MIT, but one of its training sets, DIS5K, is licensed
+         for non-commercial research only, and the author has not said
+         whether that reaches the weights. Get sign-off before listing `web`.
+      3. Then, for `web`: put an fp16 BiRefNet Lite ONNX export that runs on
+         WebGPU (stock exports are reported to run out of memory in Chrome;
+         use an opset-22 or patched re-export) on the R2 bucket, with a CORS
+         rule allowing GET from `https://app.thryftshop.com` (and
+         `capacitor://localhost`, `https://localhost`), and set
+         `BG_WEB_MODEL_URL`, `BG_WEB_MODEL_SHA256` (`sha256sum` of the file)
+         and `BG_WEB_MODEL_BYTES`. The CSP gains `'wasm-unsafe-eval'` only
+         while `web` is on.
+      4. Update the store privacy answers if they change (docs/APP_STORE.md
+         already describes the on-device path).
 - [ ] **Unset the dead credentials** while there:
       `LIGHTROOM_API_KEY`, `OPENAI_API_KEY`, `SENDGRID_API_KEY`,
       `Ebay_Sandbox_App_Id` / `Ebay_Sandbox_Cert_Id` / `Ebay_Sandbox_Dev_Id`,
