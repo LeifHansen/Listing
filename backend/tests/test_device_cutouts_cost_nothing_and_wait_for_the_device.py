@@ -627,3 +627,24 @@ def test_an_items_session_inherits_the_piles_queue_and_photo_extras(client):
     assert db.cutout_get(sid, "img_000.jpg")["state"] == "pending"
     assert db.cutout_get(sid, "img_001.jpg")["kind"] == "art"
     assert images.photo_flags(storage.optimized_dir(sid) / "img_001.jpg")["art"]
+
+
+def test_webassembly_is_allowed_only_where_the_browser_engine_is_on(monkeypatch, tmp_path):
+    """'wasm-unsafe-eval' allows WebAssembly.compile and nothing else, but it
+    is still an allowance: it appears only once an operator has switched the
+    browser's background remover on, with a model to load."""
+    from backend import main
+    index = tmp_path / "index.html"
+    index.write_text("<html><script>1</script></html>")
+    monkeypatch.setattr(config, "BG_LOCAL_PROVIDERS", ())
+    off = main.build_csp(index)
+    assert "wasm-unsafe-eval" not in off and "worker-src" not in off
+    monkeypatch.setattr(config, "BG_LOCAL_PROVIDERS", ("web",))
+    monkeypatch.setattr(config, "BG_WEB_MODEL_URL", "https://cdn.example/m.onnx")
+    monkeypatch.setattr(config, "BG_WEB_MODEL_SHA256", "b" * 64)
+    on = main.build_csp(index)
+    script = next(d for d in on.split("; ") if d.startswith("script-src"))
+    assert "'wasm-unsafe-eval'" in script
+    assert "'unsafe-inline'" not in script and "'unsafe-eval'" not in script.replace(
+        "'wasm-unsafe-eval'", "")
+    assert "worker-src 'self'" in on

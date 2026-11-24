@@ -212,15 +212,27 @@ def build_csp(index_html: Path) -> str:
     canvas output before anything is uploaded. media-src says the same for
     listing videos, which are served from the R2 bucket and previewed from a
     blob: URL before they are.
+
+    WebAssembly is compiled only where the browser's own background remover
+    is switched on (config.bg_web_ready: "web" in BG_LOCAL_PROVIDERS, with a
+    model to load). 'wasm-unsafe-eval' allows WebAssembly.compile and nothing
+    else -- not eval, not inline script -- and worker-src 'self' names the one
+    worker the remover runs in, bundled under /assets like every script. Off
+    by default, so the policy is exactly what it was until an operator turns
+    the engine on.
     """
     try:
         hashes = _inline_script_hashes(index_html.read_text(encoding="utf-8"))
         script_src = " ".join(["script-src 'self'", *hashes])
     except OSError:
         script_src = "script-src 'self' 'unsafe-inline'"
+    wasm = config.bg_web_ready()
+    if wasm:
+        script_src += " 'wasm-unsafe-eval'"
     return "; ".join((
         "default-src 'self'",
         script_src,
+        *(("worker-src 'self'",) if wasm else ()),
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' https: data: blob:",
