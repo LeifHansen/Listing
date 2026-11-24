@@ -13,7 +13,7 @@ import { CONDITIONS, conditionLabel } from "@/lib/conditions";
 import { FORMAT_CHIP_LABELS } from "@/lib/listingFormat";
 import {
   AGE_CHOICES, FORMAT_CHOICES, INTEREST_CHOICES, MAX_SAVED_VIEWS, PHOTO_CHOICES,
-  VIEW_NAME_MAX, activeFilterCount, clearFilter, filterChips, isEmptyFilters,
+  SALE_CHOICES, VIEW_NAME_MAX, activeFilterCount, clearFilter, filterChips, isEmptyFilters,
 } from "@/lib/listingFilters";
 import { optionNamer } from "@/lib/categoryOptions";
 import { cn } from "@/lib/utils";
@@ -115,7 +115,7 @@ function CategoryPicker({ label, options, selected, onToggle, onClear }) {
    category" in it is a question with one answer. */
 export function ListingFilters({
   shown, total, hasListings = true, trailing = null,
-  storeOptions = [], ebayOptions = [], showStore = false,
+  storeOptions = [], ebayOptions = [], showStore = false, saleEvents = [],
 }) {
   const {
     listingFilters: filters, setListingFilters, clearListingFilters,
@@ -132,7 +132,8 @@ export function ListingFilters({
   const names = useMemo(() => ({
     storeCategory: optionNamer(storeOptions),
     ebayCategory: optionNamer(ebayOptions),
-  }), [storeOptions, ebayOptions]);
+    sale: optionNamer(saleEvents),
+  }), [storeOptions, ebayOptions, saleEvents]);
   const chips = filterChips(filters, names);
   const empty = isEmptyFilters(filters);
 
@@ -297,6 +298,22 @@ export function ListingFilters({
                     onChange={(e) => set({ priceMax: e.target.value })} />
                 </Field>
               </div>
+
+              {(saleEvents.length > 0 || filters.sale) && (
+                <ChipRow label="eBay sale">
+                  {SALE_CHOICES.map(([id, label]) => (
+                    <ChipToggle key={id || "any"} on={filters.sale === id}
+                      onClick={() => set({ sale: id })}>
+                      {label}
+                    </ChipToggle>
+                  ))}
+                  {filters.sale.startsWith("event:") && (
+                    <ChipToggle on onClick={() => set({ sale: "" })}>
+                      In: {names.sale(filters.sale.slice(6)) || "a sale"}
+                    </ChipToggle>
+                  )}
+                </ChipRow>
+              )}
 
               <ChipRow label="Buyer interest">
                 {INTEREST_CHOICES.map(([id, label]) => (

@@ -23,7 +23,11 @@ describe("the Manage selection bar", () => {
 
     await m.openMore();
     const labels = [...document.body.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
-    expect(labels).toEqual(["Move to store category…", "Send offers to watchers…", "End listings"]);
+    // "Add to sale…" is on the bar from small screens up and under More on a
+    // phone — both are in the DOM, the breakpoint decides which shows.
+    expect(labels).toEqual(["Add to sale…", "Remove from sale",
+      "Move to store category…", "Send offers to watchers…", "End listings"]);
+    expect(m.button("Apply discount…")).toBeTruthy();
     const end = m.menuItem("End listings");
     expect(end.className).toContain("text-error");
   });

@@ -15,6 +15,7 @@ import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
 import { quickEditPanelId } from "@/views/listing/QuickEdit";
 import { buyerWaiting, isDraft, isLive, keptWhenEnded } from "@/lib/listingsView";
+import { effectiveState, salePriceFor, saleWhen } from "@/lib/saleEvents";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -235,6 +236,35 @@ function NeedsInfoChip({ className, title }) {
   );
 }
 
+// A live listing in one of the seller's eBay sales (lib/saleEvents): while the
+// sale runs, the asking price struck through beside what buyers pay now, and
+// how long that lasts; before it starts, when it will. The figure is worked
+// out here from the sale's percentage — eBay rounds its own (the tooltip says
+// "about"), and the listing's price itself never changes: the sale is eBay's,
+// not an edit.
+function SaleLine({ sale, listing: l, className }) {
+  const state = effectiveState(sale);
+  if (state === "ended") return null;
+  const pct = sale.percent_off;
+  const running = state === "running";
+  const title = `In “${sale.name}”${pct != null ? ` — ${pct}% off` : ""}, ${saleWhen(sale)}.`
+    + (running && pct != null ? " Buyers see about this price, with yours struck through." : "");
+  return (
+    <p className={cn("flex flex-wrap items-center gap-1.5 text-[12px] font-semibold text-ink-secondary", className)}
+      title={title}>
+      {running && pct != null && l.price > 0 && (
+        <span className="line-through text-ink-faint tabular-nums">
+          {formatMoney(l.price, l.currency)}
+        </span>
+      )}
+      <span className={cn("rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums",
+        running ? "bg-success-soft text-success" : "bg-blue-soft text-blue")}>
+        {pct != null ? `−${Math.round(pct)}%` : "Sale"} · {saleWhen(sale)}
+      </span>
+    </p>
+  );
+}
+
 // What it actually went for. An accepted offer settles BELOW the asking price
 // and eBay never moves the listing's own price, so a sold card showing `price`
 // was showing what was asked. The ask stays visible, struck through, with how
@@ -349,6 +379,8 @@ const HOVER_RED = "hover:text-error hover:border-error/40 transition-colors";
 // toggle: the panel (views/listing/QuickEdit) is the caller's to place, under
 // the card, where the grid can make room for it without stretching the cards
 // beside it.
+// `sale` is the eBay sale this listing is in, or undefined (store
+// saleByListing): a struck-through price and a chip while it runs.
 // `meta` is one short muted line under the title — the fact the grid is
 // currently ordered by when the card does not otherwise show it ("Listed
 // Mar 12" under a date sort; lib/listingSort.sortMeta). A string, so the memo
@@ -362,7 +394,7 @@ export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
   onDuplicate, onSplit, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   onQuickEdit, quickEditOpen = false,
-  showEbayChip = false, meta = "",
+  showEbayChip = false, meta = "", sale,
   layout = "grid", className,
 }) {
   const list = layout === "list";
@@ -501,12 +533,16 @@ export const ListingCard = memo(function ListingCard({
   // null -- so every auction in the store used to show "no price yet" beside
   // a starting bid it was never asked for. See lib/listingFormat.askingPrice.
   const asking = askingPrice(l);
+  // On sale right now: the card leads with what a buyer pays. Fixed-price
+  // only — an auction is never in a sale (eBay's sales are for Buy It Now).
+  const onSale = live && sale && effectiveState(sale) === "running"
+    && !isAuctionFormat(l.listing_format) ? salePriceFor(l.price, sale.percent_off) : null;
   // The chip is silent on Buy It Now (see badges.FormatBadge), so this is
   // "does this listing sell in a way the price alone doesn't explain".
   const showFormat = isAuctionFormat(l.listing_format);
   const price = (
     <PriceBadge
-      value={sold ? soldFor : asking.amount}
+      value={sold ? soldFor : onSale ?? asking.amount}
       currency={l.currency}
       prefix={sold ? undefined : asking.prefix}
       approx={inventory || (sold && !knownSale)}
@@ -805,6 +841,7 @@ export const ListingCard = memo(function ListingCard({
         {sold && (
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount} />
         )}
+        {live && sale && <SaleLine sale={sale} listing={l} />}
         {/* Phone: the price/CTA column would squeeze the badge line into one
             chip per row, so it folds into the content instead. */}
         <span className="flex sm:hidden items-center gap-2.5">
@@ -879,6 +916,7 @@ export const ListingCard = memo(function ListingCard({
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount}
             className="flex-col items-start" />
         )}
+        {live && sale && <SaleLine sale={sale} listing={l} />}
         <div className="mt-auto flex items-center justify-between gap-2">
           {price}
           <CtaHint status={item.status} />

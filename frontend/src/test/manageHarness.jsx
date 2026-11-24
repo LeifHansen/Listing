@@ -10,6 +10,7 @@ import { vi } from "vitest";
 import { AppProvider } from "@/store";
 import { ToastProvider } from "@/components/ui/Toaster";
 import { ListingsView } from "@/views/ListingsView";
+import { ManageView } from "@/views/ManageView";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,7 +41,7 @@ export const live = (id, title, listing = {}) => ({
     images: [`${id}.jpg`], ebay_listing_id: `1${id}`, source: "ebay", ...listing },
 });
 
-export async function mountManage(listings, routes = {}, { base = {} } = {}) {
+export async function mountManage(listings, routes = {}, { base = {}, whole = false } = {}) {
   const state = { listings, asked: {}, loads: 0 };
   const all = { ...BASE, ...base };
   vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
@@ -64,7 +65,8 @@ export async function mountManage(listings, routes = {}, { base = {} } = {}) {
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(<ToastProvider><AppProvider><ListingsView /></AppProvider></ToastProvider>);
+    root.render(
+      <ToastProvider><AppProvider>{whole ? <ManageView /> : <ListingsView />}</AppProvider></ToastProvider>);
   });
   for (let i = 0; i < 3; i += 1) {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });

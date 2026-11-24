@@ -1162,6 +1162,13 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
 | `POST` | `/api/ebay/send-offers-ticked` | Offer the **ticked** listings' watchers one discount — the Manage tab's "Send offers to watchers…". Same job and same one-per-account slot as `send-offers-all` |
 | `POST` | `/api/ebay/end-listings` | End the ticked live listings on eBay without relisting them, each settled as the card's own End settles it — a background job (`job_id`) |
+| `GET`  | `/api/sale-events` | The seller's **eBay sales** (markdown sale events), made here or in Seller Hub — pulled from eBay first when the last pull is older than the window (`refresh=false` skips it). Answers `{events, checked, needs_reconnect, limits}` |
+| `POST` | `/api/sale-events/refresh` | Pull the sales from eBay now (`force` ignores the window) |
+| `POST` | `/api/sale-events` | Start a sale on eBay: `percent`, `days` or `end_at`, optional `start_at` and `name`, `move`, and exactly one of `listing_ids` / `store_category_id` / `all_active`. What "Apply discount…" calls. Answers the whole list plus a per-listing `report` |
+| `PATCH` | `/api/sale-events/{id}` | Rename a sale or move its end; its start and discount only before it starts |
+| `POST` | `/api/sale-events/{id}/listings` | Add the ticked listings to a sale (re-read from eBay first, so Seller Hub additions survive the PUT) |
+| `POST` | `/api/sale-events/remove-listings` | Take the ticked listings out of whichever sales they are in; a sale left empty is ended |
+| `POST` | `/api/sale-events/{id}/end` | End a running sale now, or cancel one that has not started |
 | `POST` | `/api/ebay/move-store-category` | Put the ticked live listings on one shelf of the seller's eBay Store (`store_category_id`), each revised with the shelf and nothing else — a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
@@ -1347,6 +1354,10 @@ draft durably and power the **My listings** view. It's optional and resilient:
 if unset or unreachable, the app falls back to the local filesystem and never
 errors on a DB problem. Tables are auto-created on first use.
 
+`sale_events` is the mirror of the seller's eBay sales (see **Sales** below):
+one row per eBay promotion, with the listings it covers held as eBay item ids
+rather than written onto the listings.
+
 ## Roadmap (toward a real web + mobile app)
 
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
@@ -1431,6 +1442,10 @@ backend/
     taxonomy.py      Taxonomy API -> categories, aspects, the Size rules
     metrics.py       views / watchers / offers / bids per listing
     promotions.py    Promoted Listings
+    ebay_markdowns.py Marketing API sale events (markdowns): the REST calls,
+                     the bodies, and which Seller Hub sales are read-only
+    sale_events.py   the Sales mirror: pull from eBay, create / add / remove /
+                     edit / end, one sale per listing
     ebay_offers.py   Negotiation API: offers to the buyers already watching
     notifications.py the "your item sold" alerts behind the bell
     ebay_messages.py, messages.py buyer messages and the unified inbox
@@ -1816,7 +1831,12 @@ published offer — that would end a live listing.
 
 A re-sync only refreshes the fields eBay owns — price, quantity, counters,
 photos — plus anything still blank locally, so a background sync never reverts
-an in-app edit. Sold and ended listings are reconciled on the same pass. One run
+an in-app edit. **A sale never becomes the asking price:** during an eBay sale
+GetItem reports the discounted figure as the current price, so the import reads
+`SellingStatus/PromotionalSaleDetails/OriginalPrice` whenever eBay sends it —
+otherwise every sale would overwrite the price with the sale price, be stamped
+as a markdown the seller made, and stay that way when the sale ended
+(`test_a_markdown_never_becomes_the_asking_price.py`). Sold and ended listings are reconciled on the same pass. One run
 imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
 repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
 default 6) so a big store doesn't outlive the request.
@@ -2165,7 +2185,7 @@ divider, in red.
 
 | On the bar | Under More |
 |---|---|
-| **End & relist** (primary) · **Lower prices…** · **Crosspost to Etsy** (from small screens up; under More on a phone) | **Move to store category…** · **Send offers to watchers…** · **End listings** |
+| **End & relist** (primary) · **Lower prices…** · **Apply discount…** · **Add to sale…** and **Crosspost to Etsy** (from small screens up; under More on a phone) | **Remove from sale** · **Move to store category…** · **Send offers to watchers…** · **End listings** |
 
 On a phone the bar is a two-column grid of what is left plus More, and More
 spans the row rather than sitting alone in half of it. Only one action's
@@ -2207,6 +2227,94 @@ server went away mid-run (`jobstore.interrupted_message`).
   one-per-account slot — a dashboard run and a Manage run at once would offer
   the same watchers twice. That job's re-read is ownership-checked now
   (`_owned_by`), because its ids can come from a request.
+
+## Sales: eBay sale events, both ways
+
+**Manage** has two halves — `Listings | Sales` — and Sales is the seller's eBay
+sales: a percentage off a set of listings for a few days, which eBay runs, shows
+to every buyer with the old price struck through, and ends on its own. Seller
+Hub calls these sale events (Discounts Manager, once Markdown Manager); the API
+calls them item price markdowns. "Sale event" in the code, because
+`lib/sales.js` already means *sold items*.
+
+**Simpler than Seller Hub, on purpose.** A sale here is four answers — a name,
+how much off, when it starts, how long it runs — over a list of listings. No
+coupons, no codes, no tiers: the Etsy "Run a sale" shape, which is what a
+reseller means by a sale.
+
+**Both ways.**
+
+- *Made here.* **Apply discount…** on the selection bar is the quick one: pick
+  10–50% (or any whole number eBay allows) and 3, 7, 14 or 30 days, and the
+  ticks go on sale under a name that says what it is ("20% off · 7 days · Nov
+  24"). **Add to sale…** puts the ticks in a sale that is already going;
+  **New sale** on the Sales half asks all four questions and can cover the
+  ticks, a store category or every active listing (a snapshot — listings made
+  later are not added). Every one of these is created **on eBay first** and
+  recorded from eBay's answer, so the app never shows a sale eBay does not have.
+- *Made in Seller Hub.* `services/sale_events.refresh` pulls every markdown on
+  the account — when Manage opens (at most every ten minutes), on **Sync with
+  eBay**, and on **Refresh** — and mirrors it into `sale_events`. A sale deleted
+  in Seller Hub leaves; one made here stays *Made here*; one recorded under a
+  different eBay account is not shown to the account now connected. A pull
+  that could not reach eBay keeps what was known and says so, never an empty
+  list that reads as "no sales".
+
+**Read-only when it does not fit.** A Seller Hub sale with different discounts
+for different listings, an amount off rather than a percentage, or listings
+picked by rule is shown with *Managed in Seller Hub · the reason* and a link
+there — never flattened by an edit made here (`ebay_markdowns.classify`). Its
+listings still count for the rule below (a rule-based sale's are read with
+eBay's `get_listing_set`).
+
+**Rules every write keeps** (`services/sale_events.py`):
+
+- **One sale per listing.** A ticked listing already in a sale is skipped with
+  the sale's name — unless the seller turns on *Move the N already in another
+  sale*, which takes it out of the old one first (and puts it back if the new
+  sale then cannot be made). A read-only sale's listings are never moved.
+  Auctions are skipped: eBay's sales are for Buy It Now.
+- **Re-read before every PUT.** eBay's update replaces the whole promotion, so
+  each write fetches the sale a moment before and changes only what was asked
+  (`ebay_markdowns.patch_body` keeps every field it does not understand). A
+  listing added in Seller Hub since the last pull is never dropped.
+- **eBay's eligibility is eBay's.** A listing eBay refuses is taken out of the
+  request and reported with eBay's own sentence, and the rest go ahead.
+- **One write per account at a time** (a second is told to wait, 409), so two
+  tabs cannot race each other's PUTs.
+- **A running sale's discount is fixed** — eBay's rule, said before asking.
+  Its name and end date can still change. *End sale* pulls a running sale's
+  end in to now; a sale that has not started is cancelled outright.
+- **Remove from sale** does one re-read and one PUT per sale, and a sale left
+  with nothing in it is ended.
+
+**On the cards.** A listing in a running sale leads with what buyers pay, its
+own price struck through, and a chip — *−20% · ends in 3d*; one still to come
+says *starts Dec 1*. Worked out in the browser by joining each sale's item ids
+to the cards (`lib/saleEvents.saleIndex`), never written onto the listing, so a
+sale starting or ending never rewrites — or reorders — a card. The Filters
+panel gains *eBay sale: On sale / Not on sale*, and a sale card's **View
+listings** opens the grid filtered to that sale, where Remove from sale and
+the rest of the bar apply.
+
+**Price changes and sales.** eBay takes a listing out of its sale when its
+price is revised (and a sale set to block revisions refuses the revise —
+`ebay_errors.sale_locked`). So **Lower prices** skips listings in a running or
+scheduled sale, naming the sale; **Quick edit** warns under the price box
+before a change is sent (the seller may mean it) and re-reads the sales after.
+
+**Limits are eBay's, and unverified here.** eBay's developer pages were not
+reachable when this was built, so every bound is a named constant in
+`services/ebay_markdowns.py` marked VERIFY — 5–80% in whole numbers, at most 45
+days, at most 500 listings per sale, a 90-character name — and the server
+reports them to the browser (`limits`), so correcting one is a change in one
+place. To confirm against a real account before relying on them: the exact
+`item_price_markdown` body (whether `promotionImageUrl` is required), whether
+a listing whose price changed in the last 14 days is refused, whether an eBay
+Store subscription is required, whether a running sale can be ended by moving
+its end date or only deleted, how eBay rounds the sale price, and the Seller
+Hub deep link. Sellers who connected eBay before `sell.marketing` was requested
+are told to reconnect once.
 
 ## What a sale actually made
 

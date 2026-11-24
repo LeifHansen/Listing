@@ -497,3 +497,28 @@ describe("a saved view's order", () => {
     expect(matchingViewId([view("")], "active", f, "title-asc")).toBe("v1");
   });
 });
+
+describe("the sale filter", () => {
+  const sale = { id: "s1", name: "Spring" };
+  it("keeps what is on sale, what is not, or what is in one sale", () => {
+    expect(matchesFilters(item(), on({ sale: "on" }), NOW, { sale })).toBe(true);
+    expect(matchesFilters(item(), on({ sale: "on" }), NOW, {})).toBe(false);
+    expect(matchesFilters(item(), on({ sale: "off" }), NOW, {})).toBe(true);
+    expect(matchesFilters(item(), on({ sale: "event:s1" }), NOW, { sale })).toBe(true);
+    expect(matchesFilters(item(), on({ sale: "event:s2" }), NOW, { sale })).toBe(false);
+  });
+
+  it("is handed each listing's sale by filterListings", () => {
+    const a = item({}, { id: "a" }), b = item({}, { id: "b" });
+    const kept = filterListings([a, b], on({ sale: "on" }), NOW,
+      { saleByListing: new Map([["a", sale]]) });
+    expect(kept.map((i) => i.id)).toEqual(["a"]);
+  });
+
+  it("names the sale on its chip, and drops what it can't read", () => {
+    const [chip] = filterChips(on({ sale: "event:s1" }), { sale: () => "Spring" });
+    expect(chip.label).toBe("In: Spring");
+    expect(normalizeFilters({ sale: "event:<script>" }).sale).toBe("");
+    expect(normalizeFilters({ sale: "on" }).sale).toBe("on");
+  });
+});

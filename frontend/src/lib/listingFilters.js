@@ -75,6 +75,16 @@ export const INTEREST_CHOICES = [
   ["offers", "Offers or bids"],
 ];
 
+// Whether a listing is in one of the seller's eBay sales (lib/saleEvents):
+// any, in one, in none — or, as `event:<id>`, in one sale in particular,
+// which is what a sale card's "View listings" opens.
+export const SALE_CHOICES = [
+  ["", "Any"],
+  ["on", "On sale"],
+  ["off", "Not on sale"],
+];
+const SALE_EVENT = /^event:[\w-]{1,60}$/;
+
 // The store-category pick for a listing on no shelf at all. eBay files those
 // at the top of the Store ("Other items"); a seller tidying their shelves
 // wants exactly that list. A word rather than "" because "" is what an empty
@@ -108,6 +118,7 @@ export const EMPTY_FILTERS = Object.freeze({
   storeCategory: [],
   ebayCategory: [],
   interest: "",
+  sale: "",
 });
 
 /* ---------- reading a filter set ---------- */
@@ -167,6 +178,7 @@ export function normalizeFilters(raw) {
   const photos = String(f.photos ?? "any");
   const within = String(f.within ?? "");
   const interest = String(f.interest ?? "");
+  const sale = String(f.sale ?? "");
   return {
     format: pick(f.format, FORMAT_CHOICES),
     condition: pick(f.condition, CONDITIONS),
@@ -180,6 +192,7 @@ export function normalizeFilters(raw) {
     storeCategory: idList(f.storeCategory),
     ebayCategory: idList(f.ebayCategory),
     interest: choiceIds(INTEREST_CHOICES).includes(interest) ? interest : "",
+    sale: choiceIds(SALE_CHOICES).includes(sale) || SALE_EVENT.test(sale) ? sale : "",
   };
 }
 
@@ -200,6 +213,7 @@ function activeFilterKeys(filters) {
   if (f.storeCategory.length) on.push("storeCategory");
   if (f.ebayCategory.length) on.push("ebayCategory");
   if (f.interest) on.push("interest");
+  if (f.sale) on.push("sale");
   return on;
 }
 
@@ -277,7 +291,9 @@ const has = (value, needle) =>
  * in one pass measures every listing against the same instant.
  *
  * `ctx.metrics` is eBay's traffic read for THIS listing (store.metricsById),
- * which the buyer-interest filter needs and the record does not carry. */
+ * which the buyer-interest filter needs and the record does not carry; and
+ * `ctx.sale` the eBay sale it is in, if any (store.saleByListing) — a sale is
+ * never written onto the listing, so the record cannot say. */
 export function matchesFilters(item, filters, now = Date.now(), ctx = {}) {
   const f = normalizeFilters(filters);
   const listing = item?.listing || {};
@@ -347,14 +363,22 @@ export function matchesFilters(item, filters, now = Date.now(), ctx = {}) {
     }
   }
 
+  if (f.sale) {
+    const sale = ctx.sale || null;
+    if (f.sale === "on" && !sale) return false;
+    if (f.sale === "off" && sale) return false;
+    if (f.sale.startsWith("event:") && sale?.id !== f.sale.slice(6)) return false;
+  }
+
   return true;
 }
 
 export function filterListings(items, filters, now = Date.now(), ctx = {}) {
   if (isEmptyFilters(filters)) return items || [];
   const metrics = ctx.metricsById || {};
+  const sales = ctx.saleByListing;
   return (items || []).filter((i) => matchesFilters(i, filters, now, {
-    ...ctx, metrics: metrics[i.id],
+    ...ctx, metrics: metrics[i.id], sale: sales?.get?.(i.id),
   }));
 }
 
@@ -423,6 +447,12 @@ export function filterChips(filters, names = {}) {
   if (f.interest) {
     chips.push({ key: "interest",
       label: INTEREST_CHOICES.find(([id]) => id === f.interest)[1] });
+  }
+  if (f.sale) {
+    chips.push({ key: "sale",
+      label: f.sale.startsWith("event:")
+        ? `In: ${names.sale?.(f.sale.slice(6)) || "a sale"}`
+        : SALE_CHOICES.find(([id]) => id === f.sale)[1] });
   }
   return chips;
 }

@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, AlertTriangle, ArrowRightLeft, RefreshCcw,
-  TrendingDown, FolderInput, HandCoins, CircleStop,
+  TrendingDown, FolderInput, HandCoins, CircleStop, BadgePercent, BadgeX, Tag,
 } from "lucide-react";
 import { pollJob, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -10,6 +10,9 @@ import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { BulkAmountPanel } from "@/components/ui/BulkAmountPanel";
+import { DiscountPanel } from "@/components/bulk/DiscountPanel";
+import { AddToSalePanel } from "@/components/bulk/AddToSalePanel";
+import { SaleDialog } from "@/views/sales/SaleDialog";
 import { LiveBulkBar } from "@/components/LiveBulkBar";
 import { StoreCategoryPanel } from "@/components/bulk/StoreCategoryPanel";
 import { ListingCard } from "@/components/ListingCard";
@@ -17,6 +20,7 @@ import { ListingFilters } from "@/components/ListingFilters";
 import { SavedViewTabs } from "@/components/SavedViewTabs";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
+import { Segmented } from "@/components/ui/Segmented";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
@@ -91,11 +95,13 @@ export const TABS = [
     // for a month so it can be relisted, then removed on its own. Sales stay
     // for good.
     id: "inactive", label: "Inactive", statuses: ["ended", "sold"],
-    sub: "Every sale, plus your listings that ended — relist one or leave it, "
-      + "we clear it out after a month",
+    // "Everything you sold", not "every sale": Manage has a Sales section
+    // now, and it means eBay sale EVENTS (discounts), not sold items.
+    sub: "Everything you sold, plus your listings that ended — relist one or "
+      + "leave it, we clear it out after a month",
     empty: {
       illustration: ListingsIllustration, title: "Nothing finished yet",
-      message: "Sales collect here for good, with what each one went for. "
+      message: "What you sell collects here for good, with what each one went for. "
         + "Listings you end stay for a month in case you want to relist, "
         + "then they're removed on their own.",
     },
@@ -165,6 +171,7 @@ export function ListingsView({ search = "" }) {
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     listingsTab, setListingsTab, listingsLayout, setListingsLayout,
     listingFilters, clearListingFilters, listingsSort,
+    saleEvents, saleByListing, adoptSaleEvents,
     health,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     marketplaces, connectedMarketplaces,
@@ -292,9 +299,9 @@ export function ListingsView({ search = "" }) {
   const items = useMemo(() => sortListings(
     // `now` left to its default: the age windows measure against the moment
     // this list is worked out, and the memo above decides when that is.
-    filterListings(base, listingFilters, undefined, { metricsById }),
+    filterListings(base, listingFilters, undefined, { metricsById, saleByListing }),
     listingsSort, metricsById,
-  ), [base, listingFilters, listingsSort, metricsById]);
+  ), [base, listingFilters, listingsSort, metricsById, saleByListing]);
 
   // The category pickers' choices, counted off `base` (see above).
   const storeCats = useStoreCategories();
@@ -447,6 +454,83 @@ export function ListingsView({ search = "" }) {
     });
   };
 
+  // ---- the sale actions: eBay sale events over the ticks ----------------
+  // Synchronous calls (one eBay request covers the lot), so the bar shows a
+  // "Starting the sale…" line rather than a per-listing count, and every
+  // answer carries the whole list of sales, which the store adopts.
+  const [saleDialog, setSaleDialog] = useState(false);
+  // How many ticks are already in a sale the app can move them out of — the
+  // only time the "move them" switch is worth offering.
+  const inEditableSale = selectedLive.filter((i) => saleByListing.get(i.id)?.editable);
+  const inAnySale = selectedLive.filter((i) => saleByListing.has(i.id));
+
+  const runSale = async ({ verb, url, body, did, empty, fail }) => {
+    const picked = selectedLive;
+    if (!picked.length || running) return false;
+    setOpenPanel(null);
+    setRunning({ verb, done: 0, total: picked.length, title: "", single: true });
+    try {
+      const res = await postJson(url, { ...body, listing_ids: picked.map((i) => i.id) });
+      adoptSaleEvents(res);
+      toast(...bulkToast(res.report || {}, { did: (n) => did(n, res), empty }));
+      if ((res.report || {}).changed) clearLive();
+      return true;
+    } catch (e) {
+      toast(`${fail}: ${e.message}`, { kind: "error" });
+      return false;
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  const applyDiscount = ({ percent, days, move }) => runSale({
+    verb: "Starting the sale", url: "/api/sale-events", body: { percent, days, move },
+    did: (n, res) => `${n} listing${n === 1 ? "" : "s"} on sale at ${percent}% off`
+      + (res.event ? ` — “${res.event.name}”` : ""),
+    empty: "None of those could go on sale.", fail: "Couldn't start the sale",
+  });
+
+  const addToSale = ({ event, move }) => runSale({
+    verb: "Adding to the sale", url: `/api/sale-events/${encodeURIComponent(event.id)}/listings`,
+    body: { move },
+    did: (n) => `Added ${n} listing${n === 1 ? "" : "s"} to “${event.name}”`,
+    empty: "None of those could go in that sale.", fail: "Couldn't add to the sale",
+  });
+
+  const removeFromSale = async () => {
+    const n = inAnySale.length;
+    if (!n || running) return;
+    if (!(await confirm({
+      title: n === 1 ? "Take this listing out of its sale?" : `Take ${n} listings out of their sales?`,
+      message: "They go back to full price on eBay straight away. A sale left "
+        + "with nothing in it is ended.",
+      confirmLabel: "Take out of sale",
+      danger: true,
+    }))) return;
+    await runSale({
+      verb: "Taking out of the sale", url: "/api/sale-events/remove-listings", body: {},
+      did: (c) => `Took ${c} listing${c === 1 ? "" : "s"} out of ${c === 1 ? "its sale" : "their sales"}`,
+      empty: "Nothing to take out.", fail: "Couldn't take them out of the sale",
+    });
+  };
+
+  // "New sale…" from the Add to sale panel: the full dialog, over the ticks.
+  const createSale = async (body) => {
+    try {
+      const res = await postJson("/api/sale-events", body);
+      adoptSaleEvents(res);
+      toast(...bulkToast(res.report || {}, {
+        did: (n) => `“${res.event?.name}” — ${n} listing${n === 1 ? "" : "s"} at ${res.event?.percent_off}% off`,
+        empty: "None of those could go in a sale.",
+      }));
+      if (res.event) clearLive();
+      return !!res.event;
+    } catch (e) {
+      toast(`Couldn't start the sale: ${e.message}`, { kind: "error" });
+      return false;
+    }
+  };
+
   // Which cards have their Quick edit panel open. Several at once is fine —
   // a seller going down a row fixing prices should not lose one panel's
   // typing by opening the next. Kept here rather than in each card because
@@ -587,6 +671,7 @@ export function ListingsView({ search = "" }) {
               stale={isLive(item)
                 && dayAge(listedAt(item)) >= STALE_DAYS}
               meta={sortMeta(item, listingsSort)}
+              sale={saleByListing.get(item.id)}
               metrics={metricsById[item.id]}
               showEbayChip={otherMarketplaces}
               selectable={selectable && isLive(item)}
@@ -650,26 +735,11 @@ export function ListingsView({ search = "" }) {
   // the layout toggle, with a neutral pressed state: blue is the lifecycle
   // tab's, and a second blue row made two kinds of tab look like one.
   const marketControl = otherMarketplaces && (
-    <div role="group" aria-label="Where a listing lives"
-      className="inline-flex items-center gap-0.5 rounded-full border border-line bg-card p-0.5 shrink-0">
-      {MARKET_FILTERS.map((f) => (
-        <button
-          key={f.id}
-          type="button"
-          onClick={() => setListingsMarket(f.id)}
-          aria-pressed={marketId === f.id}
-          title={view.kind === "unavailable" ? undefined : `${marketCounts[f.id]} on this tab`}
-          className={cn(
-            "h-8 px-3 rounded-full text-[12px] font-semibold cursor-pointer transition-colors duration-150",
-            marketId === f.id
-              ? "bg-bg-sunken text-ink"
-              : "text-ink-secondary hover:text-ink",
-          )}
-        >
-          {f.label}
-        </button>
-      ))}
-    </div>
+    <Segmented label="Where a listing lives" value={marketId} onChange={setListingsMarket}
+      options={MARKET_FILTERS.map((f) => ({
+        id: f.id, label: f.label,
+        title: view.kind === "unavailable" ? undefined : `${marketCounts[f.id]} on this tab`,
+      }))} />
   );
 
   // Profit framework: on the archive tab, total up what the SOLD items with a
@@ -742,7 +812,8 @@ export function ListingsView({ search = "" }) {
       <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
         total={view.kind === "unavailable" ? null : marketCounts[marketId]}
         trailing={marketControl}
-        storeOptions={storeOptions} ebayOptions={ebayOptions} showStore={showStore} />
+        storeOptions={storeOptions} ebayOptions={ebayOptions} showStore={showStore}
+        saleEvents={saleEvents.items} />
 
       {/* The live listings' bulk bar (LiveBulkBar): arrives with the first
           tick on a live listing and leaves with the last. The few actions a
@@ -763,6 +834,17 @@ export function ListingsView({ search = "" }) {
               label: "Lower prices…", onClick: () => togglePanel("lower"),
               expanded: openPanel === "lower", loading: running?.verb === "Lowering",
               disabled: !ebay.connected || !!running, title: needsEbay },
+            { key: "discount", place: "bar", icon: <BadgePercent aria-hidden />,
+              label: "Apply discount…", onClick: () => togglePanel("discount"),
+              expanded: openPanel === "discount",
+              loading: running?.verb === "Starting the sale",
+              disabled: !ebay.connected || !!running, title: needsEbay
+                || "A sale eBay runs for a few days, with your price struck through." },
+            { key: "add-sale", place: "bar-wide", icon: <Tag aria-hidden />,
+              label: "Add to sale…", onClick: () => togglePanel("add-sale"),
+              expanded: openPanel === "add-sale",
+              loading: running?.verb === "Adding to the sale",
+              disabled: !ebay.connected || !!running, title: needsEbay },
             etsy && { key: "crosspost", place: "bar-wide",
               icon: <ArrowRightLeft aria-hidden />,
               label: "Crosspost to Etsy…",
@@ -773,6 +855,12 @@ export function ListingsView({ search = "" }) {
                 : etsy.access_pending
                   ? etsy.access_pending_note
                   : "Connect Etsy under Settings → Cross-posting marketplaces first." },
+            { key: "remove-sale", place: "more", icon: <BadgeX aria-hidden />,
+              label: inAnySale.length
+                ? `Remove from sale (${inAnySale.length})` : "Remove from sale",
+              onClick: removeFromSale,
+              disabled: !ebay.connected || !!running || !inAnySale.length,
+              title: inAnySale.length ? undefined : "None of these is in a sale." },
             { key: "shelf", place: "more", icon: <FolderInput aria-hidden />,
               label: "Move to store category…", onClick: () => togglePanel("shelf"),
               disabled: !ebay.connected || !!running, title: needsEbay },
@@ -790,11 +878,25 @@ export function ListingsView({ search = "" }) {
           ) : openPanel === "offers" ? (
             <BulkAmountPanel key="offers" amount={SEND_OFFERS} count={selectedLive.length}
               onSubmit={sendOffers} onCancel={() => setOpenPanel(null)} />
+          ) : openPanel === "discount" ? (
+            <DiscountPanel key="discount" count={selectedLive.length}
+              inOtherSales={inEditableSale.length} limits={saleEvents.limits}
+              onSubmit={applyDiscount} onCancel={() => setOpenPanel(null)} />
+          ) : openPanel === "add-sale" ? (
+            <AddToSalePanel key="add-sale" count={selectedLive.length}
+              sales={saleEvents.items} inOtherSales={inEditableSale.length}
+              onSubmit={addToSale} onCancel={() => setOpenPanel(null)}
+              onNew={() => { setOpenPanel(null); setSaleDialog(true); }} />
           ) : openPanel === "shelf" ? (
             <StoreCategoryPanel key="shelf" count={selectedLive.length}
               onSubmit={moveToShelf} onCancel={() => setOpenPanel(null)} />
           ) : null}
         />
+      )}
+      {saleDialog && (
+        <SaleDialog open onClose={() => setSaleDialog(false)} ticked={selectedLive}
+          shelves={storeCats.categories} activeCount={liveItems.length}
+          limits={saleEvents.limits} onSubmit={createSale} />
       )}
       {crosspostOpen && (
         <Suspense fallback={null}>

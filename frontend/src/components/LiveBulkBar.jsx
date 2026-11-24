@@ -64,7 +64,9 @@ export function LiveBulkBar({
         {running && (
           <span className="text-[13px] text-ink-secondary tabular-nums truncate min-w-0"
             role="status" aria-live="polite">
-            {running.verb} {Math.min(running.done + 1, running.total)} of {running.total}
+            {/* A sale action is one eBay request for the lot: no "3 of 10". */}
+            {running.single ? `${running.verb}…`
+              : `${running.verb} ${Math.min(running.done + 1, running.total)} of ${running.total}`}
             {running.title ? ` · ${running.title}` : ""}
           </span>
         )}
