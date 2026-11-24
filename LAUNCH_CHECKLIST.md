@@ -326,6 +326,12 @@ Ordered by what it costs a seller.
          while `web` is on.
       4. Update the store privacy answers if they change (docs/APP_STORE.md
          already describes the on-device path).
+      5. **The marketing site's privacy page** (marketing/src/content/legal/
+         privacy.md) needs the same two background-removal paragraphs the
+         app's own copy (frontend/public/privacy-policy.html) now has: on the
+         device first, Photoroom only for cloud removal. It ships in a
+         marketing-only pull request -- the marketing gate refuses one that
+         touches the app too.
 - [ ] **Unset the dead credentials** while there:
       `LIGHTROOM_API_KEY`, `OPENAI_API_KEY`, `SENDGRID_API_KEY`,
       `Ebay_Sandbox_App_Id` / `Ebay_Sandbox_Cert_Id` / `Ebay_Sandbox_Dev_Id`,
