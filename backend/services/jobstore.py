@@ -437,6 +437,25 @@ def interrupted_message(record: dict) -> str:
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "lowered on eBay — tick the rest and run it again for those.")
+    if record.get("kind") == "end-and-relist":
+        # Each listing is ended and its copy published before the next is
+        # started, so a stop leaves at most one between the two: ended, with
+        # its fresh copy saved as a draft one Publish away.
+        where = _progress(record, "done")
+        return ("The server restarted while ending and relisting"
+                f"{where}, so the run stopped early. The ones it relisted are "
+                "live — check Active for those and Inactive for the rest, and "
+                "look in Drafts for one that was ended but not yet put back.")
+    if record.get("kind") == "end-listings":
+        where = _progress(record, "done")
+        return ("The server restarted while ending your listings"
+                f"{where}, so the run stopped early. The ones it ended are off "
+                "eBay — tick the rest on Active and run it again for those.")
+    if record.get("kind") == "store-category":
+        where = _progress(record, "done")
+        return ("The server restarted while moving your listings"
+                f"{where}, so the run stopped early. The ones it moved are on "
+                "their new shelf on eBay — tick the rest and run it again.")
     if record.get("kind") == "offers":
         # "Send offers…". Each offer is stamped on its listing as it goes out,
         # which takes it out of the group — so running it again reaches only

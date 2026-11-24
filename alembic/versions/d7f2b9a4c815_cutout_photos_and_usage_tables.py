@@ -8,7 +8,7 @@ photos per month, app-wide, which is what holds Photoroom to
 PHOTOROOM_MONTHLY_BUDGET_USD.
 
 Revision ID: d7f2b9a4c815
-Revises: c4e8a1d6b392
+Revises: d7f2b9e4a1c5
 Create Date: 2026-11-24 12:00:00.000000
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ import sqlalchemy as sa
 
 
 revision = 'd7f2b9a4c815'
-down_revision = 'c4e8a1d6b392'
+down_revision = 'd7f2b9e4a1c5'
 branch_labels = None
 depends_on = None
 

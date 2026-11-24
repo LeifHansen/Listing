@@ -13,8 +13,8 @@ name: Native builds
 # nobody needs Android Studio to ship it.
 #
 # iOS: a simulator build with signing off. It proves the project compiles;
-# the store archive is still made in Xcode on a Mac (MOBILE.md), because it
-# needs the Apple signing identity.
+# the signed store build is the iOS → TestFlight workflow (testflight.yml),
+# run on demand, or an archive made in Xcode on a Mac (MOBILE.md).
 #
 # macOS minutes are billed at ten times Linux ones on private repositories,
 # which is why this is path-filtered rather than run on every pull request.
@@ -103,7 +103,7 @@ jobs:
       # uploads made with a current SDK, so that is the one worth proving.
       - name: Newest Xcode
         run: |
-          xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          xcode=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$xcode"
           xcodebuild -version
       - name: Install

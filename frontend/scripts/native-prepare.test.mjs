@@ -86,6 +86,29 @@ test("version, build, device family and team are set in every configuration", ()
   assert.ok(moved.includes('TARGETED_DEVICE_FAMILY = "1,2";'));
 });
 
+test("with a profile, only the App target's Release is signed manually", () => {
+  const pbx = read(ios, "App/App.xcodeproj/project.pbxproj");
+  const opts = { version: "1.0.0", build: "1", team: "ABCDE12345", profile: "Thryft Shop App Store CI" };
+  const out = configureProject(pbx, opts);
+  const automatic = count(pbx, "CODE_SIGN_STYLE = Automatic;");
+  assert.equal(count(out, "CODE_SIGN_STYLE = Manual;"), 1);
+  assert.equal(count(out, "CODE_SIGN_STYLE = Automatic;"), automatic - 1);
+  assert.equal(count(out, 'CODE_SIGN_IDENTITY = "Apple Distribution";'), 1);
+  assert.equal(count(out, 'PROVISIONING_PROFILE_SPECIFIER = "Thryft Shop App Store CI";'), 1);
+  const release = out.match(/\w{24} \/\* Release \*\/ = \{[\s\S]*?name = Release;/g)
+    .find((block) => block.includes("CODE_SIGN_STYLE"));
+  assert.match(release, /CODE_SIGN_STYLE = Manual;[\s\S]*PROVISIONING_PROFILE_SPECIFIER/);
+  // The project-level identity (Capacitor's "iPhone Developer") is not ours.
+  assert.equal(count(out, 'CODE_SIGN_IDENTITY = "iPhone Developer";'),
+    count(pbx, 'CODE_SIGN_IDENTITY = "iPhone Developer";'));
+
+  assert.equal(configureProject(out, opts), out, "a second run changes nothing");
+  assert.equal(configureProject(out, { ...opts, profile: "" }),
+    configureProject(pbx, { ...opts, profile: "" }), "and a run without it is automatic again");
+  assert.throws(() => configureProject(pbx, { ...opts, team: "" }), /needs THRYFT_APPLE_TEAM_ID/);
+  assert.throws(() => configureProject(pbx, { ...opts, profile: 'x"; FOO = 1' }), /profile name/);
+});
+
 test("a malformed team id or device family is refused", () => {
   assert.throws(() => configureProject("", { version: "1", build: "1", team: "abc" }), /team id/);
   assert.throws(() => configureProject("", { version: "1", build: "1", devices: "ipad" }), /THRYFT_IOS_DEVICES/);

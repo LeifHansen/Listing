@@ -241,8 +241,9 @@ is on).
 
 **App Store**
 
-- [ ] A build uploaded from `main` with `npm run native:ios`, smoke-tested on
-      a device (MOBILE.md checklist)
+- [ ] A build of `main` uploaded (the iOS → TestFlight workflow, or
+      `npm run native:ios` and Xcode), smoke-tested on a device from
+      TestFlight (MOBILE.md checklist)
 - [ ] Listing copy, keywords, URLs, category, age rating and App Privacy
       filled in from this file; screenshots uploaded
 - [ ] Review notes and the review account's credentials in App Review

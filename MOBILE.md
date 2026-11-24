@@ -76,6 +76,7 @@ All optional environment variables:
 | Variable | Default | |
 |---|---|---|
 | `THRYFT_APPLE_TEAM_ID` | — | 10-character team id; with it Xcode needs no clicks before Archive |
+| `THRYFT_IOS_PROFILE` | — | an App Store profile's name: the Release build is signed manually with it (set by the TestFlight workflow) |
 | `THRYFT_IOS_DEVICES` | `iphone` | `universal` adds iPad (then App Store Connect also wants iPad screenshots) |
 | `THRYFT_APP_VERSION` | `version` in `frontend/package.json` | the store version |
 | `THRYFT_BUILD_NUMBER` | minutes since the epoch | must rise with every upload |
@@ -98,14 +99,20 @@ PNGs; the build script only fans them out into sizes.
 them changes (the Capacitor packages, `capacitor.config.json`, the art, the
 build script) and on demand from the Actions tab: a compiled iOS simulator
 build, and an Android App Bundle uploaded as a workflow artifact.
+`.github/workflows/testflight.yml` makes the signed iOS build and uploads it
+to TestFlight, on demand ([From GitHub Actions](#from-github-actions)).
 
 ---
 
 ## iOS
 
-The build, signing and upload run on a **Mac with Xcode** (the newest
-release — App Store Connect only takes uploads built with a current SDK).
-CocoaPods is no longer needed: Capacitor 8 uses Swift Package Manager.
+Two ways to make the App Store build, from the same build script:
+
+- **[From GitHub Actions](#from-github-actions)**, with no Mac at all: the
+  **iOS → TestFlight** workflow archives a signed build and uploads it.
+- **[On a Mac](#on-a-mac)** with Xcode (the newest release — App Store
+  Connect only takes uploads built with a current SDK). CocoaPods is no
+  longer needed: Capacitor 8 uses Swift Package Manager.
 
 ### One-time setup
 
@@ -116,16 +123,65 @@ CocoaPods is no longer needed: Capacitor 8 uses Swift Package Manager.
       `frontend/capacitor.config.json`)
 - [ ] **App Store Connect record**: My Apps → `+` → New App → iOS, name
       **Thryft Shop**, bundle id `com.thryftshop.app`, SKU e.g. `thryft-001`
+
+Build from `main` either way: it is what production runs, so it is what
+testers should test. (If you deliberately ship a feature branch, say so in
+TestFlight's "What to Test".)
+
+### From GitHub Actions
+
+One-time, besides the setup above:
+
+- [ ] **An App Store Connect API key.** App Store Connect → Users and Access →
+      Integrations → App Store Connect API → **Team Keys** → `+`. Name it
+      `GitHub Actions`, access **Admin**: the workflow creates the signing
+      certificate and profile, which no lesser role may. Download the
+      `AuthKey_<KEY ID>.p8` file (Apple offers it only once), and note the
+      **Key ID** beside it and the **Issuer ID** above the list.
+- [ ] **A distribution key**: the private key the App Store certificate is
+      issued for. It is made once and kept; the workflow asks Apple for the
+      certificate itself.
+
+      ```bash
+      openssl genrsa -out ios-distribution.pem 2048
+      ```
+
+      Keep it in the password manager beside the Android upload key.
+- [ ] **Four repository secrets** (GitHub → Settings → Secrets and variables →
+      Actions → New repository secret), each pasted as it is:
+
+      | Secret | Value |
+      |---|---|
+      | `APP_STORE_CONNECT_KEY_ID` | the Key ID (10 characters) |
+      | `APP_STORE_CONNECT_ISSUER_ID` | the Issuer ID (a UUID) |
+      | `APP_STORE_CONNECT_KEY` | the whole `AuthKey_<KEY ID>.p8` file |
+      | `IOS_DISTRIBUTION_KEY` | the whole `ios-distribution.pem` file |
+
+**Each build:** GitHub → **Actions → iOS → TestFlight → Run workflow** on
+`main`. The run's summary links to the build in TestFlight; carry on at
+[TestFlight](#testflight).
+
+The first run also makes the signing assets, through the API: an **Apple
+Distribution certificate** for the distribution key (Apple emails the account
+holder that one was made) and an App Store profile named **Thryft Shop App
+Store CI**. Later runs find both again. When the certificate expires, a year
+on, the next run asks Apple for a new one for the same key; nobody needs to do
+anything. If either is revoked or deleted in the developer portal, the next
+run replaces it.
+
+When a run fails, its error says what to fix: a missing secret, a key Apple
+refuses (an ID pasted into the wrong secret, an Individual key rather than a
+Team key, or a role below Admin), or no App Store Connect record yet. The
+`build-logs` artifact has Xcode's full logs. A run that built but could not
+upload keeps the `.ipa` as the `ios-app-store-ipa` artifact, which Apple's
+**Transporter** app (Mac App Store) can upload instead.
+
+### On a Mac
+
 - [ ] Node 22 (`node -v`) and Xcode opened once (licence accepted)
 - [ ] **An `ios/` folder from before Capacitor 8** (it has a `Podfile`) can't be
       upgraded in place. It is generated — delete `frontend/ios` and the script
       makes a fresh one. The script stops and says so if it finds one.
-
-### Each build
-
-Build from `main`: it is what production runs, so it is what testers should
-test. (If you deliberately ship a feature branch, say so in TestFlight's
-"What to Test".)
 
 ```bash
 cd ~/Listing && git checkout main && git pull

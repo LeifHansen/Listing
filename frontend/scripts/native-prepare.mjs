@@ -27,6 +27,8 @@
 //                              since the epoch — see buildNumber())
 //   THRYFT_APPLE_TEAM_ID       10-character Apple team id; sets the signing
 //                              team so Xcode needs no clicks before Archive
+//   THRYFT_IOS_PROFILE         App Store profile name: signs Release manually
+//                              with it (the TestFlight workflow; needs the team)
 //   THRYFT_IOS_DEVICES         "iphone" (default) or "universal" (adds iPad)
 //   THRYFT_ANDROID_KEYSTORE    upload keystore for --bundle (unsigned without)
 //   THRYFT_ANDROID_KEYSTORE_PASSWORD, THRYFT_ANDROID_KEY_ALIAS (default
@@ -179,24 +181,50 @@ export function addPrivacyManifestToProject(pbx) {
 // Version, build number, device family and (optionally) signing team, set in
 // every build configuration. These used to be typed into Xcode by hand before
 // each archive, and a forgotten build-number bump is a rejected upload.
-export function configureProject(pbx, { version, build, devices = "iphone", team = "" }) {
+//
+// Signing is set per App-target configuration: the blocks that carry
+// CODE_SIGN_STYLE (the project-level ones don't). Automatic by default, as
+// on a Mac signed in to Xcode. With `profile` (the TestFlight workflow), the
+// Release configuration is signed manually instead, with the Apple
+// Distribution certificate and that App Store profile, so a CI runner with no
+// Xcode account needs no development certificate to archive. It is set here
+// rather than on xcodebuild's command line because a command-line setting
+// reaches every target, and the Swift packages' targets refuse a profile.
+export function configureProject(pbx, {
+  version, build, devices = "iphone", team = "", profile = "",
+}) {
   if (!["iphone", "universal"].includes(devices)) {
     throw new Error(`THRYFT_IOS_DEVICES must be "iphone" or "universal", not "${devices}"`);
   }
   if (team && !/^[A-Z0-9]{10}$/.test(team)) {
     throw new Error(`THRYFT_APPLE_TEAM_ID must be the 10-character team id, not "${team}"`);
   }
-  let out = pbx
+  if (profile && !team) {
+    throw new Error("THRYFT_IOS_PROFILE needs THRYFT_APPLE_TEAM_ID: a profile belongs to a team");
+  }
+  if (profile && !/^[\w .-]+$/.test(profile)) {
+    throw new Error(`THRYFT_IOS_PROFILE must be a profile name, not "${profile}"`);
+  }
+  const out = pbx
     .replace(/MARKETING_VERSION = [^;]*;/g, `MARKETING_VERSION = ${version};`)
     .replace(/CURRENT_PROJECT_VERSION = [^;]*;/g, `CURRENT_PROJECT_VERSION = ${build};`)
     .replace(/TARGETED_DEVICE_FAMILY = [^;]*;/g,
       `TARGETED_DEVICE_FAMILY = ${devices === "universal" ? '"1,2"' : "1"};`);
-  if (team) {
-    out = out.replace(/\t*DEVELOPMENT_TEAM = [^;]*;\n/g, "")
-      .replace(/(\t*)CODE_SIGN_STYLE = Automatic;\n/g,
-        (m, tabs) => `${m}${tabs}DEVELOPMENT_TEAM = ${team};\n`);
-  }
-  return out;
+  const config = /\w{24} \/\* (\w+) \*\/ = \{\n\t+isa = XCBuildConfiguration;[\s\S]*?\n\t+name = \1;\n\t+\};/g;
+  return out.replace(config, (block, name) => {
+    if (!/CODE_SIGN_STYLE = /.test(block)) return block;
+    const manual = Boolean(profile) && name === "Release";
+    const owned = team
+      ? /\t*(DEVELOPMENT_TEAM|CODE_SIGN_IDENTITY|PROVISIONING_PROFILE_SPECIFIER) = [^;]*;\n/g
+      : /\t*(CODE_SIGN_IDENTITY|PROVISIONING_PROFILE_SPECIFIER) = [^;]*;\n/g;
+    return block.replace(owned, "").replace(/(\t*)CODE_SIGN_STYLE = \w+;\n/, (m, tabs) =>
+      `${tabs}CODE_SIGN_STYLE = ${manual ? "Manual" : "Automatic"};\n`
+      + (team ? `${tabs}DEVELOPMENT_TEAM = ${team};\n` : "")
+      + (manual
+        ? `${tabs}CODE_SIGN_IDENTITY = "Apple Distribution";\n`
+          + `${tabs}PROVISIONING_PROFILE_SPECIFIER = "${profile}";\n`
+        : ""));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +282,7 @@ function prepareIos({ version, build }) {
     version, build,
     devices: process.env.THRYFT_IOS_DEVICES || "iphone",
     team: process.env.THRYFT_APPLE_TEAM_ID || "",
+    profile: process.env.THRYFT_IOS_PROFILE || "",
   }));
 
   console.log(`

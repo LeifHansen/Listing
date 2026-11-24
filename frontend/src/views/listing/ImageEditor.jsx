@@ -385,12 +385,16 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
           entry: topEntry(), background: "",
         } : null;
         setLastCut({ name, provider: res.provider, cloud: !!res.cloud, background: "" });
-        toast(res.cloud
-          ? "This device couldn't cut it, so the cloud did — review and Save to keep it."
-          : res.art
-            ? "Cut to the picture's edge — review and Save to keep it."
-            : "Background removed — review and Save to keep it.",
-          { kind: "success" });
+        // No success toast: the canvas already shows the cut-out, as with
+        // rotate, crop and auto levels. What the canvas cannot show is said:
+        // that the cloud did it (and charged for it), or that a picture was
+        // cut to its edge rather than around its subject.
+        if (res.cloud) {
+          toast("This device couldn't cut it, so the cloud did.", { kind: "info" });
+        } else if (res.art) {
+          toast("Cut to the picture's edge, so nothing inside it was removed.",
+            { kind: "info" });
+        }
         if (res.cloud) loadBgRemovalStatus();
         return;
       }
@@ -401,8 +405,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       await applyPreview(res.image);
       cutRef.current = null;
       setLastCut({ name, provider: "photoroom", cloud: true, background: "" });
-      toast("Background removed — review and Save to keep it.",
-        { kind: "success" });
       loadBgRemovalStatus();
     } catch (e) {
       if (e instanceof LocalCutoutError) {
@@ -440,7 +442,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       await applyPreview(res.image);
       cutRef.current = null;
       setLastCut({ name, provider: "photoroom", cloud: true, background: "" });
-      toast("Enhanced in the cloud — review and Save to keep it.", { kind: "success" });
       loadBgRemovalStatus();
     } catch (e) {
       toast(`Cloud background removal failed: ${e.message}`, { kind: "error" });
@@ -530,8 +531,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     next.height = canvas.height;
     next.getContext("2d").putImageData(px, 0, 0);
     commitOperation(next, { keepStrokes: true });
-    toast("Auto levels applied — Undo to take it back, Save to keep.",
-          { kind: "success" });
   }, [aiBusy, commitOperation, toast]);
 
   // Manual crop: toggle the tool, drag a rect, Apply.
@@ -566,8 +565,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     clearOverlay();
     setTool("brush");
     commitOperation(tmp);
-    toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
-  }, [cropRect, clearOverlay, commitOperation, toast]);
+  }, [cropRect, clearOverlay, commitOperation]);
 
   // Rotate 90° clockwise. On the canvas, not through /api/rotate-image: the
   // studio's contract is that nothing is written until Save, and a server
@@ -745,7 +743,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       forgetCut();
       await load();      // repaint from the file the server just rewrote
       onSaved();
-      toast("Put back the photo as you shot it.", { kind: "success" });
     } catch (e) {
       // The originals are pruned on a timer, so "there is nothing to restore"
       // is a real answer and the server's sentence says so.

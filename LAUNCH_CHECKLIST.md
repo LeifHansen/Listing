@@ -301,14 +301,17 @@ Ordered by what it costs a seller.
       8. Cap the bill: `PHOTOROOM_MONTHLY_BUDGET_USD` (with
          `PHOTOROOM_COST_PER_IMAGE` matching the plan). Admin → System shows
          the month's spend against it.
-- [ ] **Background removal on the device.** Built, and off until listed in
-      `BG_LOCAL_PROVIDERS` (read by the apps on every start; no release
-      needed to switch an engine on or off).
-      1. **iOS and Android** need an app build that contains the
-         `thryft-cutout` plugin (this branch onward). Run the device checklist
-         in MOBILE.md on a real iPhone (iOS 17+) and an Android phone with
-         Play services, then set `BG_LOCAL_PROVIDERS=ios,android`. Older app
-         builds ignore it and keep using Photoroom.
+- [ ] **Background removal on the device.** An engine runs only while it is
+      listed in `BG_LOCAL_PROVIDERS` (read by the apps on every start; no
+      release needed to switch one on or off).
+      1. **iOS and Android are ON** (`BG_LOCAL_PROVIDERS = 'ios,android'` in
+         fly.toml). Older app builds ignore it and keep using Photoroom; the
+         first build that carries the `thryft-cutout` plugin cuts on the
+         device from day one. **Before promoting that build** out of
+         TestFlight / Play internal testing, run the device checklist in
+         MOBILE.md on a real iPhone (iOS 17+) and an Android phone with Play
+         services. If an engine misbehaves in the field, take its platform
+         out of the list and deploy -- no app release.
       2. **The web engine (`web`) waits for legal.** BiRefNet Lite's code and
          weights are MIT, but one of its training sets, DIS5K, is licensed
          for non-commercial research only, and the author has not said

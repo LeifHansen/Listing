@@ -71,6 +71,11 @@ SHIPPED = {
     "bg_removal_usage": (
         "period", "photos", "updated_at", "user_id",
     ),
+    "sale_events": (
+        "created_at", "ebay_account", "ebay_promotion_id", "end_at", "id",
+        "item_ids", "name", "percent_off", "read_only_reason", "source",
+        "start_at", "status", "synced_at", "updated_at", "user_id",
+    ),
     "marketplace_accounts": (
         "external_id", "external_username", "marketplace", "refresh_token",
         "settings", "updated_at", "user_id",

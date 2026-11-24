@@ -164,6 +164,11 @@ WHY_A_BLANK_IS_SAFE = {
         "returns 0; housekeeping that skipped a pass runs again tomorrow",
 
     # --- writes that hand the caller a verdict to check -------------------
+    "clear_sale_events":
+        "returns False; only eBay disconnect calls it, and a row it missed is "
+        "for an eBay account that is no longer connected, so no screen shows "
+        "it (sale_events.rows_for filters by account) and the next pull for "
+        "the account that IS connected replaces it",
     "upsert_listing":
         "returns False for a write that did not land, and the publish path checks it",
     "save_marketplace_account":
