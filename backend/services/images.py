@@ -399,6 +399,21 @@ def _flatten(img: Image.Image) -> Image.Image:
     return img.convert("RGB") if img.mode != "RGB" else img
 
 
+def flatten(img: Image.Image) -> Image.Image:
+    """Public name for _flatten: any transparency onto WHITE, as opaque RGB.
+    For the routes that take a picture from the client (the studio's save)
+    and must never paint a transparent pixel black."""
+    return _flatten(img)
+
+
+def write_jpeg(img: Image.Image, dst: Path, quality: int = JPEG_QUALITY) -> None:
+    """`img` flattened onto white and written to `dst` as a JPEG, atomically
+    and without metadata -- the one way a route outside the photo pass should
+    put a working copy on the volume. See _save_atomic for why the temp name
+    is unique per process and thread."""
+    _save_atomic(_flatten(img), dst, quality=quality, optimize=True)
+
+
 def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
     """The photo as the camera meant it — upright per its EXIF, opaque, and no
     larger than TARGET_SIZE on its longest side — plus the size it was shot

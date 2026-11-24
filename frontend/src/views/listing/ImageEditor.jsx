@@ -9,7 +9,8 @@ import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
 import { api, MODEL_TIMEOUT_MS } from "@/lib/api";
 import { useApp } from "@/store";
-import { cn, mediaUrl } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { loadImage, loadPhotoImage } from "@/lib/photoFile";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
   layersFrom, pushOperation, pushStroke, releaseLayers, replay, rotateQuarter,
@@ -77,14 +78,6 @@ async function studioCall(path, sessionId, name, blob, timeoutMs) {
                      ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Couldn't load the image."));
-    img.src = src;
-  });
-}
 
 export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   // Which photo is open RIGHT NOW. This dialog is one long-lived instance
@@ -268,8 +261,11 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     if (!canvas || !name) return false;
     const startedOn = name;
     try {
-      // Same-origin so the canvas isn't tainted and toBlob() works.
-      const img = await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
+      // Through the bytes route, not /media: a redirect to the bucket (an
+      // offloaded photo) or the native shell's cross-origin <img> taints the
+      // canvas, and then every tool that reads pixels -- Save included --
+      // throws. See lib/photoFile.
+      const img = await loadPhotoImage(sessionId, name);
       if (nameRef.current !== startedOn) return false;
       // Revert and Restore original load over a stack that is still here.
       releaseLayers(layersRef.current, historyRef.current);

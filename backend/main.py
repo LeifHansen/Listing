@@ -142,8 +142,12 @@ app.add_middleware(
     # was bigger than one download may carry — a warning the native app would
     # otherwise be unable to see, leaving a short file looking like a whole
     # one.
+    #
+    # X-Source-Sha256 is the photo studio's: which exact bytes a background
+    # mask was computed from, so a cutout made on the device is never pasted
+    # onto a photo that changed in the meantime (see /api/image/file).
     expose_headers=["X-Request-Id", "Content-Disposition",
-                    "X-Export-Total", "X-Export-Truncated"],
+                    "X-Export-Total", "X-Export-Truncated", "X-Source-Sha256"],
     max_age=86400,
 )
 
@@ -5648,15 +5652,21 @@ async def edit_image(
     def _save() -> None:
         from io import BytesIO
         from PIL import Image
-        img = Image.open(BytesIO(data)).convert("RGB")
+        img = Image.open(BytesIO(data))
+        img.load()
         # Every edit is a new version — the outgoing working copy is snapshot
         # to history first (never destroyed), then atomically replaced so a
         # concurrent reader (eBay fetching /media, or a thumbnail request)
         # never sees a half-written JPEG.
+        #
+        # Flattened onto WHITE, not `.convert("RGB")`: a bare convert paints
+        # every transparent pixel black, and a cutout saved from the studio
+        # with any transparency left in it reached the listing as an item on
+        # a black field. And written through images.write_jpeg, whose temp
+        # name is unique per thread: the fixed `<name>.tmp` this used to write
+        # let two saves of one photo interleave into one corrupt file.
         storage.snapshot_image(session_id, name)
-        tmp = path.with_name(path.name + ".tmp")
-        img.save(tmp, "JPEG", quality=88, optimize=True)
-        os.replace(tmp, path)
+        images.write_jpeg(img, path, quality=88)
 
     try:
         await run_in_threadpool(_save)
@@ -5948,6 +5958,51 @@ async def image_remove_bg(
     except Exception:
         await run_in_threadpool(_refund_cutouts, spent, held)
         raise
+
+
+@app.get("/api/image/file/{session_id}/{name}")
+async def image_file(session_id: str, name: str, request: Request,
+                     which: str = "working") -> Response:
+    """One photo's bytes, for the studio and the on-device background
+    remover to read PIXELS from -- streamed, never redirected.
+
+    /media is the photo's public URL and it redirects to the bucket once the
+    local copy has been offloaded. That is right for eBay and for an <img>,
+    and wrong for anything that has to read the picture back: a canvas that
+    drew a cross-origin image is tainted, and every getImageData or toBlob on
+    it throws -- so the studio's tools died on any photo old enough to have
+    been offloaded, and in the iOS/Android shell (whose pages live on
+    capacitor://localhost, and whose <img> cannot carry the bearer token) on
+    every photo. This answers from the volume, rehydrating from the bucket
+    first exactly as every edit route does, so the bytes always arrive on
+    the caller's own request with the CORS headers it needs.
+
+    `which=source` is what a background mask should be computed FROM:
+    images.as_shot -- the photo as shot, upright and sized, while it is the
+    faithful copy behind a cutout -- and otherwise the working copy itself.
+    Cutting the working copy of a photo that was already cut out segments a
+    composite on white, and that is how white-on-white edges and the contact
+    shadow were being eaten on a second cut.
+
+    X-Source-Sha256 names the exact bytes sent, so a mask computed from them
+    can be refused if the photo changed before it came back.
+    """
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
+    path = _photo_path(session_id, name, create=False)
+    if path is None:
+        raise HTTPException(404, "Not found")
+
+    def _read() -> Optional[bytes]:
+        if not _ensure_local(session_id, name, path):
+            return None
+        src = images.as_shot(path) if which == "source" else path
+        return src.read_bytes()
+
+    data = await run_in_threadpool(_read)
+    if data is None:
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    return Response(data, media_type="image/jpeg", headers={
+        "X-Source-Sha256": hashlib.sha256(data).hexdigest()})
 
 
 @app.post("/api/identify/{session_id}")
@@ -7974,6 +8029,37 @@ class _BulkProgress:
                   **extra)
 
 
+def _carry_photo_extras(src_opt: Path, dst_opt: Path,
+                        mapping: dict[str, str]) -> None:
+    """Copy what sits BESIDE each optimized photo -- the faithful as-shot copy
+    behind a cutout -- from a staging pile into an item's own session, under
+    the item's names.
+
+    The split used to copy optimized/ alone, and the staging pile is purged
+    when the batch ends, so every bulk item lost the photo as shot the moment
+    it became an item: its vision passes read the cutout instead, and
+    Restore original fell back to whatever history happened to hold.
+
+    AFTER the working copies and with copyfile, not copy2: images.as_shot
+    trusts a kept copy only while it is at least as new as the photo beside
+    it, and a copy that kept its old timestamp would be older than the
+    working copy written a moment before it. Best-effort -- a photo is never
+    worth failing an item over a copy beside it."""
+    for sub in ("as_shot",):
+        src_dir, dst_dir = src_opt.parent / sub, dst_opt.parent / sub
+        if not src_dir.is_dir():
+            continue
+        for old, new in mapping.items():
+            src = src_dir / old
+            if not src.is_file():
+                continue
+            try:
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, dst_dir / new)
+            except OSError as exc:
+                log.info("bulk split: couldn't carry %s/%s (%s)", sub, old, exc)
+
+
 def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool]:
     """This item's own session: (session_id, photo names, already charged).
 
@@ -7995,6 +8081,9 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     for j, idx in enumerate(ctx.groups[gi]["indices"]):
         shutil.copyfile(ctx.opt_dir / ctx.names[idx], item_dir / f"img_{j:03d}.jpg")
         item_names.append(f"img_{j:03d}.jpg")
+    _carry_photo_extras(ctx.opt_dir, item_dir, {
+        ctx.names[idx]: f"img_{j:03d}.jpg"
+        for j, idx in enumerate(ctx.groups[gi]["indices"])})
     objstore.upload_optimized(sid, item_dir, item_names)
     # Each item inherits the WHOLE pile's hints, not just the line it was
     # grouped under: the split is the model's guess, and the identify prompt

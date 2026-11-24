@@ -355,8 +355,11 @@ const MAX_UPLOAD_SIDE = 2000;
 // exactly this (services/images._flatten) and it never got the chance: there
 // was no alpha left to composite by the time the file arrived. This is the
 // same colour that function uses, so a photo that is downscaled here and one
-// that is small enough to skip it land on the same backdrop.
-const CANVAS_COLOR = "#f8f8f8";  // services/images.CANVAS_COLOR (248, 248, 248)
+// that is small enough to skip it land on the same backdrop. That function
+// flattens onto pure WHITE now (the light grey this used to match went with
+// the old pipeline), and a cut-out that arrives here must land on the same
+// white every server-made cutout ships on.
+const CANVAS_COLOR = "#ffffff";  // services/images.WHITE (255, 255, 255)
 // One decode, whichever way this browser offers it: createImageBitmap
 // asked to apply the camera's Orientation tag where the options bag is
 // understood, and an <img> otherwise, which is drawn to a canvas the way it

@@ -24,7 +24,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downscaleForUpload } from "./api";
 
-const CANVAS_COLOR = "#f8f8f8";  // services/images.CANVAS_COLOR
+const CANVAS_COLOR = "#ffffff";  // services/images.WHITE, what _flatten composites onto
 
 function bigPhoto(type = "image/png") {
   // Over MAX_UPLOAD_SIDE, so the re-encode path runs rather than the
