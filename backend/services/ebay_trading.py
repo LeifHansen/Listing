@@ -697,9 +697,20 @@ def _item_to_listing(item: ET.Element) -> dict:
     start_price = _float(item, "StartPrice")
     current = _float(selling, "CurrentPrice") if selling is not None else None
     fmt = _listing_format(listing_type, bool(bin_price))
+    # A listing in an eBay sale (a markdown — Seller Hub's "sale event", or
+    # one this app made, see services/sale_events) carries the price BEFORE
+    # the sale here. eBay reports the discounted figure as the current
+    # price, and `price` is a field the sync takes from eBay
+    # (listing_sync._LIVE_FIELDS): read that instead and every sale would
+    # overwrite the seller's asking price with the sale price — and be
+    # stamped as a markdown the seller made (price_lowered_at), and stay
+    # that way when the sale ended.
+    promo = _find(selling, "PromotionalSaleDetails") if selling is not None else None
+    original = _float(promo, "OriginalPrice") if promo is not None else None
 
     if fmt == "FIXED_PRICE":
-        price = start_price if start_price is not None else current
+        price = (original if original is not None
+                 else start_price if start_price is not None else current)
         auction_start = None
     else:
         price = bin_price

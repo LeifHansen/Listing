@@ -60,7 +60,8 @@ from .services import (barcodes, beanie, bg_removal, bulk_actions, claude_ai,
                        listing_export, listing_merge, listing_prompt,
                        listing_sync, metrics, notifications,
                        owed_refunds, preflight, pricing,
-                       recommender, store_category, sync_guard, sync_merge,
+                       recommender, sale_events, store_category, sync_guard,
+                       sync_merge,
                        taxonomy, tokens)
 from .services.experts.art import presentation as art_presentation
 from .services import reference_fetch
@@ -76,7 +77,7 @@ from .services import policy_terms as ebay_policy_terms
 from .services import errorlog
 from .services.background import run_in_background
 from .routers import (admin as admin_routes, auth as auth_routes, deps,
-                      inbox as inbox_routes)
+                      inbox as inbox_routes, sale_events as sale_event_routes)
 
 
 @asynccontextmanager
@@ -4977,6 +4978,10 @@ def ebay_disconnect(request: Request) -> dict:
     if not db.disconnect_ebay_account(uid):
         raise HTTPException(503, "Couldn't disconnect eBay just now — nothing "
                                  "changed. Try again in a moment.")
+    # The sales recorded here were that account's; the next account pulls its
+    # own (services/sale_events.refresh).
+    db.clear_sale_events(uid)
+    sale_events.forget(uid)
     return {"ok": True}
 
 
@@ -10375,10 +10380,21 @@ def _run_lower_prices_job(job_id: str, records: list[dict], uid: str,
     listing's price, cut and pushed to eBay one serial revise at a time, with
     the job saying which listing it is on as it goes."""
     provider = marketplaces.get("ebay")
+    # The listings in an eBay sale right now, read once for the run. eBay
+    # takes a listing OUT of its sale when its price is revised (and a sale
+    # set to block revisions refuses the revise outright, see
+    # ebay_errors.sale_locked), so a price cut on one would quietly end the
+    # discount the seller set up. Those are left alone, with the sale named.
+    on_sale = sale_events.membership_best_effort(uid, creds)
 
     def _apply(rec: dict) -> dict:
         if jobstore.cancel_requested(job_id):
             return {"skip": "Stopped before this one was started."}
+        sale = on_sale.get(str((rec.get("listing") or {}).get("ebay_listing_id") or ""))
+        if sale:
+            return {"skip": f"It's in the sale “{sale.get('name') or 'a sale'}” — eBay "
+                            "takes a listing out of its sale when its price changes. "
+                            "Take it out of the sale first, or let the sale end."}
         # Re-read: the set was fixed when the button was pressed, and a run
         # over a page of ticks takes a while. A listing that has sold or been
         # repriced since is judged on what it is now, not on then.
@@ -13209,6 +13225,12 @@ def import_status(job_id: str, request: Request) -> Response:
 # defined so they keep their place in the route order.
 
 app.include_router(inbox_routes.router)
+
+
+# --- sale events: eBay markdown sales, both ways ---------------------------
+# routers/sale_events.py; the work is services/sale_events.
+
+app.include_router(sale_event_routes.router)
 
 
 # --- background removal: the per-seller switch ------------------------------

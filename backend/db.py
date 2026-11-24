@@ -18,8 +18,9 @@ import time as _time
 import uuid as _uuid
 from typing import Optional, Sequence
 
-from sqlalchemy import (DateTime, Index, JSON, String, and_, create_engine,
-                        delete, func, or_, select, text, update)
+from sqlalchemy import (DateTime, Float, Index, JSON, String, UniqueConstraint,
+                        and_, create_engine, delete, func, or_, select, text,
+                        update)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -384,6 +385,62 @@ class ShippingLabel(Base):
     ebay_error: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SaleEvent(Base):
+    """One eBay sale event (a markdown promotion) on a seller's account.
+
+    A mirror of eBay's, both ways: a sale made here is created on eBay first
+    and recorded here from eBay's answer, and a sale made in Seller Hub is
+    pulled in by services/sale_events.refresh. eBay is the truth; this row is
+    what the Sales screen reads between pulls, and what the Manage grid reads
+    to put a struck-through price on a card.
+
+    Membership is kept here as eBay ITEM ids, never written onto the listings
+    themselves: a listing row that changed whenever a sale started or ended
+    would bump updated_at (and so the grid's order), fight the store sync's
+    three-way merge, and go stale the moment the seller edited the sale in
+    Seller Hub. `item_ids` is NULL when eBay picks the listings by rule and
+    the set could not be read.
+
+    `read_only_reason` is non-empty for a sale this app can show but not
+    edit — several discount tiers, an amount off, listings picked by rule —
+    and says why. Deliberately no ForeignKeys, matching the rest of the
+    schema; delete_user clears it explicitly.
+    """
+
+    __tablename__ = "sale_events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "ebay_promotion_id",
+                         name="uq_sale_events_user_promotion"),
+        # The Sales screen lists a seller's sales by when they end.
+        Index("ix_sale_events_user_end", "user_id", "end_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    # The eBay username the sale belongs to: a seller who reconnects a
+    # different eBay account must not see (or edit) the last one's sales.
+    ebay_account: Mapped[str] = mapped_column(String(128), default="")
+    ebay_promotion_id: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(255), default="")
+    # The one percentage off, or NULL when the sale is not a single
+    # percentage (tiers, an amount off) — read-only here, see above.
+    percent_off: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    start_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    end_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    # eBay's own status word (DRAFT, SCHEDULED, RUNNING, PAUSED, ENDED, ...).
+    status: Mapped[str] = mapped_column(String(16), default="")
+    # "app" when this app created it, "ebay" when it came from Seller Hub.
+    source: Mapped[str] = mapped_column(String(8), default="ebay")
+    read_only_reason: Mapped[str] = mapped_column(String(160), default="")
+    item_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[_dt.datetime] = mapped_column(DateTime(timezone=True))
+    synced_at: Mapped[Optional[_dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
 
 class AdminAuditLog(Base):
@@ -1622,6 +1679,10 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             # Bought labels carry a buyer's name and address; they go with
             # the seller who bought them.
             s.execute(delete(ShippingLabel).where(ShippingLabel.user_id == user_id))
+            # The seller's eBay sale events, mirrored here (SaleEvent). Not
+            # personal data about anyone else, but keyed to the person who
+            # asked to be forgotten.
+            s.execute(delete(SaleEvent).where(SaleEvent.user_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             # In THIS transaction, before the commit: the rows that name these
             # photos are about to stop existing, so the obligation to erase
@@ -2137,6 +2198,182 @@ def disconnect_ebay_account(user_id: str) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: disconnect_ebay_account failed: {exc}")
+        return False
+
+
+# --- eBay sale events (markdowns) -------------------------------------------
+# The mirror services/sale_events keeps of the seller's eBay sales. Reads are
+# best-effort unless `strict` (the Sales screen says "couldn't check" rather
+# than "no sales" off a read that fell over); writes RAISE, because a sale
+# made on eBay and not recorded here is a sale the seller cannot see to end.
+
+_SALE_EVENT_FIELDS = ("ebay_account", "name", "percent_off", "start_at",
+                      "end_at", "status", "source", "read_only_reason",
+                      "item_ids", "synced_at")
+
+
+def _iso(value: Optional[_dt.datetime]) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:      # SQLite hands back naive datetimes
+        value = value.replace(tzinfo=_dt.timezone.utc)
+    return value.isoformat(timespec="seconds")
+
+
+def _sale_event_to_dict(r: SaleEvent) -> dict:
+    return {
+        "id": r.id, "user_id": r.user_id, "ebay_account": r.ebay_account or "",
+        "ebay_promotion_id": r.ebay_promotion_id, "name": r.name or "",
+        "percent_off": r.percent_off, "start_at": _iso(r.start_at),
+        "end_at": _iso(r.end_at), "status": r.status or "",
+        "source": r.source or "ebay",
+        "read_only_reason": r.read_only_reason or "",
+        "item_ids": list(r.item_ids) if isinstance(r.item_ids, list) else None,
+        "created_at": _iso(r.created_at), "updated_at": _iso(r.updated_at),
+        "synced_at": _iso(r.synced_at),
+    }
+
+
+def list_sale_events(user_id: str, strict: bool = False) -> list[dict]:
+    """The seller's recorded sale events, latest end first."""
+    eng = _get_engine()
+    if eng is None:
+        return []
+    try:
+        with Session(eng) as s:
+            rows = s.execute(
+                select(SaleEvent).where(SaleEvent.user_id == user_id)
+                .order_by(SaleEvent.end_at.desc(), SaleEvent.id)
+            ).scalars().all()
+            return [_sale_event_to_dict(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: list_sale_events failed: {exc}")
+        if strict:
+            raise StorageUnavailable(
+                "We couldn’t load your sales just now. Try again in a "
+                "moment.") from exc
+        return []
+
+
+def get_sale_event(user_id: str, event_id: str) -> Optional[dict]:
+    """One of THIS seller's sale events by our id, or None. RAISES on a read
+    failure: every caller is about to change the sale on eBay."""
+    eng = _get_engine()
+    if eng is None:
+        return None
+    try:
+        with Session(eng) as s:
+            r = s.get(SaleEvent, event_id)
+            if r is None or r.user_id != user_id:
+                return None
+            return _sale_event_to_dict(r)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: get_sale_event failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t load that sale just now. Try again in a moment.") from exc
+
+
+def upsert_sale_event(user_id: str, ebay_promotion_id: str, **fields) -> Optional[dict]:
+    """Create or update the row for one eBay promotion; returns it.
+
+    Keyed on (seller, eBay's promotion id), so a pull that sees the same sale
+    twice updates one row. A row created here keeps its `source` ("app")
+    whatever a later pull says — Seller Hub does not know who made it.
+    RAISES StorageUnavailable on a write failure."""
+    eng = _get_engine()
+    if eng is None:
+        return None
+    pid = str(ebay_promotion_id or "").strip()
+    if not pid:
+        raise ValueError("A sale event needs eBay's promotion id.")
+    try:
+        with Session(eng) as s:
+            r = s.execute(
+                select(SaleEvent).where(SaleEvent.user_id == user_id,
+                                        SaleEvent.ebay_promotion_id == pid)
+            ).scalars().first()
+            now = _now()
+            if r is None:
+                r = SaleEvent(id=f"se_{_uuid.uuid4().hex[:20]}", user_id=user_id,
+                              ebay_promotion_id=pid, created_at=now,
+                              source=fields.get("source") or "ebay")
+                s.add(r)
+            for key in _SALE_EVENT_FIELDS:
+                if key not in fields:
+                    continue
+                if key == "source" and r.source == "app":
+                    continue
+                setattr(r, key, fields[key])
+            r.updated_at = now
+            s.commit()
+            return _sale_event_to_dict(r)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: upsert_sale_event failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t record that sale just now. It may be on eBay — "
+            "refresh Sales in a moment.") from exc
+
+
+def delete_sale_event(user_id: str, event_id: str) -> bool:
+    """Forget one sale (eBay deleted it). RAISES on a write failure."""
+    eng = _get_engine()
+    if eng is None:
+        return False
+    try:
+        with Session(eng) as s:
+            n = s.execute(delete(SaleEvent).where(
+                SaleEvent.user_id == user_id, SaleEvent.id == event_id)).rowcount
+            s.commit()
+            return bool(n)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_sale_event failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t update your sales just now.") from exc
+
+
+def delete_sale_events_except(user_id: str, ebay_account: str,
+                              keep_promotion_ids: Sequence[str],
+                              *, ended_before: Optional[_dt.datetime] = None) -> int:
+    """Drop this account's rows for promotions eBay no longer has (deleted in
+    Seller Hub), and — when `ended_before` is given — rows whose sale ended
+    before then. Rows recorded under a DIFFERENT eBay account are left alone:
+    they are not this pull's to judge. Returns how many went."""
+    eng = _get_engine()
+    if eng is None:
+        return 0
+    keep = [str(p) for p in keep_promotion_ids]
+    try:
+        with Session(eng) as s:
+            gone = (SaleEvent.ebay_promotion_id.notin_(keep) if keep
+                    else SaleEvent.ebay_promotion_id.isnot(None))
+            if ended_before is not None:
+                gone = or_(gone, and_(SaleEvent.end_at.isnot(None),
+                                      SaleEvent.end_at < ended_before))
+            n = s.execute(delete(SaleEvent).where(
+                SaleEvent.user_id == user_id,
+                SaleEvent.ebay_account == (ebay_account or ""),
+                gone)).rowcount
+            s.commit()
+            return int(n or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: delete_sale_events_except failed: {exc}")
+        raise StorageUnavailable(
+            "We couldn’t update your sales just now.") from exc
+
+
+def clear_sale_events(user_id: str) -> bool:
+    """Forget every sale recorded for this seller — on disconnecting eBay,
+    whose sales they were. Best-effort: the next pull would correct it."""
+    eng = _get_engine()
+    if eng is None:
+        return True
+    try:
+        with Session(eng) as s:
+            s.execute(delete(SaleEvent).where(SaleEvent.user_id == user_id))
+            s.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"db: clear_sale_events failed: {exc}")
         return False
 
 
