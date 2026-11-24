@@ -34,10 +34,17 @@ used.
 - When an item looks like a print or a painting, we may run a reverse image
   search to find the artist: a temporary link to the photo goes to SerpApi,
   which asks Google Lens which web pages show the same image.
-- If you turn on background removal in Settings, the photos you choose to have
-  their background removed are sent to Photoroom, which cuts the item out and
-  sends it back. Nothing about your account is shared with Photoroom, and no
-  photo is sent there until you turn the feature on.
+- Where your phone or browser can do it, background removal happens on your
+  device: the background is worked out there, and only the outline of the item
+  (a black-and-white mask) is sent to our server, which puts the item on a
+  clean background for your listing. No third party sees the photo for this.
+  On a browser, the background remover is downloaded once from our storage and
+  kept on your device.
+- If you turn on cloud background removal in Settings, the photos your device
+  can't cut out itself — and any you ask to have cut out in the cloud — are
+  sent to Photoroom, which cuts the item out and sends it back. Nothing about
+  your account is shared with Photoroom, and no photo is sent there until you
+  turn the feature on.
 - Listing details and photos are sent to eBay when you ask us to suggest
   categories or publish a listing there.
 - Account and listing data are stored in our database (hosted on Neon) so your
@@ -52,8 +59,8 @@ used.
 ## What we don't do
 
 - We do not sell your data or share it with anyone beyond the service providers
-  named above (Anthropic, Google, SerpApi, Photoroom if you turn on background
-  removal, eBay if you connect your account, our payment processor
+  named above (Anthropic, Google, SerpApi, Photoroom if you turn on cloud
+  background removal, eBay if you connect your account, our payment processor
   Stripe, and our hosting/storage providers Fly.io, Neon, and Cloudflare).
 - We do not use your photos or listings for advertising.
 
