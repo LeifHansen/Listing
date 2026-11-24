@@ -22,14 +22,20 @@ export function photoFilePath(sessionId, name, which = "working") {
   return `/api/image/file/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}${q}`;
 }
 
-/** {blob, sha} for one photo. Throws api()'s error, with its sentence. */
+/** {blob, sha, kind} for one photo -- `kind` is what the photo pass's screen
+    said about it: "art" (a picture), "detail" (a close-up) or "". Throws
+    api()'s error, with its sentence. */
 export async function fetchPhoto(sessionId, name, { which = "working", signal } = {}) {
   const res = await api(photoFilePath(sessionId, name, which),
                         { as: "response", ...(signal ? { signal } : {}) });
   const blob = await res.blob();
   let sha = "";
-  try { sha = res.headers.get("x-source-sha256") || ""; } catch (e) { /* no headers */ }
-  return { blob, sha };
+  let kind = "";
+  try {
+    sha = res.headers.get("x-source-sha256") || "";
+    kind = res.headers.get("x-photo-kind") || "";
+  } catch (e) { /* no headers */ }
+  return { blob, sha, kind };
 }
 
 export function loadImage(src) {
@@ -56,11 +62,16 @@ export async function imageFromBlob(blob) {
     (an older server, or an environment with no object URLs) -- the photo
     still shows, exactly as it always did. */
 export async function loadPhotoImage(sessionId, name) {
+  return (await loadPhoto(sessionId, name)).img;
+}
+
+/** loadPhotoImage, plus what the screen said about the photo ({img, kind}). */
+export async function loadPhoto(sessionId, name) {
   try {
-    const { blob } = await fetchPhoto(sessionId, name);
-    return await imageFromBlob(blob);
+    const { blob, kind } = await fetchPhoto(sessionId, name);
+    return { img: await imageFromBlob(blob), kind };
   } catch (e) {
     if (e?.status === 404) throw e;
-    return loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
+    return { img: await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`), kind: "" };
   }
 }

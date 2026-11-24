@@ -20,6 +20,7 @@ import { PhotoUploadIllustration } from "@/components/ui/illustrations";
 import { useToast } from "@/components/ui/Toaster";
 import { MAX_PHOTOS } from "./blockers";
 import { AiNotesStep } from "./AiNotesStep";
+import { useLocalCutout } from "@/lib/bgRemoval/useLocalCutout";
 
 // When background removal can't run (Photoroom unavailable, out of this
 // month's allowance, rate limit, nothing found) the server KEEPS the original
@@ -72,7 +73,7 @@ function countHints(notes) {
 //                     below for why anywhere else still starts shut.
 export function UploadPhase({ defaultOpen = false }) {
   const { setSession, currentSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings, bgRemoval, openSettings,
+          invalidateListings, bgRemoval, openSettings, cutoutQueue,
           // The store's "a batch is running from here": not the local
           // startBulk below, which is the button that uploads one.
           startBulk: watchBulk } = useApp();
@@ -92,12 +93,22 @@ export function UploadPhase({ defaultOpen = false }) {
   // still hands its own choice back with its files — same pile, seconds
   // later, not a default.
   const [removeBg, setRemoveBg] = useState(() => !!bulkRetry?.removeBg);
-  // Background removal is offered only to a seller who has switched it on in
-  // Settings (that is where they agree to their photos going to Photoroom),
-  // and only when the server can do it at all. A tick left over from before
-  // it was switched off sends nothing.
-  const canCut = !!(bgRemoval?.available && bgRemoval?.active);
+  // Background removal is offered when THIS DEVICE can do it -- free, and
+  // nothing is sent anywhere, so there is nothing to switch on -- or to a
+  // seller who has switched the cloud on in Settings (that is where they
+  // agree to their photos going to Photoroom). The device comes first
+  // whenever it can; the cloud then only steps in for a photo the device
+  // could not cut, and only for that seller. A tick left over from before
+  // either went away sends nothing.
+  const local = useLocalCutout();
+  const onDevice = local.usable;
+  const canCloudCut = !!(bgRemoval?.available && bgRemoval?.active);
+  const canCut = onDevice || canCloudCut;
   const cutting = removeBg && canCut;
+  // How it is asked for: the device's request is remove_bg=false plus
+  // cutout=device, so none of the cloud's gates (consent, tokens, the
+  // monthly count) stand in its way -- see the server's _wants_device.
+  const cutMode = cutting ? (onDevice ? "device" : "cloud") : "";
   // Hints for the AI, comma-separated: what the seller knows and the camera
   // can't show. Like the cutout toggle it describes THIS pile and is never
   // carried over — last week's pile leaking into this one is worse than
@@ -337,7 +348,7 @@ export function UploadPhase({ defaultOpen = false }) {
   const startBulk = () => once("bulk", async () => {
     if (!files.length) return;
     handedOff.current = true;   // the previews go with the pile
-    await runBulkUpload(files, cutting, notes);
+    await runBulkUpload(files, cutting, notes, cutMode);
   })();
 
   // The draft has landed — the same ending for the pass that ran straight
@@ -476,7 +487,8 @@ export function UploadPhase({ defaultOpen = false }) {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
-      fd.append("remove_bg", cutting ? "true" : "false");
+      fd.append("remove_bg", cutMode === "cloud" ? "true" : "false");
+      if (cutMode === "device") fd.append("cutout", "device");
       // Saved with the session server-side, so a later "Start over" re-drafts
       // with the same hints instead of forgetting them.
       fd.append("notes", notes);
@@ -502,6 +514,14 @@ export function UploadPhase({ defaultOpen = false }) {
       if (cutting) {
         const warning = bgFailureMessage(optResults, prepped.length);
         if (warning) toast(warning, { kind: "warning", ttl: 10000 });
+      }
+      // The photos this device is to cut: start on them now, while the
+      // seller reads the draft. (They are on the server's list too, so a
+      // closed app picks them up next time.)
+      if (cutMode === "device") {
+        cutoutQueue?.add?.(optResults
+          .filter((r) => r?.bg_pending)
+          .map((r) => ({ session_id: up.session_id, name: r.file, kind: r.bg_pending })));
       }
       // A photo the pass turned upright is a photo the seller did not see
       // change. Say so, and how to turn it back if the pass got it wrong.
@@ -535,7 +555,7 @@ export function UploadPhase({ defaultOpen = false }) {
     const doneCount = Math.min((stage?.current || 0) + 1, total);
     const stageLine = !stage?.phase ? "Uploading your photos…"
       : stage.phase === "optimizing"
-        ? `${cutting ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
+        ? `${cutMode === "cloud" ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
         : stage.phase === "grouping" ? "Sorting your photos into items…"
         : stage.phase === "identifying" ? "Identifying your item…"
           : stage.phase === "category" ? "Finding the right eBay category…"
@@ -865,7 +885,15 @@ export function UploadPhase({ defaultOpen = false }) {
                   checked={removeBg}
                   onChange={setRemoveBg}
                   label="Remove background & replace with white"
-                  help="Cleaner, eBay-friendly product shots, cut out by Photoroom."
+                  // Where the work happens is the one thing worth saying out
+                  // loud: on the device it is free and nothing is sent.
+                  note={onDevice
+                    ? (canCloudCut
+                      ? "Done on this device, free — Photoroom steps in for any photo it can't do."
+                      : "Done on this device — free, and your photos aren't sent anywhere for it.")
+                    : undefined}
+                  help={onDevice ? undefined
+                    : "Cleaner, eBay-friendly product shots, cut out by Photoroom."}
                 />
               ) : bgRemoval?.available && (
                 <p className="text-sm text-ink-secondary">

@@ -37,7 +37,45 @@ function when(at) {
 // of images — neither is theirs to fix — so this is where the operator reads
 // which it was, in Photoroom's own words. Kept in the server's memory, so it
 // covers the time since the last restart.
-function BackgroundRemoval({ pr }) {
+// This month's cutouts per engine -- the free ones made on sellers' devices
+// and the Photoroom ones the app pays for -- and that spend against the
+// budget (PHOTOROOM_MONTHLY_BUDGET_USD). From the database, so absent when it
+// could not be read rather than shown as a month of nothing.
+const ENGINE_LABELS = {
+  "apple-vision": "iPhone (Vision)", mlkit: "Android (ML Kit)",
+  "birefnet-web": "Browser (BiRefNet)", device: "Device", photoroom: "Photoroom",
+};
+
+function dollars(n) {
+  return `$${Number(n || 0).toFixed(2)}`;
+}
+
+function CutoutUsage({ usage }) {
+  if (!usage) return null;
+  const budget = usage.photoroom_budget_usd;
+  const engines = usage.engines || [];
+  return (
+    <div className="mt-3 flex flex-col gap-1" data-testid="cutout-usage">
+      <p className="text-sm text-ink">
+        {usage.period}: {dollars(usage.photoroom_cost_usd)} on Photoroom
+        ({usage.photoroom_photos} photos)
+        {budget != null ? ` of a ${dollars(budget)} budget` : " — no monthly budget set"}
+        {usage.photoroom_enabled === false ? " · switched off" : ""}.
+      </p>
+      {engines.length > 0 && (
+        <p className="text-xs text-ink-faint">
+          {engines.map((e) => `${ENGINE_LABELS[e.provider] || e.provider}: ${e.photos}`)
+            .join(" · ")}
+        </p>
+      )}
+      <p className="text-xs text-ink-faint">
+        On-device engines switched on: {(usage.local_providers || []).join(", ") || "none"}.
+      </p>
+    </div>
+  );
+}
+
+function BackgroundRemoval({ pr, usage }) {
   if (!pr) return null;
   const f = pr.last_failure;
   let tone = "neutral";
@@ -77,6 +115,7 @@ function BackgroundRemoval({ pr }) {
           Last cutout that worked: {when(pr.last_success_at)}
         </p>
       )}
+      <CutoutUsage usage={usage} />
     </Card>
   );
 }
@@ -172,7 +211,7 @@ export function AdminSystem() {
         </ul>
       </Card>
 
-      <BackgroundRemoval pr={d.photoroom} />
+      <BackgroundRemoval pr={d.photoroom} usage={d.cutout_usage} />
     </div>
   );
 }

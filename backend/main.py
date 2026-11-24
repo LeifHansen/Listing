@@ -149,7 +149,8 @@ app.add_middleware(
     # mask was computed from, so a cutout made on the device is never pasted
     # onto a photo that changed in the meantime (see /api/image/file).
     expose_headers=["X-Request-Id", "Content-Disposition",
-                    "X-Export-Total", "X-Export-Truncated", "X-Source-Sha256"],
+                    "X-Export-Total", "X-Export-Truncated", "X-Source-Sha256",
+                    "X-Photo-Kind"],
     max_age=86400,
 )
 
@@ -6125,8 +6126,14 @@ async def image_file(session_id: str, name: str, request: Request,
     data = await run_in_threadpool(_read)
     if data is None:
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    # What the photo pass's screen said about it: a picture (cut only to its
+    # edge) or a close-up of a detail (nothing to take off). The studio asks
+    # before cutting a close-up, and says when it cut a picture by its edge.
+    flags = images.photo_flags(path)
+    kind = "art" if flags["art"] else "detail" if flags["detail"] else ""
     return Response(data, media_type="image/jpeg", headers={
-        "X-Source-Sha256": hashlib.sha256(data).hexdigest()})
+        "X-Source-Sha256": hashlib.sha256(data).hexdigest(),
+        "X-Photo-Kind": kind})
 
 
 # ---------------------------------------------------------------------------

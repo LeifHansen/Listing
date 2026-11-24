@@ -329,7 +329,11 @@ function main(argv) {
   const apiBase = process.env.THRYFT_API_BASE || DEFAULT_API_BASE;
   console.log(`==> Building the web bundle (API at ${apiBase})`);
   run("npm", ["run", "build"], {
-    env: { ...process.env, VITE_API_BASE: apiBase, VITE_BUILD_SHA: process.env.VITE_BUILD_SHA || gitSha() },
+    // VITE_NATIVE compiles the browser's background-remover (onnxruntime-web,
+    // ~29 MB of WebAssembly) out of the app: the app has its own on-device
+    // engine in the native plugin (frontend/native/thryft-cutout).
+    env: { ...process.env, VITE_API_BASE: apiBase, VITE_NATIVE: "1",
+           VITE_BUILD_SHA: process.env.VITE_BUILD_SHA || gitSha() },
   });
 
   if (!existsSync(path.join(ROOT, platform))) run("npx", ["cap", "add", platform]);
