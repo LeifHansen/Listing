@@ -1160,6 +1160,16 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `POST` | `/api/ebay/lower-prices` | Lower the ticked listings' prices by one percentage and push each to eBay, as a background job (`job_id`) — the Manage tab's "Lower prices…" |
 | `POST` | `/api/ebay/send-offers` | Offer the named listings' watchers one discount (capped per request) |
 | `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
+| `POST` | `/api/ebay/send-offers-ticked` | Offer the **ticked** listings' watchers one discount — the Manage tab's "Send offers to watchers…". Same job and same one-per-account slot as `send-offers-all` |
+| `POST` | `/api/ebay/end-listings` | End the ticked live listings on eBay without relisting them, each settled as the card's own End settles it — a background job (`job_id`) |
+| `GET`  | `/api/sale-events` | The seller's **eBay sales** (markdown sale events), made here or in Seller Hub — pulled from eBay first when the last pull is older than the window (`refresh=false` skips it). Answers `{events, checked, needs_reconnect, limits}` |
+| `POST` | `/api/sale-events/refresh` | Pull the sales from eBay now (`force` ignores the window) |
+| `POST` | `/api/sale-events` | Start a sale on eBay: `percent`, `days` or `end_at`, optional `start_at` and `name`, `move`, and exactly one of `listing_ids` / `store_category_id` / `all_active`. What "Apply discount…" calls. Answers the whole list plus a per-listing `report` |
+| `PATCH` | `/api/sale-events/{id}` | Rename a sale or move its end; its start and discount only before it starts |
+| `POST` | `/api/sale-events/{id}/listings` | Add the ticked listings to a sale (re-read from eBay first, so Seller Hub additions survive the PUT) |
+| `POST` | `/api/sale-events/remove-listings` | Take the ticked listings out of whichever sales they are in; a sale left empty is ended |
+| `POST` | `/api/sale-events/{id}/end` | End a running sale now, or cancel one that has not started |
+| `POST` | `/api/ebay/move-store-category` | Put the ticked live listings on one shelf of the seller's eBay Store (`store_category_id`), each revised with the shelf and nothing else — a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
@@ -1344,6 +1354,10 @@ draft durably and power the **My listings** view. It's optional and resilient:
 if unset or unreachable, the app falls back to the local filesystem and never
 errors on a DB problem. Tables are auto-created on first use.
 
+`sale_events` is the mirror of the seller's eBay sales (see **Sales** below):
+one row per eBay promotion, with the listings it covers held as eBay item ids
+rather than written onto the listings.
+
 ## Roadmap (toward a real web + mobile app)
 
 1. **Persistence** ✅ — Neon-backed listing history + My listings.
@@ -1428,6 +1442,10 @@ backend/
     taxonomy.py      Taxonomy API -> categories, aspects, the Size rules
     metrics.py       views / watchers / offers / bids per listing
     promotions.py    Promoted Listings
+    ebay_markdowns.py Marketing API sale events (markdowns): the REST calls,
+                     the bodies, and which Seller Hub sales are read-only
+    sale_events.py   the Sales mirror: pull from eBay, create / add / remove /
+                     edit / end, one sale per listing
     ebay_offers.py   Negotiation API: offers to the buyers already watching
     notifications.py the "your item sold" alerts behind the bell
     ebay_messages.py, messages.py buyer messages and the unified inbox
@@ -1813,7 +1831,12 @@ published offer — that would end a live listing.
 
 A re-sync only refreshes the fields eBay owns — price, quantity, counters,
 photos — plus anything still blank locally, so a background sync never reverts
-an in-app edit. Sold and ended listings are reconciled on the same pass. One run
+an in-app edit. **A sale never becomes the asking price:** during an eBay sale
+GetItem reports the discounted figure as the current price, so the import reads
+`SellingStatus/PromotionalSaleDetails/OriginalPrice` whenever eBay sends it —
+otherwise every sale would overwrite the price with the sale price, be stamped
+as a markdown the seller made, and stay that way when the sale ended
+(`test_a_markdown_never_becomes_the_asking_price.py`). Sold and ended listings are reconciled on the same pass. One run
 imports up to `IMPORT_LIMIT` (300) listings; a larger store fills in across
 repeated syncs. Detail fetches run a few at a time (`EBAY_SYNC_WORKERS`,
 default 6) so a big store doesn't outlive the request.
@@ -2151,6 +2174,148 @@ limit), and undone in one tap from **Restore N dismissed** on the section
 header — which stays on screen even when every suggestion has been dismissed,
 so the X is never a one-way door.
 
+## The Manage tab's selection bar
+
+Ticking a live listing on Manage brings up the selection bar. With eight
+things a tick can lead to, they cannot all be buttons — a bar of eight wraps
+into a wall on a phone — so the bar does what Shopify's admin and the
+crosslisting tools do: the actions a seller reaches for every week are on it,
+the rest are under **More**, and the one with no way back sits last under a
+divider, in red.
+
+| On the bar | Under More |
+|---|---|
+| **End & relist** (primary) · **Lower prices…** · **Apply discount…** · **Add to sale…** and **Crosspost to Etsy** (from small screens up; under More on a phone) | **Remove from sale** · **Move to store category…** · **Send offers to watchers…** · **End listings** |
+
+On a phone the bar is a two-column grid of what is left plus More, and More
+spans the row rather than sitting alone in half of it. Only one action's
+panel (an amount, a shelf) is open under the bar at a time, nothing new can
+start while a run is going, and *Select all* reads **Select all N shown**
+while a filter or the search box is on — it reaches what is on screen and
+nothing the seller filtered out. The bar is `frontend/src/components/LiveBulkBar.jsx`;
+every action goes through one `runJob` in `ListingsView.jsx` (POST, poll
+`/api/bulk/status/{id}`, toast the per-listing report, clear the ticks,
+reload), and the report's wording is `lib/bulkActions.js`.
+
+Every action is a background job over exactly the ids ticked — read with
+ownership enforced inside the read (`_ticked_records`), never widened to the
+store, one run of each kind per account at a time (a second press joins the
+first) — and each says in the restart message what it was doing if the
+server went away mid-run (`jobstore.interrupted_message`).
+
+- **End listings** (`POST /api/ebay/end-listings`) is the card's own End over
+  the ticks: each listing is settled by `_settle_ending`, so a listing made
+  here is kept under Inactive for the grace period, a mirror the store sync
+  made is removed at once, and one that turns out to have **already sold** is
+  archived as a sale and reported as a skip, not a failure. The confirm says
+  which of those will happen to how many cards before anything is sent.
+- **Move to store category…** (`POST /api/ebay/move-store-category`) puts the
+  ticks on one shelf of the seller's eBay Store. The shelf must be one the
+  account's Store has (the same cached `GetStore` the editor's picker reads),
+  and it is never "the top level": a revise only sends `<Storefront>` for a
+  real shelf — an empty `StoreCategoryID` is not "leave it". Each revise is
+  built like a price drop's (`_move_one` mirrors `_lower_one`): the shelf
+  alone is marked, other pending edits stay marked for the save that is about
+  them, a refusal puts the record back, and photos eBay will not take become
+  the seller's errand rather than a failure. `store_category_id` is in
+  `ebay_trading.REVISABLE_FIELDS` now — the revise always carried the shelf,
+  but every move made in the editor was still reported as an edit "that
+  stayed here" and re-marked to be sent again.
+- **Send offers to watchers…** (`POST /api/ebay/send-offers-ticked`) is the
+  dashboard's Send offers over the ticks: the same job
+  (`_run_send_offers_job`), the same 5–50% bounds, the same
+  one-per-account slot — a dashboard run and a Manage run at once would offer
+  the same watchers twice. That job's re-read is ownership-checked now
+  (`_owned_by`), because its ids can come from a request.
+
+## Sales: eBay sale events, both ways
+
+**Manage** has two halves — `Listings | Sales` — and Sales is the seller's eBay
+sales: a percentage off a set of listings for a few days, which eBay runs, shows
+to every buyer with the old price struck through, and ends on its own. Seller
+Hub calls these sale events (Discounts Manager, once Markdown Manager); the API
+calls them item price markdowns. "Sale event" in the code, because
+`lib/sales.js` already means *sold items*.
+
+**Simpler than Seller Hub, on purpose.** A sale here is four answers — a name,
+how much off, when it starts, how long it runs — over a list of listings. No
+coupons, no codes, no tiers: the Etsy "Run a sale" shape, which is what a
+reseller means by a sale.
+
+**Both ways.**
+
+- *Made here.* **Apply discount…** on the selection bar is the quick one: pick
+  10–50% (or any whole number eBay allows) and 3, 7, 14 or 30 days, and the
+  ticks go on sale under a name that says what it is ("20% off · 7 days · Nov
+  24"). **Add to sale…** puts the ticks in a sale that is already going;
+  **New sale** on the Sales half asks all four questions and can cover the
+  ticks, a store category or every active listing (a snapshot — listings made
+  later are not added). Every one of these is created **on eBay first** and
+  recorded from eBay's answer, so the app never shows a sale eBay does not have.
+- *Made in Seller Hub.* `services/sale_events.refresh` pulls every markdown on
+  the account — when Manage opens (at most every ten minutes), on **Sync with
+  eBay**, and on **Refresh** — and mirrors it into `sale_events`. A sale deleted
+  in Seller Hub leaves; one made here stays *Made here*; one recorded under a
+  different eBay account is not shown to the account now connected. A pull
+  that could not reach eBay keeps what was known and says so, never an empty
+  list that reads as "no sales".
+
+**Read-only when it does not fit.** A Seller Hub sale with different discounts
+for different listings, an amount off rather than a percentage, or listings
+picked by rule is shown with *Managed in Seller Hub · the reason* and a link
+there — never flattened by an edit made here (`ebay_markdowns.classify`). Its
+listings still count for the rule below (a rule-based sale's are read with
+eBay's `get_listing_set`).
+
+**Rules every write keeps** (`services/sale_events.py`):
+
+- **One sale per listing.** A ticked listing already in a sale is skipped with
+  the sale's name — unless the seller turns on *Move the N already in another
+  sale*, which takes it out of the old one first (and puts it back if the new
+  sale then cannot be made). A read-only sale's listings are never moved.
+  Auctions are skipped: eBay's sales are for Buy It Now.
+- **Re-read before every PUT.** eBay's update replaces the whole promotion, so
+  each write fetches the sale a moment before and changes only what was asked
+  (`ebay_markdowns.patch_body` keeps every field it does not understand). A
+  listing added in Seller Hub since the last pull is never dropped.
+- **eBay's eligibility is eBay's.** A listing eBay refuses is taken out of the
+  request and reported with eBay's own sentence, and the rest go ahead.
+- **One write per account at a time** (a second is told to wait, 409), so two
+  tabs cannot race each other's PUTs.
+- **A running sale's discount is fixed** — eBay's rule, said before asking.
+  Its name and end date can still change. *End sale* pulls a running sale's
+  end in to now; a sale that has not started is cancelled outright.
+- **Remove from sale** does one re-read and one PUT per sale, and a sale left
+  with nothing in it is ended.
+
+**On the cards.** A listing in a running sale leads with what buyers pay, its
+own price struck through, and a chip — *−20% · ends in 3d*; one still to come
+says *starts Dec 1*. Worked out in the browser by joining each sale's item ids
+to the cards (`lib/saleEvents.saleIndex`), never written onto the listing, so a
+sale starting or ending never rewrites — or reorders — a card. The Filters
+panel gains *eBay sale: On sale / Not on sale*, and a sale card's **View
+listings** opens the grid filtered to that sale, where Remove from sale and
+the rest of the bar apply.
+
+**Price changes and sales.** eBay takes a listing out of its sale when its
+price is revised (and a sale set to block revisions refuses the revise —
+`ebay_errors.sale_locked`). So **Lower prices** skips listings in a running or
+scheduled sale, naming the sale; **Quick edit** warns under the price box
+before a change is sent (the seller may mean it) and re-reads the sales after.
+
+**Limits are eBay's, and unverified here.** eBay's developer pages were not
+reachable when this was built, so every bound is a named constant in
+`services/ebay_markdowns.py` marked VERIFY — 5–80% in whole numbers, at most 45
+days, at most 500 listings per sale, a 90-character name — and the server
+reports them to the browser (`limits`), so correcting one is a change in one
+place. To confirm against a real account before relying on them: the exact
+`item_price_markdown` body (whether `promotionImageUrl` is required), whether
+a listing whose price changed in the last 14 days is refused, whether an eBay
+Store subscription is required, whether a running sale can be ended by moving
+its end date or only deleted, how eBay rounds the sale price, and the Seller
+Hub deep link. Sellers who connected eBay before `sell.marketing` was requested
+are told to reconnect once.
+
 ## What a sale actually made
 
 `price` on a listing is the **asking** price and keeps that meaning after the
@@ -2359,12 +2524,42 @@ have I not priced*, *everything Nike under $20*, *the drafts still missing
 photos* — and a seller who worked one of those out by scrolling had to work it
 out again the next morning.
 
-**Filters**, on the Sell screen beside the tabs, stack on top of whichever tab
+**Filters**, on the Manage tab under the tabs, stack on top of whichever tab
 is open: format, condition, price range, brand, category, photos, how recently
 it was listed, and *still needs work*. Every predicate lives in one module
 (`frontend/src/lib/listingFilters.js`) because the grid, the count beside it
 and the empty state below all have to agree about what is showing — three
 components each doing their own filtering is three chances to disagree.
+
+**Category quick filters.** Beside the Filters button sit two pickers —
+**Store category** (the shelves in the seller's own eBay Store, in the order
+they arranged them, from `GET /api/ebay/store-categories`, plus *No store
+category* for what eBay files at the top level) and **eBay category** (the
+leaf categories the listings are actually filed under, counted off the
+listings themselves — there is no "categories I use" endpoint and none is
+needed). Each is a ticked list with a count beside every choice and a search
+box once it is long. The counts are taken *before* the filters, so ticking
+one shelf does not zero every other choice out of the list. Picks are stored
+by **id**, not name, so a shelf renamed in Seller Hub stays the same pick; a
+shelf the store no longer has still shows (in italics, under the name the
+listing remembers) because a listing still points at it. On a phone the
+pickers are sections of the Filters panel, which has the width to read them;
+from small screens up they are popovers on the filter row, which wraps rather
+than scrolls so a popover is never clipped by its own row. The old free-text
+box stays as *Category name contains*, for a word that spans both systems.
+The logic is `frontend/src/lib/categoryOptions.js`.
+
+**Buyer interest** — *Has watchers* (the shortlist a Send offers reaches) and
+*Offers or bids* (money on the table: the same test as the green glow on a
+card). A listing eBay could not be asked about is neither watched nor
+unwatched, so it fails the filter, per the rule below.
+
+**"Listed" means listed.** The *Listed within* windows, the stale-listing
+clock and the date sorts all read `listedAt` (`lib/listingsView.js`): eBay's
+own start time, then this app's publish time, then the record's birth — the
+order `services/duplicates._listed_at` uses. They used to read `created_at`,
+which on an imported listing is the night of the first store sync, so a store
+imported yesterday filtered as listed yesterday, all of it.
 
 **A filter narrows; it never invents.** Each one is asked of a fact the record
 carries, and a listing the fact is missing from *fails* it rather than passing
@@ -2387,12 +2582,35 @@ filtered tab says it is empty *because of the filters* and offers **Clear
 filters**, rather than showing "No listings yet" and a button to create a first
 listing to a seller who has three hundred.
 
+**Sort.** The grid's order is a menu on the filter row — *Sort: Recommended ▾*
+(an icon on a phone). **Recommended** is the order the grid always had: a
+listing a buyer has bid on or made an offer on first, then everything still in
+play, then the archive, most recently changed first within each. The others
+are *Newest / Oldest listed*, *Price high→low / low→high*, *Title A–Z / Z–A*,
+*Most watchers*, *Most views*, *Ending soonest* (auctions) and *Recently
+changed*. Two rules hold for all of them (`frontend/src/lib/listingSort.js`):
+a listing that cannot answer the question — an unpriced draft, a listing eBay
+has reported no watchers for — goes **last in both directions**, so "lowest
+price" never opens on a row of blanks; and ties fall back to the default's own
+tie-break, so the grid does not shuffle between renders. Under a date sort
+each card says the date it is sorted by ("Listed Mar 12"), which it does not
+otherwise show; price, title and traffic are already on the card. Unlike the
+filters, the sort **is** remembered on the device (`localStorage`,
+`listings-sort`), like the grid/list toggle: a sort hides nothing and the
+button always names the order that is on, so a remembered one can never look
+like missing listings.
+
 **Save view** keeps the cut under a name. A saved view is the tab *and* the
 filters — restoring only the filters would land the seller on whichever tab
-they happened to be on, which is a different list under the same name — and
-the pill for the view currently on screen reads as pressed. Saving again under
-an existing name updates that view in place rather than making a second pill
-with the same name.
+they happened to be on, which is a different list under the same name — and,
+when it was saved in anything but the default order, the **sort** too. The
+views sit with the lifecycle tabs, after a divider (Shopify's admin keeps its
+saved views in the same place): a view is a list to pick, which is what that
+row is for, and the filter row is left for the controls that make a cut. The
+one currently on screen reads as pressed — in its own order only, when it has
+one. *Save view* is offered beside the filter chips, once there is a question
+to name. Saving again under an existing name updates that view in place rather
+than making a second pill with the same name.
 
 **A view is a question, not a snapshot.** It stores the filters and never the
 listings that matched them, so "Needs photos" empties itself as the photos get
@@ -2406,7 +2624,8 @@ Settings can never overwrite a seller's views). Unlike the grid/list toggle,
 which is a per-device viewing preference in `localStorage`, a named list is
 work — and work that only exists on the laptop it was made on is work done
 twice. The server bounds what it stores (twenty views, a 40-character name, a
-flat filter object) but deliberately does *not* police the filter vocabulary:
+flat filter object, a 24-character sort id) but deliberately does *not* police
+the filter or sort vocabulary:
 that is the frontend's, validated on the way in and again on the way out, and
 a second copy of the same list in Python is a copy that goes out of step the
 first time a filter is added.
