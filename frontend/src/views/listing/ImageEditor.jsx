@@ -402,8 +402,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     clearOverlay();
     setTool("brush");
     commitOperation(tmp);
-    toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
-  }, [cropRect, clearOverlay, commitOperation, toast]);
+  }, [cropRect, clearOverlay, commitOperation]);
 
   // Rotate 90° clockwise. On the canvas, not through /api/rotate-image: the
   // studio's contract is that nothing is written until Save, and a server
