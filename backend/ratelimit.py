@@ -49,6 +49,17 @@ TAXONOMY_MAX_CALLS = 300
 # the budget belongs to whoever is signed in. A crosspost review of a whole
 # store makes one per listing, which is what the size allows for.
 ETSY_SUGGEST_MAX_CALLS = 120
+# Saving a cutout the seller's own device made (/api/cutout/apply) costs
+# Pillow only -- no third party, no bill -- but each one is a decode, a
+# composite and an encode on the one shared CPU, and a device queue works
+# through a whole bulk pile one photo after another. Per seller, and set to
+# clear a 250-photo batch with room for retries inside one window while still
+# stopping a runaway client long before it matters.
+CUTOUT_APPLY_MAX_CALLS = 600
+# The Photoroom fallback a device asks for when it cannot cut a photo itself
+# (/api/cutout/cloud). A paid call, per seller, on top of the token charge
+# and the monthly count -- the same ceiling as the studio's.
+CUTOUT_CLOUD_MAX_CALLS = 120
 # Cap the number of tracked keys so a spray across many IPs can't grow the
 # dict without bound; cold entries are swept when the cap is reached, and if
 # none are cold the coldest are dropped anyway (see check).

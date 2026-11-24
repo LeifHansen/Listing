@@ -1072,7 +1072,18 @@ def _screen_for(sources: list[Path], should_stop=None) -> tuple[
 
 # --- the photo studio --------------------------------------------------------
 
-def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
+def cloud_cut(rgb: Image.Image,
+              background: tuple[int, int, int] = WHITE) -> Cut:
+    """Photoroom's cutout of an ordinary item, or its own rectangular edge
+    when Photoroom found nothing in a flat rectangular thing, as a Cut.
+    Raises cutout_api.CutoutApiError with the seller's sentence otherwise.
+    (A picture goes through art_cut instead, never this.)"""
+    return _cutout_or_border_cut(rgb, background)
+
+
+def remove_background_white(img: Image.Image, art: bool = False,
+                            background: tuple[int, int, int] = WHITE
+                            ) -> tuple[Image.Image, str]:
     """The studio's "Remove background": the item on white, and the name of
     the engine that did it. Raises cutout_api.CutoutApiError — a ValueError,
     so the route answers 422 with the sentence — when Photoroom could not
@@ -1082,8 +1093,20 @@ def remove_background_white(img: Image.Image) -> tuple[Image.Image, str]:
     The rectangle rescue is the same as the photo pass's, and the studio is
     where it matters most: this is the button a seller presses AFTER a batch
     left a photo as shot, so a second refusal is the end of the road for that
-    listing."""
-    return _cutout_or_border(_flatten(img))
+    listing.
+
+    `art` is what the photo pass recorded about this photo (photo_flags): a
+    PICTURE. The studio used to cut every photo the same way, so a painting
+    the batch had carefully spared was lifted out of itself the moment the
+    seller pressed this button on it. A picture takes the art path here too,
+    and a picture whose edge cannot be found is said, not cut."""
+    rgb = _flatten(img)
+    if art:
+        cut = art_cut(rgb, background=background)
+        if cut is None:
+            raise cutout_api.CutoutApiError(ART_NO_BORDER_KEPT_AS_SHOT)
+        return cut.image, cut.engine
+    return _cutout_or_border(rgb, background)
 
 
 # --- copies for the AI ---------------------------------------------------------

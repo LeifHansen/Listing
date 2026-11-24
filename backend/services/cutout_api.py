@@ -92,6 +92,9 @@ SEGMENT_URL = "https://sdk.photoroom.com/v1/segment"
 # The operator-facing detail goes to the log instead.
 UNAVAILABLE = ("Background removal is unavailable right now — the photo was "
                "kept as shot. Try again later.")
+# ...and when the app's month of Photoroom is spent (PHOTOROOM_MONTHLY_BUDGET_USD).
+BUDGET_SPENT = ("Cloud background removal is paused until next month — the "
+                "photo was kept as shot.")
 
 
 class CutoutApiError(ValueError):
@@ -178,6 +181,85 @@ def health() -> dict:
             "failures_since_success": streak,
             "last_failure": failure,
             "last_success_at": success}
+
+
+# --- what the app spends -----------------------------------------------------
+#
+# Every Photoroom call is counted, app-wide, in db.cutout_usage under
+# ("photoroom", "server") -- the old app builds' uploads, the studio, the
+# cloud fallback a device asks for, and the call that only LOCATES a
+# picture's edge alike, because Photoroom bills them all the same. The count
+# is reserved before the call and given back when Photoroom answered anything
+# but a 200 (it charges only for successful calls), and with
+# PHOTOROOM_MONTHLY_BUDGET_USD set it is also the cap: a call that would pass
+# the month's budget is not made.
+#
+# Imported lazily and failing open: the `cutout` CI job runs this module on
+# Pillow alone, with no database stack, and a counter that cannot be reached
+# must not stop a seller's cutout (the per-seller count in bg_removal is the
+# backstop that still holds then, as it does for the token charge).
+
+_PROVIDER = "photoroom"
+_PLATFORM = "server"
+
+
+def _period() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m")
+
+
+def _count(photos: int, cap: Optional[int] = None) -> Optional[dict]:
+    try:
+        from .. import db
+    except Exception:  # noqa: BLE001 - no database stack here
+        return None
+    return db.cutout_usage_add(_period(), _PROVIDER, _PLATFORM, photos, cap=cap)
+
+
+def _reserve_one() -> bool:
+    """Count one call against the month, or raise PhotoroomError when the
+    budget is spent. True when something was counted (so must be given back
+    on failure)."""
+    cap = config.photoroom_budget_photos()
+    res = _count(1, cap=cap)
+    if res is None:
+        return False
+    if not res.get("ok", True):
+        _failed("budget_spent",
+                "PHOTOROOM_MONTHLY_BUDGET_USD is spent for this month "
+                f"({res.get('used', 0)} photos at "
+                f"${config.PHOTOROOM_COST_PER_IMAGE:.3f}) — cloud cutouts are "
+                "paused until the month turns.")
+        raise PhotoroomError(BUDGET_SPENT)
+    return True
+
+
+def budget_exhausted() -> bool:
+    """Whether the month's Photoroom budget is spent. False with no budget,
+    no database, or a count that cannot be read."""
+    cap = config.photoroom_budget_photos()
+    if cap is None:
+        return False
+    try:
+        from .. import db
+        rows = db.cutout_usage(_period())
+    except Exception:  # noqa: BLE001
+        return False
+    if not rows:
+        return cap <= 0
+    used = sum(r["photos"] for r in rows
+               if r["provider"] == _PROVIDER and r["platform"] == _PLATFORM)
+    return used >= cap
+
+
+# At most PHOTOROOM_MAX_CONCURRENCY calls in flight app-wide. Taken around
+# each ATTEMPT, not around the retries: a call waiting out a back-off holds no
+# slot, so one rate-limited photo cannot starve every other caller.
+_slots = threading.BoundedSemaphore(config.PHOTOROOM_MAX_CONCURRENCY)
+
+
+def _in_slot(send: Callable):
+    with _slots:
+        return send()
 
 
 # --- HTTP plumbing ----------------------------------------------------------
@@ -325,8 +407,17 @@ def photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     payload = jpeg_payload(img)
     sent = Image.open(BytesIO(payload))
-    resp = _send_with_retries(lambda: _segment(payload))
+    counted = _reserve_one()
+    try:
+        resp = _send_with_retries(lambda: _in_slot(lambda: _segment(payload)))
+    except BaseException:
+        if counted:
+            _count(-1)
+        raise
     status = resp.status_code
+    if counted and status != 200:
+        # Photoroom bills successful calls only.
+        _count(-1)
     said = _short_reason(resp) if status != 200 else ""
     if status in (401, 403):
         log.error("photoroom: HTTP %d — the PHOTOROOM_API_KEY was refused "

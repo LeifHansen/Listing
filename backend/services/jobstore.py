@@ -73,6 +73,10 @@ MIRROR_FIELDS = (
     # the mirror is the only place they live between the pause and the answer
     # — and a deploy in that window is the ordinary case, not the rare one.
     "_session_id", "_item_notes",
+    # "device" when the seller's own phone or browser takes the backgrounds
+    # off this batch's photos: a resume, or a split of a paused upload into a
+    # batch, has to keep asking for that rather than for nothing.
+    "_cutout",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",

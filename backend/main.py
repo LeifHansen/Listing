@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import functools
 import hashlib
 import json
 import logging
@@ -70,6 +71,7 @@ from .services.experts.base import NO_MATCH, Reference
 from .services.experts.art import comps as art_comps
 from .services.experts.art import roster as art_roster
 from .services import crosspost, inventory_mirror
+from .services import cutout_api, cutouts
 from .services import etsy as etsy_service
 from .services import deletion_queue
 from .services import policy_terms as ebay_policy_terms
@@ -773,6 +775,10 @@ def _reclaim_loop() -> None:
             # Not about space, but it is the only recurring pass there is and
             # a refund the seller is owed should not wait for a redeploy.
             _settle_owed_refunds()
+            # Device-queue rows whose listing is gone (a purged staging pile,
+            # a session never saved). Invisible to the queue already; this
+            # only keeps the table from growing with them.
+            db.cutout_prune_orphans()
         except Exception as exc:  # noqa: BLE001 - housekeeping never dies
             log.warning("reclaim loop: %s", exc)
         time.sleep(delay)
@@ -3592,6 +3598,11 @@ _PREF_FIELDS = {
     # How the AI prices drafts and comp suggestions: "quick_flip" (low end,
     # sell fast), "median" (typical market), "long_sale" (high end, patient).
     "pricing_strategy": (str, None, None),
+    # The solid colour a cutout is put on, "#rrggbb"; "" (or unset) is white,
+    # which is what eBay and every marketplace expect. Honoured by every path
+    # that composites -- Photoroom, a picture's border, and a mask made on the
+    # seller's device -- so one pile never comes back in two colours.
+    "cutout_background": (str, None, None),
     # Promote every newly published listing at eBay's recommended ad rate.
     # OFF unless the seller explicitly saved it on: Promoted Listings Standard
     # takes a percentage of the sale, and neither silence nor an unreadable
@@ -3667,6 +3678,11 @@ def save_prefs(request: Request, payload: dict) -> dict:
             value = str(raw or "").strip()[:40]
             if key == "pricing_strategy" and value not in _PRICING_STRATEGIES:
                 continue  # unknown strategy — ignore rather than store garbage
+            if key == "cutout_background":
+                colour = cutouts.parse_colour(value) if value else None
+                if value and colour is None:
+                    continue  # not "#rrggbb" — ignore rather than store garbage
+                value = cutouts.colour_hex(colour) if colour else ""
             clean[key] = value
             continue
         try:
@@ -5309,6 +5325,50 @@ def _refund_cutouts(spent: Optional[dict], held,
         held.release(photos)
 
 
+def _cutout_colour(uid: Optional[str], prefs: Optional[dict] = None
+                   ) -> tuple[int, int, int]:
+    """The colour this seller's cutouts go on: their saved
+    `cutout_background`, or white. Never raises -- a colour is never worth a
+    photo."""
+    try:
+        if prefs is None:
+            prefs = _load_prefs(uid)
+        return cutouts.parse_colour(prefs.get("cutout_background")) or images.WHITE
+    except Exception:  # noqa: BLE001
+        return images.WHITE
+
+
+def _wants_device(cutout: str, strip_bg: bool) -> bool:
+    """Whether an upload asked for its backgrounds to be taken off ON THE
+    SELLER'S DEVICE. That request comes as remove_bg=false plus
+    cutout=device, deliberately: every consent, token and monthly-count gate
+    reads remove_bg, and a device cutout passes none of them because it
+    costs nothing and sends nothing anywhere. A server rolled back to before
+    this existed reads the same request as "no cutout" -- never as a paid
+    one."""
+    return not strip_bg and (cutout or "").strip().lower() == "device"
+
+
+def _cutout_fields(record: Optional[dict]) -> dict:
+    """The job fields that say the device takes the backgrounds off, copied
+    from `record` -- so every re-registration of a batch (a resume, a split)
+    keeps asking for what the seller asked for."""
+    if record and record.get("_cutout") == "device":
+        return {"_cutout": "device", "cutout": "device"}
+    return {}
+
+
+def _record_pending(session_id: str, uid: Optional[str]):
+    """An optimize on_result that writes each photo the device is to cut
+    into the queue (db.cutout_photos) as soon as the pass finishes it."""
+    def _on_result(dst: Path, result: dict) -> None:
+        kind = result.get("bg_pending")
+        if kind:
+            db.cutout_mark([{"session_id": session_id, "name": dst.name,
+                             "kind": kind}], uid)
+    return _on_result
+
+
 @app.post("/api/upload")
 async def upload(
     request: Request,
@@ -5316,8 +5376,15 @@ async def upload(
     remove_bg: str = Form("false"),
     pipeline: str = Form("false"),
     notes: str = Form(""),
+    cutout: str = Form(""),
 ) -> dict:
     """Accept images, optimize them, and return a session id.
+
+    cutout: "device" (with remove_bg false) asks for the backgrounds to come
+    off on the seller's own phone or browser: free, nothing sent anywhere, no
+    switch to turn on. The photo pass keeps each photo as shot and writes it
+    into the device queue (bg_pending in optimize_results); the app finishes
+    them through /api/cutout/apply. See _wants_device.
 
     remove_bg: when "true", each photo's background is removed and replaced
     with a solid white canvas before the usual optimization pass.
@@ -5343,6 +5410,7 @@ async def upload(
     if run_pipeline and not config.vision_ready():
         raise HTTPException(400, NO_VISION_BACKEND)
     strip_bg = _truthy(remove_bg)
+    device = _wants_device(cutout, strip_bg)
     # Uploading + optimizing stays free; background removal is switched on
     # per seller and metered per photo. Cleared before any disk work so a
     # seller who hasn't switched it on, is out of this month's allowance, or
@@ -5411,11 +5479,15 @@ async def upload(
             # brings the answer back has only the job id to go on -- and the
             # answer has to be saved with the session, not the job.
             "_session_id": session_id,
+            # Whether the device is to cut these photos, carried so a split
+            # of this upload into a batch keeps asking for the same thing.
+            **({"_cutout": "device", "cutout": "device"} if device else {}),
         }, uid=uid)
         threading.Thread(
             target=_run_pipeline_job,
             args=(job_id, session_id, uid, strip_bg, spent, identify_spent,
                   held),
+            kwargs={"device": device},
             daemon=True,
         ).start()
         log.info("pipeline job %s: started (session=%s, photos=%d)",
@@ -5424,8 +5496,12 @@ async def upload(
 
     # Pillow work is CPU-bound and the R2 push is blocking I/O; run both off
     # the event loop so photo processing doesn't stall every other request.
-    opt_results = await run_in_threadpool(
-        images.optimize_all, orig, storage.optimized_dir(session_id), strip_bg)
+    uid = await run_in_threadpool(deps.uid, request)
+    colour = await run_in_threadpool(_cutout_colour, uid)
+    opt_results = await run_in_threadpool(functools.partial(
+        images.optimize_all, orig, storage.optimized_dir(session_id),
+        strip_bg or device, device=device, background=colour,
+        on_result=_record_pending(session_id, uid) if device else None))
     optimized = await run_in_threadpool(storage.list_optimized, session_id)
     if not optimized:
         await run_in_threadpool(_refund_cutouts, spent, held)
@@ -5462,6 +5538,7 @@ async def upload_more(
     request: Request,
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
+    cutout: str = Form(""),
 ) -> dict:
     """Add more photos to an existing listing. Saves the files, then optimizes
     each into the session under non-colliding names as a JOB the client polls;
@@ -5504,6 +5581,7 @@ async def upload_more(
     if len(existing) + len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(400, f"That would exceed {MAX_UPLOAD_FILES} photos on this listing.")
     strip_bg = _truthy(remove_bg)
+    device = _wants_device(cutout, strip_bg)
     # Keep the spend record: every failure path below has to give the tokens
     # back, exactly as /api/upload does ("only pay for AI that worked").
     held, spent = (await run_in_threadpool(_start_cutouts, request, len(files))
@@ -5545,6 +5623,7 @@ async def upload_more(
     threading.Thread(
         target=_run_upload_more_job,
         args=(job_id, session_id, staged, strip_bg, spent, held),
+        kwargs={"device": device, "uid": uid},
         daemon=True,
     ).start()
     return {"job_id": job_id, "running": True, "total": len(staged)}
@@ -5552,7 +5631,9 @@ async def upload_more(
 
 def _run_upload_more_job(job_id: str, session_id: str,
                          staged: list[tuple[int, Path]], strip_bg: bool,
-                         spent: Optional[dict], held=None) -> None:
+                         spent: Optional[dict], held=None,
+                         device: bool = False,
+                         uid: Optional[str] = None) -> None:
     """Background worker for "Add photos": the optimize/cutout pass with
     live per-photo progress, then the R2 push. The result is what the
     synchronous route used to answer with."""
@@ -5562,9 +5643,11 @@ def _run_upload_more_job(job_id: str, session_id: str,
                   total_photos=len(staged), beat=time.time())
         results = images.optimize_batch(
             [(src, opt_dir / f"img_{idx:03d}.jpg") for idx, src in staged],
-            strip_bg,
+            strip_bg or device,
             progress=lambda done, total: _bulk_set(
-                job_id, current=done, total_photos=total, beat=time.time()))
+                job_id, current=done, total_photos=total, beat=time.time()),
+            device=device, background=_cutout_colour(uid),
+            on_result=_record_pending(session_id, uid) if device else None)
     except OSError as exc:
         _refund_cutouts(spent, held)
         if getattr(exc, "errno", None) == errno.ENOSPC:
@@ -5616,9 +5699,11 @@ def _run_upload_more_job(job_id: str, session_id: str,
         "added": new_names, "optimized": storage.list_optimized(session_id),
         "optimize_results": [
             {"file": f"img_{idx:03d}.jpg", "bg_error": res.get("bg_error"),
-             "rotated": res.get("rotated", 0)}
+             "rotated": res.get("rotated", 0),
+             **({"bg_pending": res["bg_pending"]} if res.get("bg_pending") else {})}
             for (idx, _src), res in zip(staged, results)
-            if not res.get("error") and (res.get("bg_error") or res.get("rotated"))]})
+            if not res.get("error") and (res.get("bg_error") or res.get("rotated")
+                                         or res.get("bg_pending"))]})
 
 
 @app.post("/api/edit-image")
@@ -5687,6 +5772,10 @@ async def edit_image(
                 502, "Saved locally, but couldn’t update the stored copy eBay "
                      "uses. Try saving again in a moment.")
     await run_in_threadpool(db.touch_listing, session_id)  # bump updated_at so list thumbnails refetch
+    # The seller's own edit wins: a cutout still waiting for their device
+    # must not land on top of it.
+    await run_in_threadpool(db.cutout_retire, session_id, name,
+                            "edited in the studio")
     log.info("edit-image saved: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
@@ -5786,6 +5875,9 @@ async def image_restore_original(
                 502, "Restored locally, but couldn't update the stored copy "
                      "eBay uses. Try again in a moment.")
     await run_in_threadpool(db.touch_listing, session_id)
+    # "As shot" is what the seller asked for -- not a cutout arriving later.
+    await run_in_threadpool(db.cutout_retire, session_id, name,
+                            "restored to the photo as shot")
     log.info("restore-original: session=%s name=%s", session_id, name)
     return {"ok": True, "name": name}
 
@@ -5833,7 +5925,9 @@ def _studio_load(request: Request, session_id: str, name: str,
     path = _photo_path(session_id, name, create=False)
     if path is None or not _ensure_local(session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
-    return Image.open(path)
+    # The photo as shot behind a cutout, not the cutout: cutting a composite
+    # on white again eats white-on-white edges and the contact shadow.
+    return Image.open(images.as_shot(path))
 
 
 def _data_url(img) -> str:
@@ -5862,6 +5956,12 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     def _rotate() -> None:
         from PIL import Image
         storage.snapshot_image(session_id, name)  # rotations version too
+        # What sits behind a cutout -- the photo as shot and its matte --
+        # turns with it while it still speaks for it. Left as it was, the
+        # next cut would segment the composite (sideways) and a transparent
+        # export would come out unrotated.
+        behind = [p for p in (images.as_shot(path), images.current_mask(path))
+                  if p is not None and p != path]
         with Image.open(path) as img:
             rotated = img.convert("RGB").transpose(Image.Transpose.ROTATE_270)
         tmp = path.with_name(path.name + ".tmp")
@@ -5873,6 +5973,21 @@ async def rotate_image(payload: dict, request: Request) -> dict:
         # turn upright.
         rotated.save(tmp, "JPEG", quality=95)
         os.replace(tmp, path)
+        # After the working copy, so each stays at least as new as it.
+        for kept in behind:
+            try:
+                with Image.open(kept) as k:
+                    turned = k.transpose(Image.Transpose.ROTATE_270)
+                    turned.load()
+                ktmp = kept.with_name(f".{kept.name}.{threading.get_ident():x}.tmp")
+                if kept.suffix == ".png":
+                    turned.save(ktmp, "PNG", optimize=True)
+                else:
+                    turned.convert("RGB").save(ktmp, "JPEG", quality=95)
+                os.replace(ktmp, kept)
+            except Exception as exc:  # noqa: BLE001 - a cache never costs the turn
+                log.info("rotate: couldn't turn %s (%s)", kept.name, exc)
+                kept.unlink(missing_ok=True)
 
     try:
         await run_in_threadpool(_rotate)
@@ -5942,9 +6057,18 @@ async def image_remove_bg(
         return _studio_load(request, session_id, name, data)
 
     img = await run_in_threadpool(_load)
+    # What the photo pass recorded about it: a picture is cut by its edge,
+    # here as in the batch. Only knowable for a session photo.
+    picture = False
+    if session_id and name:
+        known = _photo_path(session_id.strip(), name.strip(), create=False)
+        picture = bool(known and images.photo_flags(known)["art"])
+    colour = await run_in_threadpool(_cutout_colour,
+                                     await run_in_threadpool(deps.uid, request))
 
     def _run() -> dict:
-        out, engine = images.remove_background_white(img)
+        out, engine = images.remove_background_white(img, art=picture,
+                                                     background=colour)
         return {"ok": True, "image": _data_url(out), "engine": engine}
 
     held, spent = await run_in_threadpool(_start_cutouts, request, 1)
@@ -6003,6 +6127,400 @@ async def image_file(session_id: str, name: str, request: Request,
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
     return Response(data, media_type="image/jpeg", headers={
         "X-Source-Sha256": hashlib.sha256(data).hexdigest()})
+
+
+# ---------------------------------------------------------------------------
+# Background removal on the seller's own device.
+#
+# The phone or browser makes the MATTE (Apple Vision, ML Kit, a model in the
+# page) from the bytes /api/image/file?which=source handed it; the server
+# turns it into the listing photo with the compositor every cutout uses
+# (services/cutouts). Free: no token, no monthly count, nothing sent to a
+# third party, so no switch to turn on. Photoroom stays as the fallback, at
+# /api/cutout/cloud, behind every gate it has always had.
+# ---------------------------------------------------------------------------
+
+# The engines a matte may say it came from. Recorded in the device queue and
+# counted per month (db.cutout_usage); anything else is recorded as "device".
+_DEVICE_PROVIDERS = {"apple-vision", "mlkit", "birefnet-web"}
+_DEVICE_PLATFORMS = {"ios", "android", "web"}
+# A matte is a greyscale PNG of a <=1600px photo -- a few hundred KB at most.
+# Anything near this is not a matte.
+_MAX_MASK_BYTES = 16 * 1024 * 1024
+
+_cutout_locks: dict[tuple[str, str], threading.Lock] = {}
+_cutout_locks_guard = threading.Lock()
+
+
+def _cutout_lock(session_id: str, name: str) -> threading.Lock:
+    """One lock per photo: two cutouts of the same photo (a double tap, a
+    queue racing the studio) must not interleave their writes, and a paid one
+    must not run twice at once."""
+    with _cutout_locks_guard:
+        if len(_cutout_locks) > 4096:
+            for k in [k for k, v in _cutout_locks.items() if not v.locked()]:
+                _cutout_locks.pop(k, None)
+        return _cutout_locks.setdefault((session_id, name), threading.Lock())
+
+
+def _forget_cutout(session_id: str, name: str) -> None:
+    """A deleted photo: nothing waits to cut it, nothing is recorded about it."""
+    db.cutout_forget(session_id, [name])
+    path = _photo_path(session_id, name)
+    if path is not None:
+        images.forget_flags(path)
+
+
+def _usage_period() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _device_engine(provider: str, platform: str) -> tuple[str, str]:
+    p = (provider or "").strip().lower()
+    q = (platform or "").strip().lower()
+    return (p if p in _DEVICE_PROVIDERS else "device",
+            q if q in _DEVICE_PLATFORMS else "")
+
+
+class _PhotoChanged(Exception):
+    """The photo is not the one the matte was made from."""
+
+
+_PHOTO_CHANGED = ("This photo changed since its cutout was made — it was kept "
+                  "as it is now. Try again.")
+
+
+def _cutout_kind(path: Path, row: Optional[dict], asked_art: bool) -> bool:
+    """Whether this photo is a PICTURE, whose matte may only locate its edge.
+    Any one of the three saying so is enough: what the screen recorded, the
+    queue's row, or the seller asking for the edge cut themselves."""
+    return bool(asked_art or images.photo_flags(path)["art"]
+                or (row or {}).get("kind") == "art")
+
+
+def _apply_cut(session_id: str, name: str, path: Path, source_sha: str,
+               make_cut) -> tuple[str, str]:
+    """Under the photo's lock: check the source is the one the cut was made
+    from, make the cut, snapshot the old working copy and write the new one
+    with its as-shot copy and matte beside it. Returns (sha of the new
+    working copy, engine). Raises _PhotoChanged, or whatever make_cut raises
+    (a ValueError carrying the seller's sentence)."""
+    with _cutout_lock(session_id, name):
+        src = cutouts.source_path(path)
+        source = src.read_bytes()
+        if source_sha and cutouts.sha256(source) != source_sha.strip().lower():
+            raise _PhotoChanged()
+        cut = make_cut(cutouts.decode(source))
+        storage.snapshot_image(session_id, name)
+        cutouts.write_cut(path, source, cut)
+        return cutouts.sha256(path.read_bytes()), cut.engine
+
+
+async def _publish_cut(session_id: str, name: str, path: Path) -> Optional[str]:
+    """The R2 re-push and the thumbnail version bump every saved cut needs.
+    A failed push is a 502, as for any edit: eBay is handed the R2 copy."""
+    if objstore.enabled():
+        url = await run_in_threadpool(
+            objstore.upload, path, objstore.key_for(session_id, name))
+        if not url:
+            log.warning("cutout: R2 re-push failed (session=%s name=%s)",
+                        session_id, name)
+            raise HTTPException(
+                502, "The background came off here but the copy we publish "
+                     "from didn't update. Try again in a moment.")
+    return await run_in_threadpool(db.touch_listing, session_id)
+
+
+@app.post("/api/cutout/apply")
+async def cutout_apply(
+    request: Request,
+    session_id: str = Form(""),
+    name: str = Form(""),
+    source_sha: str = Form(""),
+    provider: str = Form(""),
+    platform: str = Form(""),
+    origin: str = Form("studio"),
+    art: str = Form("false"),
+    mask: UploadFile = File(...),
+) -> dict:
+    """Save a cutout made on the seller's device: the matte comes in, the
+    listing photo is composited here on the seller's colour, and the photo
+    as shot and the matte are kept beside it.
+
+    `source_sha` is the X-Source-Sha256 the bytes the matte was computed from
+    came with; a photo that has changed since answers 409 and nothing is
+    written. `origin` "queue" is the background queue working through an
+    upload: it is refused once the listing has gone live (a live listing's
+    photos change only when the seller says so, in the studio), and its row
+    in the queue is moved to done or failed. The studio's own saves count
+    the cut where it was previewed (/api/cutout/compose)."""
+    session_id, name = (session_id or "").strip(), (name or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "Lost track of which photo this is — reopen it.")
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
+    uid = await run_in_threadpool(deps.uid, request)
+    if not ratelimit.check(f"cutout-apply:{uid or deps.client_ip(request)}",
+                           max_attempts=ratelimit.CUTOUT_APPLY_MAX_CALLS):
+        raise HTTPException(429, "Too many cutouts at once — wait a moment "
+                                 "and the rest will follow.")
+    path = _photo_path(session_id, name)
+    if path is None:
+        raise HTTPException(400, "Invalid image name")
+    if not await run_in_threadpool(_ensure_local, session_id, name, path):
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    data = await mask.read()
+    if len(data) > _MAX_MASK_BYTES:
+        raise HTTPException(400, "That cutout is too large to be a cutout.")
+    engine_id, plat = _device_engine(provider, platform)
+    queued = (origin or "").strip().lower() == "queue"
+    row = await run_in_threadpool(db.cutout_get, session_id, name)
+    if queued:
+        rec = await run_in_threadpool(db.get_listing_best_effort, session_id)
+        if rec and rec.get("status") not in db.CUTOUT_LISTING_STATES:
+            await run_in_threadpool(db.cutout_set, session_id, name, "skipped",
+                                    error="the listing is live")
+            raise HTTPException(409, "This listing is live, so its photos are "
+                                     "left as they are.")
+    colour = await run_in_threadpool(_cutout_colour, uid)
+    picture = _cutout_kind(path, row, _truthy(art))
+
+    def _make(rgb):
+        return cutouts.cut_from_mask(rgb, cutouts.read_mask(data), art=picture,
+                                     background=colour)
+
+    try:
+        working_sha, engine = await run_in_threadpool(
+            _apply_cut, session_id, name, path, source_sha, _make)
+    except _PhotoChanged as exc:
+        raise HTTPException(409, _PHOTO_CHANGED) from exc
+    except cutouts.MaskRefused as exc:
+        if queued:
+            await run_in_threadpool(db.cutout_set, session_id, name, "failed",
+                                    provider=engine_id, platform=plat,
+                                    error=str(exc))
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        reference = deps.support_reference()
+        log.warning("cutout apply failed (session=%s name=%s) [%s]: %s",
+                    session_id, name, reference, exc)
+        raise HTTPException(
+            400, _try_again("save that cutout", reference)) from exc
+    updated_at = await _publish_cut(session_id, name, path)
+    await run_in_threadpool(db.cutout_set, session_id, name, "done",
+                            provider=engine_id, platform=plat,
+                            working_sha=working_sha)
+    if queued:
+        await run_in_threadpool(db.cutout_usage_add, _usage_period(),
+                                engine_id, plat or "device", 1)
+    log.info("cutout apply: session=%s name=%s engine=%s via %s",
+             session_id, name, engine, engine_id)
+    return {"ok": True, "name": name, "engine": engine,
+            "version": int(path.stat().st_mtime * 1000),
+            "updated_at": updated_at}
+
+
+@app.post("/api/cutout/compose")
+async def cutout_compose(
+    request: Request,
+    mask: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    session_id: str = Form(""),
+    name: str = Form(""),
+    background: str = Form(""),
+    art: str = Form("false"),
+    provider: str = Form(""),
+    platform: str = Form(""),
+) -> dict:
+    """The studio's preview of a cutout made on the device: the photo -- the
+    editor's own canvas as `file`, or the session's photo as shot -- through
+    the matte, on the seller's colour (or `background`: "#rrggbb", or
+    "transparent" for a PNG). Writes nothing; the editor saves as it always
+    has. Counted here, once per cut the seller looked at."""
+    _studio_guard(request)
+    data = await mask.read()
+    if len(data) > _MAX_MASK_BYTES:
+        raise HTTPException(400, "That cutout is too large to be a cutout.")
+    upload = await file.read() if file else None
+    if upload and len(upload) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, "Image too large")
+    uid = await run_in_threadpool(deps.uid, request)
+    path = None
+    if not upload:
+        session_id, name = (session_id or "").strip(), (name or "").strip()
+        if not session_id or not name:
+            raise HTTPException(400, "Lost track of which photo this is — reopen it.")
+        await run_in_threadpool(deps.assert_session_owner, session_id, request)
+        path = _photo_path(session_id, name, create=False)
+        if path is None or not await run_in_threadpool(
+                _ensure_local, session_id, name, path):
+            raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    transparent = (background or "").strip().lower() == "transparent"
+    colour = (cutouts.parse_colour(background)
+              or await run_in_threadpool(_cutout_colour, uid))
+    picture = _truthy(art) or (path is not None and images.photo_flags(path)["art"])
+
+    def _run() -> dict:
+        source = upload if upload else cutouts.source_path(path).read_bytes()
+        rgb = cutouts.decode(source)
+        cut = cutouts.cut_from_mask(rgb, cutouts.read_mask(data), art=picture,
+                                    background=colour)
+        if transparent:
+            png = cutouts.transparent_png(rgb, cut.alpha)
+            image = "data:image/png;base64," + base64.b64encode(png).decode()
+        else:
+            image = _data_url(cut.image)
+        return {"ok": True, "image": image, "engine": cut.engine,
+                "art": picture}
+
+    try:
+        out = await run_in_threadpool(_run)
+    except cutouts.MaskRefused as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        reference = deps.support_reference()
+        log.warning("cutout compose failed [%s]: %s", reference, exc)
+        raise HTTPException(400, _try_again("show that cutout", reference)) from exc
+    engine_id, plat = _device_engine(provider, platform)
+    await run_in_threadpool(db.cutout_usage_add, _usage_period(), engine_id,
+                            plat or "device", 1)
+    return out
+
+
+@app.post("/api/cutout/cloud")
+async def cutout_cloud(
+    request: Request,
+    session_id: str = Form(""),
+    name: str = Form(""),
+    source_sha: str = Form(""),
+    origin: str = Form("queue"),
+) -> dict:
+    """Photoroom, for a photo the seller's device could not cut: saved like
+    any cutout, and paid for exactly like every other Photoroom cutout --
+    the consent switch, this month's allowance and one image_ai token, given
+    back if nothing came of it. A photo already cut by Photoroom and not
+    changed since is answered as it is, with nothing charged."""
+    session_id, name = (session_id or "").strip(), (name or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "Lost track of which photo this is — reopen it.")
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
+    uid = await run_in_threadpool(deps.uid, request)
+    if not ratelimit.check(f"cutout-cloud:{uid or deps.client_ip(request)}",
+                           max_attempts=ratelimit.CUTOUT_CLOUD_MAX_CALLS):
+        raise HTTPException(429, "Too many photo operations at once. Wait a "
+                                 "moment and retry.")
+    path = _photo_path(session_id, name)
+    if path is None:
+        raise HTTPException(400, "Invalid image name")
+    if not await run_in_threadpool(_ensure_local, session_id, name, path):
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    queued = (origin or "").strip().lower() == "queue"
+    row = await run_in_threadpool(db.cutout_get, session_id, name)
+    # Already paid for, and the photo is still that cut: nothing to do.
+    if (row and row.get("state") == "done" and row.get("provider") == "photoroom"
+            and row.get("working_sha")):
+        current = await run_in_threadpool(
+            lambda: cutouts.sha256(path.read_bytes()))
+        if current == row["working_sha"]:
+            return {"ok": True, "name": name, "engine": "photoroom",
+                    "version": int(path.stat().st_mtime * 1000),
+                    "updated_at": None, "reused": True}
+    if images.photo_flags(path)["detail"]:
+        raise HTTPException(422, images.DETAIL_KEPT_AS_SHOT)
+    colour = await run_in_threadpool(_cutout_colour, uid)
+    picture = _cutout_kind(path, row, False)
+
+    def _make(rgb):
+        if picture:
+            cut = images.art_cut(rgb, background=colour)
+            if cut is None:
+                raise cutout_api.CutoutApiError(images.ART_NO_BORDER_KEPT_AS_SHOT)
+            return cut
+        return images.cloud_cut(rgb, background=colour)
+
+    held, spent = await run_in_threadpool(_start_cutouts, request, 1)
+    try:
+        working_sha, engine = await run_in_threadpool(
+            _apply_cut, session_id, name, path, source_sha, _make)
+    except _PhotoChanged as exc:
+        await run_in_threadpool(_refund_cutouts, spent, held)
+        raise HTTPException(409, _PHOTO_CHANGED) from exc
+    except ValueError as exc:
+        await run_in_threadpool(_refund_cutouts, spent, held)
+        if queued:
+            await run_in_threadpool(db.cutout_set, session_id, name, "failed",
+                                    provider="photoroom", platform="server",
+                                    error=str(exc))
+        raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        await run_in_threadpool(_refund_cutouts, spent, held)
+        raise
+    updated_at = await _publish_cut(session_id, name, path)
+    await run_in_threadpool(db.cutout_set, session_id, name, "done",
+                            provider="photoroom", platform="server",
+                            working_sha=working_sha)
+    log.info("cutout cloud: session=%s name=%s engine=%s", session_id, name,
+             engine)
+    return {"ok": True, "name": name, "engine": engine,
+            "version": int(path.stat().st_mtime * 1000),
+            "updated_at": updated_at}
+
+
+@app.get("/api/cutout/pending")
+def cutout_pending(request: Request) -> dict:
+    """The seller's photos still waiting for their device, oldest first --
+    what the app works through when it opens. Only drafts' photos: a live
+    listing's are left alone."""
+    uid = deps.signed_in_uid(request)
+    rows = db.cutout_pending(uid)
+    if rows is None:
+        raise HTTPException(503, "Couldn't check for photos waiting on a "
+                                 "cutout just now — try again in a moment.")
+    return {"photos": [{"session_id": r["session_id"], "name": r["name"],
+                        "kind": r["kind"]} for r in rows]}
+
+
+@app.post("/api/cutout/skip")
+def cutout_skip(payload: dict, request: Request) -> dict:
+    """The device gave up on one photo (unsupported, timed out, found
+    nothing) and the seller has no cloud fallback: stop offering it, with
+    the reason. The photo stays exactly as shot."""
+    session_id = str(payload.get("session_id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    if not session_id or not name:
+        raise HTTPException(400, "session_id and name are required")
+    deps.assert_session_owner(session_id, request)
+    reason = str(payload.get("reason") or "")[:255]
+    provider, platform = _device_engine(str(payload.get("provider") or ""),
+                                        str(payload.get("platform") or ""))
+    row = db.cutout_get(session_id, name)
+    if row and row.get("state") == "pending":
+        db.cutout_set(session_id, name, "failed", provider=provider,
+                      platform=platform, error=reason)
+    return {"ok": True}
+
+
+@app.get("/api/image/cutout/{session_id}/{name}")
+async def image_cutout_png(session_id: str, name: str,
+                           request: Request) -> Response:
+    """The cut-out item on nothing -- a transparent PNG -- for the seller to
+    download and use anywhere. Made from the photo as shot and the matte kept
+    behind the listing photo, so it costs no new cutout; once those are no
+    longer kept (an edit since, or reclaimed with age) it says so."""
+    await run_in_threadpool(deps.assert_session_owner, session_id, request)
+    path = _photo_path(session_id, name, create=False)
+    if path is None:
+        raise HTTPException(404, "Not found")
+    if not await run_in_threadpool(_ensure_local, session_id, name, path):
+        raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
+    parts = await run_in_threadpool(cutouts.parts, path)
+    if parts is None:
+        raise HTTPException(
+            409, "The cutout behind this photo isn't kept any more — remove "
+                 "the background again to download it.")
+    png = await run_in_threadpool(cutouts.transparent_png, *parts)
+    stem = Path(name).stem
+    return Response(png, media_type="image/png", headers={
+        "Content-Disposition": f'attachment; filename="{stem}-cutout.png"'})
 
 
 @app.post("/api/identify/{session_id}")
@@ -7109,6 +7627,7 @@ def delete_image(payload: dict, request: Request) -> dict:
         raise HTTPException(400, "session_id and name are required")
     deps.assert_session_owner(session_id, request)
     images = _drop_optimized_image(session_id, name, deps.uid(request))
+    _forget_cutout(session_id, name)
     remaining = storage.list_optimized(session_id)
     # `images` is the listing's own order with the photo gone — what the
     # editor should now be holding, and what the next reorder is checked
@@ -7819,6 +8338,7 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 "resumed": True, "remove_bg": strip_bg,
                 "pending_items": _pending_items(staging, names, groups),
                 "_staging_id": staging, "_strip_bg": strip_bg,
+                **_cutout_fields(record),
                 # NOT incremented: nothing failed here, and a seller who
                 # waits out three deploys should still be asked their
                 # question rather than have the batch give up on them.
@@ -7843,6 +8363,7 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 "total_photos": record.get("total_photos") or len(plan["names"]),
                 "resumed": True, "remove_bg": strip_bg,
                 "_staging_id": staging, "_strip_bg": strip_bg,
+                **_cutout_fields(record),
                 "_resumes": resumes + 1,
                 "_names": plan["names"], "_groups": plan["groups"],
                 # Nothing is in flight until this run picks an item up; the
@@ -7883,6 +8404,7 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
             # Public: the queue's progress text says what is actually running.
             "remove_bg": strip_bg,
             "_staging_id": staging, "_strip_bg": strip_bg,
+            **_cutout_fields(record),
             "_resumes": resumes + 1,
         }, uid=uid)
         threading.Thread(
@@ -7954,6 +8476,9 @@ class _BulkContext:
     # The ad rate the account's auto-promote runs at, or None for eBay's
     # suggestion per listing. Read once with `auto_promote`, same as prefs.
     auto_promote_rate: Optional[float] = None
+    # The staging pile's session id: where the device queue's rows for these
+    # photos were written, so each item's session can take its own.
+    staging_id: str = ""
 
 
 class _BulkProgress:
@@ -8074,12 +8599,18 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     again -- and not charged twice for what the first attempt never delivered.
     """
     sid = ctx.precharged.get(gi)
+    mapping = {ctx.names[idx]: f"img_{j:03d}.jpg"
+               for j, idx in enumerate(ctx.groups[gi]["indices"])}
     if sid:
         # Written again rather than assumed: the guidance can have arrived
         # AFTER the attempt that made this session (a restart between the two
         # is exactly what precharged means), so the item would otherwise be
         # finished without the one thing the seller stopped to type.
         storage.save_item_notes(sid, ctx.item_notes.get(gi, ""))
+        # Same for the device queue's rows: the attempt that made this
+        # session may have died before it copied them. Idempotent.
+        if ctx.staging_id:
+            db.cutout_copy(ctx.staging_id, sid, mapping, ctx.uid)
         return sid, storage.list_optimized(sid), True
     sid = storage.new_session_id()
     item_dir = storage.optimized_dir(sid)
@@ -8087,9 +8618,11 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     for j, idx in enumerate(ctx.groups[gi]["indices"]):
         shutil.copyfile(ctx.opt_dir / ctx.names[idx], item_dir / f"img_{j:03d}.jpg")
         item_names.append(f"img_{j:03d}.jpg")
-    _carry_photo_extras(ctx.opt_dir, item_dir, {
-        ctx.names[idx]: f"img_{j:03d}.jpg"
-        for j, idx in enumerate(ctx.groups[gi]["indices"])})
+    _carry_photo_extras(ctx.opt_dir, item_dir, mapping)
+    # The device queue's rows follow the photos into the item's own session,
+    # under the item's names; the staging pile's are dropped with the pile.
+    if ctx.staging_id:
+        db.cutout_copy(ctx.staging_id, sid, mapping, ctx.uid)
     objstore.upload_optimized(sid, item_dir, item_names)
     # Each item inherits the WHOLE pile's hints, not just the line it was
     # grouped under: the split is the model's guess, and the identify prompt
@@ -8441,14 +8974,22 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                     bg_charged = tokens.cost("image_ai", n_photos)
             _stop_if_cancelled(job_id)
             _bulk_set(job_id, phase="optimizing", current=0)
+            # Whether the seller's device takes the backgrounds off this pile
+            # (free, nothing sent anywhere). Read off the job rather than
+            # passed in, so every path that starts this worker -- the upload,
+            # a resume, a split -- answers it the same way.
+            device = (not strip_bg) and bool(
+                _cutout_fields(jobstore.internal(job_id, uid)))
             opt_results = images.optimize_all(
                 storage.original_dir(staging_id), storage.optimized_dir(staging_id),
-                strip_bg,
+                strip_bg or device,
                 progress=lambda done, total: _bulk_set(job_id, current=done,
                                                        total_photos=total),
                 # The photo pass is where a long batch spends its time, so the stop
                 # has to reach inside it rather than waiting for the whole pile.
-                should_stop=lambda: jobstore.cancel_requested(job_id))
+                should_stop=lambda: jobstore.cancel_requested(job_id),
+                device=device, background=_cutout_colour(uid, prefs),
+                on_result=_record_pending(staging_id, uid) if device else None)
             # Surface a background-removal failure on the job so the UI can say WHY the photos came back with
             # their backgrounds intact — silence here reads as "the feature is
             # broken" when the photo was deliberately kept unchanged.
@@ -8526,7 +9067,8 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                            auto_promote_rate=auto_promote_rate, billing=billing,
                            notes=notes, names=names, groups=groups,
                            opt_dir=opt_dir, precharged=precharged,
-                           item_notes=item_notes or {})
+                           item_notes=item_notes or {},
+                           staging_id=staging_id)
         _bulk_set(job_id, phase="identifying")
         _draft_bulk_items(job_id, remaining, ctx, progress)
 
@@ -8590,6 +9132,9 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
         # orphan (storage.sweep_orphan_sessions).
         if not paused:
             storage.purge_session(staging_id)
+            # Its photos' device-queue rows went into each item's own session
+            # at the split; the pile's own are left behind with nothing to cut.
+            db.cutout_forget(staging_id)
 
 
 @app.post("/api/bulk/upload")
@@ -8598,6 +9143,7 @@ async def bulk_upload(
     files: list[UploadFile] = File(...),
     remove_bg: str = Form("false"),
     notes: str = Form(""),
+    cutout: str = Form(""),
 ) -> dict:
     """Bulk mode: accept a photo dump spanning multiple items, then process in
     the background (poll /api/bulk/status/{job_id}). Every item queues as a
@@ -8619,6 +9165,7 @@ async def bulk_upload(
     # against the month's allowance, but whether this seller may have any at
     # all is answered here, while there is still a request to say no on.
     strip_bg = _truthy(remove_bg)
+    device = _wants_device(cutout, strip_bg)
     if strip_bg:
         try:
             await run_in_threadpool(
@@ -8677,6 +9224,9 @@ async def bulk_upload(
         # Mirrored (see jobstore.MIRROR_FIELDS) so a restart can pick this
         # batch back up instead of throwing away the photo work it finished.
         "_staging_id": staging_id, "_strip_bg": strip_bg, "_resumes": 0,
+        # The device takes the backgrounds off this pile: public so the
+        # queue's progress text says so, mirrored so a resume keeps asking.
+        **({"_cutout": "device", "cutout": "device"} if device else {}),
     }, uid=uid)
     threading.Thread(
         target=_run_bulk_job,
@@ -9518,7 +10068,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
 
 def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
                       strip_bg: bool, bg_spent: Optional[dict],
-                      identify_spent: Optional[dict], bg_held=None) -> None:
+                      identify_spent: Optional[dict], bg_held=None,
+                      device: bool = False) -> None:
     """Background worker for the single-listing upload pipeline: optimize the
     photos (with live per-photo progress) and then run the identify chain, as
     ONE job the client polls. The upload endpoint returns the moment the
@@ -9528,9 +10079,11 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
         _bulk_set(job_id, phase="optimizing", current=0, beat=time.time())
         opt_dir = storage.optimized_dir(session_id)
         opt_results = images.optimize_all(
-            storage.original_dir(session_id), opt_dir, strip_bg,
+            storage.original_dir(session_id), opt_dir, strip_bg or device,
             progress=lambda done, total: _bulk_set(
-                job_id, current=done, total_photos=total, beat=time.time()))
+                job_id, current=done, total_photos=total, beat=time.time()),
+            device=device, background=_cutout_colour(uid),
+            on_result=_record_pending(session_id, uid) if device else None)
         optimized = storage.list_optimized(session_id)
         if not optimized:
             _refund_cutouts(bg_spent, bg_held)

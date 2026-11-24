@@ -76,6 +76,11 @@ _SCRUBBED = (
     # make every "no key" test pass a key to Photoroom, and the monthly cap
     # would move the line the usage tests draw.
     "PHOTOROOM_API_KEY", "BG_REMOVAL_MONTHLY_LIMIT",
+    # ...and its spend controls, and which engines may run on the device.
+    "PHOTOROOM_ENABLED", "PHOTOROOM_COST_PER_IMAGE",
+    "PHOTOROOM_MONTHLY_BUDGET_USD", "PHOTOROOM_MAX_CONCURRENCY",
+    "BG_LOCAL_PROVIDERS", "BACKGROUND_REMOVAL_TIMEOUT_MS",
+    "BG_WEB_MODEL_URL", "BG_WEB_MODEL_SHA256", "BG_WEB_MODEL_BYTES",
 )
 
 

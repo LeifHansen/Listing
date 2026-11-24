@@ -432,16 +432,92 @@ def serpapi_ready() -> bool:
 # production, so it is warned about below and named in /api/ready.
 PHOTOROOM_API_KEY = _env("PHOTOROOM_API_KEY")
 PHOTOROOM_SANDBOX = PHOTOROOM_API_KEY.startswith("sandbox_")
+# A switch that keeps the key: PHOTOROOM_ENABLED=false stops every Photoroom
+# call -- the cloud fallback, the old uploads, the studio -- without anyone
+# having to find the key again to turn it back on. On by default.
+PHOTOROOM_ENABLED = os.getenv("PHOTOROOM_ENABLED", "true").strip().lower() \
+    not in ("0", "false", "no", "off")
 
 
 def photoroom_ready() -> bool:
-    return bool(PHOTOROOM_API_KEY)
+    return bool(PHOTOROOM_API_KEY) and PHOTOROOM_ENABLED
 
 
 # The most photos one seller may have cut out in a calendar month (UTC). The
 # token charge is the price; this is the backstop on the app's Photoroom bill,
 # and it holds when token billing is off too. 0 means no cap.
 BG_REMOVAL_MONTHLY_LIMIT = max(0, _env_int("BG_REMOVAL_MONTHLY_LIMIT", 1000))
+
+
+def _env_money(name: str, default: Optional[float]) -> Optional[float]:
+    """A dollar amount, or `default` when unset or not a number (logged).
+    Negative is treated as unset."""
+    raw = os.getenv(name, "").strip().lstrip("$")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("%s=%r is not an amount — ignoring it", name, raw)
+        return default
+    return value if value >= 0 else default
+
+
+# What one Photoroom cutout costs the app, for the spend the operator reads
+# and the budget below. A number Photoroom sets, so it lives here rather than
+# in any business logic: the Basic "Remove Background" plan is about $0.02.
+PHOTOROOM_COST_PER_IMAGE = _env_money("PHOTOROOM_COST_PER_IMAGE", 0.02) or 0.0
+# The most the app will spend on Photoroom in a calendar month (UTC), across
+# every seller. Unset means no app-wide cap (each seller is still held to
+# BG_REMOVAL_MONTHLY_LIMIT). Reached, cloud background removal pauses until
+# the month turns and on-device removal carries on -- it is free.
+PHOTOROOM_MONTHLY_BUDGET_USD = _env_money("PHOTOROOM_MONTHLY_BUDGET_USD", None)
+
+
+def photoroom_budget_photos() -> Optional[int]:
+    """The budget as a number of photos this month, or None for no cap."""
+    if PHOTOROOM_MONTHLY_BUDGET_USD is None:
+        return None
+    if PHOTOROOM_COST_PER_IMAGE <= 0:
+        return None
+    return int(PHOTOROOM_MONTHLY_BUDGET_USD / PHOTOROOM_COST_PER_IMAGE)
+
+
+# How many Photoroom calls may be in flight at once, app-wide. Its default
+# rate limit is 60 images a minute; bulk batches, studio presses and the
+# cloud fallback of a device queue all share it, and a 429 storm costs every
+# one of them its retries.
+PHOTOROOM_MAX_CONCURRENCY = max(1, _env_int("PHOTOROOM_MAX_CONCURRENCY", 4))
+
+# --- background removal ON THE SELLER'S DEVICE ----------------------------
+# Which on-device engines the apps may use, comma-separated: "ios" (Apple
+# Vision), "android" (ML Kit), "web" (BiRefNet Lite in the browser). Read by
+# the app on every start (/api/bg-removal/status), so an engine is switched
+# off here -- no app release -- if it misbehaves in the field.
+#
+# EMPTY BY DEFAULT. "web" in particular must stay off until the model's
+# licensing is signed off: BiRefNet's weights are MIT, but one of its
+# training datasets (DIS5K) forbids commercial use, and nobody has said
+# whether that reaches the weights.
+BG_LOCAL_PROVIDERS = tuple(
+    p for p in (x.strip().lower() for x in
+                os.getenv("BG_LOCAL_PROVIDERS", "").split(","))
+    if p in ("ios", "android", "web"))
+# How long the device may take over one photo before it gives up and (for a
+# seller with cloud removal on) hands that photo to Photoroom, in ms.
+BACKGROUND_REMOVAL_TIMEOUT_MS = max(
+    5000, _env_int("BACKGROUND_REMOVAL_TIMEOUT_MS", 45000))
+# Where the browser engine's model is downloaded from, and the SHA-256 it
+# must match before it is used or cached. Only read with "web" switched on.
+BG_WEB_MODEL_URL = os.getenv("BG_WEB_MODEL_URL", "").strip()
+BG_WEB_MODEL_SHA256 = os.getenv("BG_WEB_MODEL_SHA256", "").strip().lower()
+BG_WEB_MODEL_BYTES = _env_int("BG_WEB_MODEL_BYTES", 0)
+
+
+def bg_web_ready() -> bool:
+    """The browser engine is switched on AND has a model to load."""
+    return ("web" in BG_LOCAL_PROVIDERS and bool(BG_WEB_MODEL_URL)
+            and len(BG_WEB_MODEL_SHA256) == 64)
 
 if PHOTOROOM_SANDBOX:
     log.warning("PHOTOROOM_API_KEY is a sandbox key — every background "
