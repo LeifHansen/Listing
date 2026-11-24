@@ -10632,9 +10632,14 @@ def _run_send_offers_job(job_id: str, records: list[dict], uid: str,
                      uid, exc)
 
         def _apply(rec: dict) -> dict:
+            if jobstore.cancel_requested(job_id):
+                return {"skip": "Stopped before this one was started."}
             # Re-read: the set was worked out when the button was pressed,
             # and a listing may have sold, ended or been offered since.
-            fresh = db.get_listing(rec["id"])
+            # And owned: the Manage tab's run is handed ids from a request
+            # (send_offers_ticked), queued as missing when they are not this
+            # seller's, and this re-read by id alone is not scoped.
+            fresh = _owned_by(rec["id"], uid)
             if not fresh:
                 return {"skip": "This listing is gone.", "needs_you": False}
             return _offer_one(fresh, percent, message, uid, creds, http,
@@ -10715,6 +10720,209 @@ def send_offers_all(payload: dict, request: Request) -> dict:
              job_id, uid, percent, len(records))
     return {"job_id": job_id, "running": True, "total": len(records),
             "deferred": 0}
+
+
+@app.post("/api/ebay/send-offers-ticked")
+def send_offers_ticked(payload: dict, request: Request) -> dict:
+    """Offer the TICKED live listings to their watchers at one discount — the
+    Manage tab's "Send offers to watchers…", beside Lower prices.
+
+    The same offer as the dashboard's group button (one Negotiation API call
+    per listing, eBay's eligibility sweep first, the listing stamped as it
+    goes) over the listings the seller picked rather than the ones the
+    dashboard ranked. Runs as the same job, in the same one-per-account slot:
+    a dashboard run and a Manage run at once would offer the same watchers
+    twice, and eBay refuses a second seller offer while the first is live.
+
+    Returns {"job_id"} at once; poll /api/bulk/status/{job_id}.
+    """
+    user = deps.signed_in_user(request)
+    creds = deps.ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    try:
+        percent = ebay_offers.validate_discount(payload.get("percent"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    message = ebay_offers.clean_message(payload.get("message"))
+    ids = _ticked_ids(payload, "Pick at least one listing to offer.")
+    uid = user["id"]
+    job_id = storage.new_session_id()
+    joined = _OFFER_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
+    try:
+        records = _ticked_records(ids, uid)
+    except BaseException:
+        _OFFER_JOBS.release(uid, job_id)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "offers", "phase": "offering", "done": False,
+        "error": None, "current": 0, "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_send_offers_job,
+                     args=(job_id, records, uid, creds, percent, message),
+                     daemon=True).start()
+    log.info("send-offers-ticked %s: started for user=%s percent=%s "
+             "listings=%d", job_id, uid, percent, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records)}
+
+
+# ---- Move to store category ----------------------------------------------
+# The Manage tab's "Move to store category…": the ticked live listings put on
+# one shelf of the seller's own eBay Store, each pushed to eBay as a revise
+# that carries the shelf and nothing else.
+#
+# Real shelves only. A revise sends <Storefront> only when the listing HAS a
+# shelf (ebay_trading._item_fields), because an empty StoreCategoryID is not
+# "leave it" — eBay reads 0 as "back to the top level" — so there is no path
+# from here to the top level, and the route refuses rather than pretending.
+
+# The moves running right now: user id -> job id. One per account: two runs
+# at once would race each other's revises over the same listings.
+_STORE_CATEGORY_JOBS = _OneRunPerAccount()
+
+
+def _move_one(rec: dict, cat_id: str, cat_name: str, uid: str, creds: dict,
+              base_url: str, provider) -> dict:
+    """Put ONE live listing on store shelf `cat_id` and push it to eBay.
+
+    Returns a bulk_actions outcome. Built the way _lower_one is, for the same
+    reasons: the shelf alone is marked for the revise (other pending edits stay
+    marked for the save that is about them), a refused revise puts the record
+    back as it was, and a listing eBay will not revise over its photos is the
+    seller's errand rather than the button's failure.
+    """
+    if rec.get("status") not in ("published", "live"):
+        return {"skip": "No longer live on eBay."}
+    data = rec.get("listing") or {}
+    if str(data.get("store_category_id") or "").strip() == cat_id:
+        return {"skip": f"Already on “{cat_name}”.", "needs_you": False}
+    listing = Listing(**data)
+    was = listing.store_category_name or ""
+    pending = [f for f in listing.dirty_fields if f != "store_category_id"]
+    listing.store_category_id = cat_id
+    listing.store_category_name = cat_name
+    listing.clear_dirty()
+    listing.mark_dirty("store_category_id")
+    outcome = provider.publish(
+        PublishContext(session_id=rec["id"], listing=listing, mode="live",
+                       base_url=base_url, uid=uid, prev_record=rec),
+        creds)
+    if not outcome.ok:
+        if not getattr(outcome, "outcome_unknown", False):
+            _restore_record(rec, uid)
+        if _photos_block_revise(outcome):
+            return {"skip": f"{_PHOTOS_TOO_SMALL} It's still on its old shelf."}
+        return {"message": outcome.message or "eBay didn't take the move."}
+    if pending:
+        _keep_marked(rec["id"], pending, uid)
+    return {"ok": True, "was": was, "now": cat_name}
+
+
+def _run_move_store_category_job(job_id: str, records: list[dict], uid: str,
+                                 creds: dict, base_url: str, cat_id: str,
+                                 cat_name: str) -> None:
+    """Background worker for "Move to store category…": one serial revise per
+    ticked listing, the job saying which one it is on."""
+    provider = marketplaces.get("ebay")
+
+    def _apply(rec: dict) -> dict:
+        if jobstore.cancel_requested(job_id):
+            return {"skip": "Stopped before this one was started."}
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
+            return {"skip": "Listing not found.", "needs_you": False}
+        return _move_one(fresh, cat_id, cat_name, uid, creds, base_url,
+                         provider)
+
+    try:
+        result = bulk_actions.run(
+            records, _apply,
+            on_each=lambda i, title: jobstore.update(
+                job_id, phase="moving", current=i, current_title=title[:80]))
+        log.log(logging.WARNING if result.failed else logging.INFO,
+                "store-category %s: user=%s shelf=%s listings=%d changed=%d "
+                "skipped=%d failed=%d first_refusal=%s", job_id, uid, cat_id,
+                len(records), len(result.changed), len(result.skipped),
+                len(result.failed),
+                (result.failed[0].get("message") or "")[:200]
+                if result.failed else "-")
+        jobstore.update(job_id, done=True, phase="done", current=len(records),
+                        result={"store_category_id": cat_id,
+                                "store_category_name": cat_name,
+                                **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = deps.support_reference()
+        log.warning("store-category job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish moving these listings. Try again in a moment "
+            f"— if it keeps happening, quote {reference} to support."))
+    finally:
+        _STORE_CATEGORY_JOBS.release(uid, job_id)
+
+
+@app.post("/api/ebay/move-store-category")
+def move_store_category(payload: dict, request: Request) -> dict:
+    """Put the ticked live listings on one shelf of the seller's eBay Store.
+
+    `store_category_id` must be one of the account's own shelves (checked
+    against the same cached GetStore the editor's picker reads), and the
+    listings are the ticks — read by id, ownership enforced inside the read,
+    never widened. Runs as a job; poll /api/bulk/status/{job_id}.
+    """
+    user = deps.signed_in_user(request)
+    creds = deps.ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    cat_id = str(payload.get("store_category_id") or "").strip()
+    if not cat_id or cat_id == "0":
+        raise HTTPException(400, "Pick a store category to move them to.")
+    uid = user["id"]
+    try:
+        shelves = _store_categories(uid, creds["access_token"])
+    except ebay_trading.NoStore as exc:
+        raise HTTPException(
+            400, "This eBay account doesn't have a Store, so there are no "
+                 "store categories to move listings to.") from exc
+    except ebay_trading.TradingError as exc:
+        raise HTTPException(
+            502, "We couldn't read your eBay Store's categories just now — "
+                 "try again in a moment.") from exc
+    shelf = next((c for c in shelves if str(c.get("id")) == cat_id), None)
+    if not shelf:
+        raise HTTPException(
+            400, "That store category isn't in your eBay Store any more — "
+                 "refresh and pick another.")
+    cat_name = str(shelf.get("name") or shelf.get("path") or cat_id)
+    ids = _ticked_ids(payload, "Pick at least one listing to move.")
+    job_id = storage.new_session_id()
+    joined = _STORE_CATEGORY_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
+    try:
+        records = _ticked_records(ids, uid)
+        base_url = _base_url(request)
+    except BaseException:
+        _STORE_CATEGORY_JOBS.release(uid, job_id)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "store-category", "phase": "moving",
+        "done": False, "error": None, "current": 0,
+        "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_move_store_category_job,
+                     args=(job_id, records, uid, creds, base_url, cat_id,
+                           cat_name),
+                     daemon=True).start()
+    log.info("store-category %s: started for user=%s shelf=%s listings=%d",
+             job_id, uid, cat_id, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records)}
 
 
 # How many listings one enrich run touches. Far below the price cap above
@@ -12629,6 +12837,118 @@ def end_and_relist(payload: dict, request: Request) -> dict:
                      args=(job_id, records, uid, creds, base_url),
                      daemon=True).start()
     log.info("end-and-relist %s: started for user=%s listings=%d",
+             job_id, uid, len(records))
+    return {"job_id": job_id, "running": True, "total": len(records)}
+
+
+# ---- End listings ---------------------------------------------------------
+# The Manage tab's "End listings": the ticked live listings taken off eBay,
+# each settled exactly as the card's own End button settles one — kept under
+# Inactive for the grace period, or removed at once if it was a mirror the
+# sync made, or archived as a sale if ending discovers it already sold.
+
+# The endings running right now: user id -> job id. One per account, like
+# every other run that spends eBay calls on the same listings.
+_END_JOBS = _OneRunPerAccount()
+
+
+def _end_one(rec: dict, uid: str, creds: dict) -> dict:
+    """End ONE live listing. A bulk_actions outcome around _settle_ending,
+    which is the End route's body: an ending is one thing however it was
+    asked for."""
+    if rec.get("status") not in ("published", "live"):
+        return {"skip": "No longer live on eBay.", "needs_you": False}
+    try:
+        res = _settle_ending(rec["id"], rec, creds, uid)
+    except HTTPException as exc:
+        return {"message": str(exc.detail)}
+    status = res.get("status")
+    if status == "sold":
+        # Not a failure, and not an ending: the item had already gone to a
+        # buyer. It is archived as a sale, which is what the seller would
+        # want to hear about first.
+        return {"skip": "Turns out this one had already sold — it's archived "
+                        "under Inactive.", "needs_you": False}
+    if status == "draft":
+        return {"skip": "It wasn't on eBay, so there was nothing to end — "
+                        "it's a draft again.", "needs_you": False}
+    if status != "ended":
+        return {"message": res.get("message") or "eBay didn't end it."}
+    return {"ok": True, "removed": bool(res.get("removed"))}
+
+
+def _run_end_listings_job(job_id: str, records: list[dict], uid: str,
+                          creds: dict) -> None:
+    """Background worker: each ticked listing ended in turn, the job saying
+    which one it is on."""
+    def _apply(rec: dict) -> dict:
+        if jobstore.cancel_requested(job_id):
+            return {"skip": "Stopped before this one was started."}
+        fresh = _owned_by(rec["id"], uid)
+        if not fresh:
+            return {"skip": "Listing not found.", "needs_you": False}
+        return _end_one(fresh, uid, creds)
+
+    try:
+        result = bulk_actions.run(
+            records, _apply,
+            on_each=lambda i, title: jobstore.update(
+                job_id, phase="ending", current=i, current_title=title[:80]))
+        removed = sum(1 for r in result.changed if r.get("removed"))
+        log.info("end-listings %s: user=%s listings=%d ended=%d removed=%d "
+                 "skipped=%d failed=%d", job_id, uid, len(records),
+                 len(result.changed), removed, len(result.skipped),
+                 len(result.failed))
+        jobstore.update(job_id, done=True, phase="done", current=len(records),
+                        result={"removed": removed, **result.as_dict()})
+    except Exception as exc:  # noqa: BLE001 - the job must always answer
+        reference = deps.support_reference()
+        log.warning("end-listings job %s failed for user=%s [%s]: %s",
+                    job_id, uid, reference, exc)
+        jobstore.update(job_id, done=True, phase="failed", error=(
+            "We couldn't finish ending these. Check the Active and Inactive "
+            "tabs for where each one got to — if it keeps happening, quote "
+            f"{reference} to support."))
+    finally:
+        _END_JOBS.release(uid, job_id)
+
+
+@app.post("/api/ebay/end-listings")
+def end_listings(payload: dict, request: Request) -> dict:
+    """End the ticked live listings on eBay, without relisting them.
+
+    The caller names the listings (the ticks on the Manage tab); the read is
+    by id with ownership enforced inside it, and never widens. Runs as a job
+    — one EndItem per listing — and returns {"job_id"} at once; poll
+    /api/bulk/status/{job_id}. One per account at a time: a second press
+    while one is running joins it.
+    """
+    user = deps.signed_in_user(request)
+    creds = deps.ebay_creds_for(request)
+    if not creds:
+        raise HTTPException(400, "Connect eBay first.")
+    ids = _ticked_ids(payload, "Pick at least one listing to end.")
+    uid = user["id"]
+    job_id = storage.new_session_id()
+    joined = _END_JOBS.reserve(uid, job_id)
+    if joined:
+        running, snap = joined
+        return {"job_id": running, "running": True, "joined": True,
+                "total": snap.get("total_items") or 0}
+    try:
+        records = _ticked_records(ids, uid)
+    except BaseException:
+        _END_JOBS.release(uid, job_id)
+        raise
+    jobstore.register(job_id, {
+        "id": job_id, "kind": "end-listings", "phase": "ending",
+        "done": False, "error": None, "current": 0,
+        "total_items": len(records),
+    }, uid=uid)
+    threading.Thread(target=_run_end_listings_job,
+                     args=(job_id, records, uid, creds),
+                     daemon=True).start()
+    log.info("end-listings %s: started for user=%s listings=%d",
              job_id, uid, len(records))
     return {"job_id": job_id, "running": True, "total": len(records)}
 

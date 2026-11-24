@@ -1882,6 +1882,12 @@ REVISABLE_FIELDS = frozenset({
     # already happened by the time anything gets here.
     "videos",
     "price", "quantity", "fulfillment_policy_id",
+    # The seller's own Store shelf: _item_fields sends <Storefront> whenever
+    # it is marked, and only then. Missing from this set, every move made in
+    # the editor (or by the Manage tab's "Move to store category…") reached
+    # eBay and was still reported as an edit "that stayed here", and re-marked
+    # to be sent again on the next save.
+    "store_category_id",
 })
 
 

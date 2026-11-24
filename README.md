@@ -1160,6 +1160,9 @@ the value or leave it. Typing over a value clears the mark on its own.
 | `POST` | `/api/ebay/lower-prices` | Lower the ticked listings' prices by one percentage and push each to eBay, as a background job (`job_id`) — the Manage tab's "Lower prices…" |
 | `POST` | `/api/ebay/send-offers` | Offer the named listings' watchers one discount (capped per request) |
 | `POST` | `/api/ebay/send-offers-all` | Offer every listing in the dashboard's "Send offers" group to its watchers, as a background job (`job_id`) |
+| `POST` | `/api/ebay/send-offers-ticked` | Offer the **ticked** listings' watchers one discount — the Manage tab's "Send offers to watchers…". Same job and same one-per-account slot as `send-offers-all` |
+| `POST` | `/api/ebay/end-listings` | End the ticked live listings on eBay without relisting them, each settled as the card's own End settles it — a background job (`job_id`) |
+| `POST` | `/api/ebay/move-store-category` | Put the ticked live listings on one shelf of the seller's eBay Store (`store_category_id`), each revised with the shelf and nothing else — a background job (`job_id`) |
 | `POST` | `/api/listings/enrich` | Fill in the named listings' item specifics from their photos and push each to eBay — returns a `job_id` to poll |
 | `POST` | `/api/auth/signup` · `/login` · `/logout` | Email/password auth (JWT cookie) |
 | `GET`  | `/api/auth/me` | Current logged-in user (or null) |
@@ -2150,6 +2153,60 @@ in the browser (`lib/dismissedRecs.js`, bounded so it can't grow without
 limit), and undone in one tap from **Restore N dismissed** on the section
 header — which stays on screen even when every suggestion has been dismissed,
 so the X is never a one-way door.
+
+## The Manage tab's selection bar
+
+Ticking a live listing on Manage brings up the selection bar. With eight
+things a tick can lead to, they cannot all be buttons — a bar of eight wraps
+into a wall on a phone — so the bar does what Shopify's admin and the
+crosslisting tools do: the actions a seller reaches for every week are on it,
+the rest are under **More**, and the one with no way back sits last under a
+divider, in red.
+
+| On the bar | Under More |
+|---|---|
+| **End & relist** (primary) · **Lower prices…** · **Crosspost to Etsy** (from small screens up; under More on a phone) | **Move to store category…** · **Send offers to watchers…** · **End listings** |
+
+On a phone the bar is a two-column grid of what is left plus More, and More
+spans the row rather than sitting alone in half of it. Only one action's
+panel (an amount, a shelf) is open under the bar at a time, nothing new can
+start while a run is going, and *Select all* reads **Select all N shown**
+while a filter or the search box is on — it reaches what is on screen and
+nothing the seller filtered out. The bar is `frontend/src/components/LiveBulkBar.jsx`;
+every action goes through one `runJob` in `ListingsView.jsx` (POST, poll
+`/api/bulk/status/{id}`, toast the per-listing report, clear the ticks,
+reload), and the report's wording is `lib/bulkActions.js`.
+
+Every action is a background job over exactly the ids ticked — read with
+ownership enforced inside the read (`_ticked_records`), never widened to the
+store, one run of each kind per account at a time (a second press joins the
+first) — and each says in the restart message what it was doing if the
+server went away mid-run (`jobstore.interrupted_message`).
+
+- **End listings** (`POST /api/ebay/end-listings`) is the card's own End over
+  the ticks: each listing is settled by `_settle_ending`, so a listing made
+  here is kept under Inactive for the grace period, a mirror the store sync
+  made is removed at once, and one that turns out to have **already sold** is
+  archived as a sale and reported as a skip, not a failure. The confirm says
+  which of those will happen to how many cards before anything is sent.
+- **Move to store category…** (`POST /api/ebay/move-store-category`) puts the
+  ticks on one shelf of the seller's eBay Store. The shelf must be one the
+  account's Store has (the same cached `GetStore` the editor's picker reads),
+  and it is never "the top level": a revise only sends `<Storefront>` for a
+  real shelf — an empty `StoreCategoryID` is not "leave it". Each revise is
+  built like a price drop's (`_move_one` mirrors `_lower_one`): the shelf
+  alone is marked, other pending edits stay marked for the save that is about
+  them, a refusal puts the record back, and photos eBay will not take become
+  the seller's errand rather than a failure. `store_category_id` is in
+  `ebay_trading.REVISABLE_FIELDS` now — the revise always carried the shelf,
+  but every move made in the editor was still reported as an edit "that
+  stayed here" and re-marked to be sent again.
+- **Send offers to watchers…** (`POST /api/ebay/send-offers-ticked`) is the
+  dashboard's Send offers over the ticks: the same job
+  (`_run_send_offers_job`), the same 5–50% bounds, the same
+  one-per-account slot — a dashboard run and a Manage run at once would offer
+  the same watchers twice. That job's re-read is ownership-checked now
+  (`_owned_by`), because its ids can come from a request.
 
 ## What a sale actually made
 
