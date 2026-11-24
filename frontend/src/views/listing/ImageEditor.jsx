@@ -366,8 +366,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     next.height = canvas.height;
     next.getContext("2d").putImageData(px, 0, 0);
     commitOperation(next, { keepStrokes: true });
-    toast("Auto levels applied — Undo to take it back, Save to keep.",
-          { kind: "success" });
   }, [aiBusy, commitOperation, toast]);
 
   // Manual crop: toggle the tool, drag a rect, Apply.
