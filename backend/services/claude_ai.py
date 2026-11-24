@@ -36,6 +36,7 @@ from .listing_prompt import (
     TITLE_BUDGET_AND_BANS,
     expected_item_count,
     group_notes_block,
+    google_block,
     identify_notes_block,
     item_notes_block,
 )
@@ -695,7 +696,8 @@ def warm_identify_cache() -> bool:
 
 def identify(image_paths: list[Path], image_names: list[str],
              strategy: str = "", notes: str = "",
-             item_notes: str = "") -> IdentifyResult:
+             item_notes: str = "",
+             lookup: Optional[dict] = None) -> IdentifyResult:
     """Identify the item(s) in the photos and draft a full listing.
 
     The ROUTER. Which model actually looks at the photos is config's call
@@ -706,17 +708,25 @@ def identify(image_paths: list[Path], image_names: list[str],
 
     See _identify_claude below for what the arguments mean; they are the same
     arguments either way.
+
+    `lookup` is what Google image search (AI Mode) said this item is and what
+    it sells for (services.google_lookup) — the PRIMARY identification. When
+    there is one, the model writing the draft is told to write it about that
+    item (listing_prompt.google_block); when there is none, the photos alone
+    decide, as they always have.
     """
     if config.identify_provider() == "google":
         return google_ai.identify(image_paths, image_names, strategy=strategy,
-                                  notes=notes, item_notes=item_notes)
+                                  notes=notes, item_notes=item_notes,
+                                  lookup=lookup)
     return _identify_claude(image_paths, image_names, strategy=strategy,
-                            notes=notes, item_notes=item_notes)
+                            notes=notes, item_notes=item_notes, lookup=lookup)
 
 
 def _identify_claude(image_paths: list[Path], image_names: list[str],
                      strategy: str = "", notes: str = "",
-                     item_notes: str = "") -> IdentifyResult:
+                     item_notes: str = "",
+                     lookup: Optional[dict] = None) -> IdentifyResult:
     """Identify the item(s) in the images and draft a full listing.
     `strategy` (optional): quick_flip | median | long_sale — tilts the
     suggested price toward that end of the market range.
@@ -738,7 +748,7 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
     for p in image_paths[:8]:  # cap images per request
         content.append(_image_block(p))
     content.append({"type": "text",
-                    "text": _identify_ask(strategy, notes, item_notes)})
+                    "text": _identify_ask(strategy, notes, item_notes, lookup)})
 
     resp = client.messages.create(
         model=config.VISION_MODEL,
@@ -763,14 +773,18 @@ def _identify_claude(image_paths: list[Path], image_names: list[str],
 
 
 def _identify_ask(strategy: str = "", notes: str = "",
-                  item_notes: str = "") -> str:
+                  item_notes: str = "", lookup: Optional[dict] = None) -> str:
     """The text under the photos on an identify call, on either backend: the
-    ask, the seller's pricing strategy and the seller's own notes. All of it
-    changes per upload, which is why it rides the user turn and never the
-    cached system prefix."""
+    ask, the seller's pricing strategy, the seller's own notes, and what
+    Google image search said the item is. All of it changes per upload, which
+    is why it rides the user turn and never the cached system prefix.
+
+    Google's answer goes after the pile's notes and before the seller's line
+    about THIS item, so the seller's line is still the last word read."""
     return ("These are the product photos for one listing. Draft it."
             + _PRICING_STRATEGY_HINTS.get(strategy, "")
             + identify_notes_block(notes)
+            + google_block(lookup)
             + item_notes_block(item_notes))
 
 

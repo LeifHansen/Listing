@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Combine, MessageSquareText, Sparkles, Split, Trash2 } from "lucide-react";
+import {
+  AlertTriangle, Check, CheckCircle2, Combine, Loader2, MessageSquareText,
+  Search, Send, Sparkles, Split, Trash2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiUrl } from "@/lib/platform";
 import { Card } from "@/components/ui/Card";
@@ -53,6 +56,23 @@ import { Field, Textarea } from "@/components/ui/fields";
  * batch would have sorted it, and the question comes back per item. The line
  * typed under the one card goes with the request, as the seller's inventory
  * of the pile, which is the hint the sort reads first.
+ */
+
+/* THE REVIEW. Each card now shows what Google image search says the item is
+ * and what it sells for (`google`, one answer per item off the paused job's
+ * status, arriving as each search lands), with the box underneath it and one
+ * button. The button is APPROVE while the box says nothing Google hasn't
+ * already been asked with, and SUBMIT CHANGES the moment it does: the seller's
+ * words go back to Google with the photo, the card shows the new answer, and
+ * that is what they approve. The draft is written about the item Google named
+ * and priced from Google's range, so approving here is approving the listing.
+ *
+ * One item: Approve writes it. Several: each is approved on its own card (or
+ * all at once), and the batch is written when every one of them is.
+ *
+ * Without Google on the server (`googleEnabled` false) the card has no answer
+ * to show, and the same two buttons keep their meaning: Submit Changes keeps
+ * the note for the AI and approves, Approve approves.
  */
 
 // Mirrors listing_prompt.ITEM_NOTES_MAX_CHARS. Enforced here as well as on
@@ -129,6 +149,144 @@ function PhotoRow({ item, onDelete, deleted }) {
   );
 }
 
+// A dollar range the way a seller says it: "$35–$55", "$1,200", "" for none.
+function dollars(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return Number.isInteger(n)
+    ? `$${n.toLocaleString("en-US")}`
+    : `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+export function priceSpan(low, high) {
+  const lo = dollars(low);
+  const hi = dollars(high);
+  if (!lo) return "";
+  return !hi || hi === lo ? lo : `${lo}–${hi}`;
+}
+
+// Where a source link points, for its label when Google gave no name.
+function hostOf(link) {
+  try { return new URL(link).hostname.replace(/^www\./, ""); } catch { return ""; }
+}
+
+// What Google said about one item: the name, the price range, the answer in
+// Google's own words and the pages it read. The seller is being asked to
+// approve a listing on the strength of this, so every part of it is shown —
+// the summary folded to a few lines, not cut.
+export function GooglePanel({ entry, onRetry, retrying }) {
+  const [open, setOpen] = useState(false);
+  const status = entry?.status || "pending";
+  if (status === "pending") {
+    return (
+      <div role="status"
+        className="flex items-center gap-2.5 rounded-[12px] border border-line
+          bg-bg-sunken px-3.5 py-3 text-[13px] text-ink-secondary">
+        <Loader2 size={15} className="animate-spin text-blue shrink-0" aria-hidden />
+        {entry?.hint
+          ? "Asking Google again with your changes…"
+          : "Asking Google what this is and what it sells for…"}
+      </div>
+    );
+  }
+  if (status !== "done") {
+    return (
+      <div className="flex flex-col gap-2 rounded-[12px] border border-warning/40
+        bg-warning-soft px-3.5 py-3 text-[13px] text-ink">
+        <p className="flex items-start gap-2">
+          <AlertTriangle size={15} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          <span>
+            {entry?.reason || "Google couldn't answer for this photo."}{" "}
+            You can still approve it — the AI works from the photos and
+            anything you write below.
+          </span>
+        </p>
+        {onRetry && (
+          <div>
+            <Button variant="ghost" size="sm" onClick={onRetry} loading={retrying}>
+              <Search aria-hidden /> Ask Google again
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  const used = priceSpan(entry.used_low, entry.used_high);
+  const fresh = priceSpan(entry.new_low, entry.new_high);
+  const summary = (entry.summary || "").trim();
+  const long = summary.length > 280 || summary.split("\n").length > 4;
+  const sources = (entry.sources || []).filter((s) => /^https?:\/\//.test(s?.link || ""));
+  return (
+    <section aria-label="What Google says"
+      className="flex flex-col gap-2 rounded-[12px] border border-blue/25
+        bg-blue-soft/60 px-3.5 py-3">
+      <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase
+        tracking-wide text-blue">
+        <Search size={12} aria-hidden /> Google says
+      </p>
+      {entry.identified && (
+        <p className="text-[15px] font-bold text-ink leading-snug">{entry.identified}</p>
+      )}
+      {used || fresh ? (
+        <div className="flex flex-wrap gap-1.5">
+          {used && (
+            <span className="rounded-full bg-card border border-line px-2.5 py-0.5
+              text-[12.5px] font-semibold text-ink">
+              Used {used}
+            </span>
+          )}
+          {fresh && (
+            <span className="rounded-full bg-card border border-line px-2.5 py-0.5
+              text-[12.5px] font-semibold text-ink">
+              New {fresh}
+            </span>
+          )}
+        </div>
+      ) : (
+        <p className="text-[12.5px] text-ink-secondary">
+          Google didn&apos;t give a price — it will be priced from comparable
+          eBay listings instead.
+        </p>
+      )}
+      {entry.confidence === "low" && (
+        <p className="flex items-start gap-1.5 text-[12.5px] text-ink">
+          <AlertTriangle size={13} className="text-warning shrink-0 mt-0.5" aria-hidden />
+          Google isn&apos;t sure about this one. If it&apos;s wrong, say what it
+          is below and submit your changes.
+        </p>
+      )}
+      {summary && (
+        <p className={cn("text-[13px] text-ink-secondary whitespace-pre-line",
+          long && !open && "line-clamp-4")}>
+          {summary}
+        </p>
+      )}
+      {long && (
+        <button type="button" onClick={() => setOpen((v) => !v)}
+          className="self-start text-[12.5px] font-semibold text-blue cursor-pointer
+            hover:underline">
+          {open ? "Show less" : "Show more"}
+        </button>
+      )}
+      {sources.length > 0 && (
+        <p className="text-[12px] text-ink-faint">
+          From:{" "}
+          {sources.map((src, i) => (
+            <span key={src.link}>
+              {i > 0 && " · "}
+              <a href={src.link} target="_blank" rel="noopener noreferrer"
+                title={src.title || src.link}
+                className="underline decoration-line hover:text-ink">
+                {src.source || hostOf(src.link) || "source"}
+              </a>
+            </span>
+          ))}
+        </p>
+      )}
+    </section>
+  );
+}
+
 // An item's identity, as opposed to its slot. `gi` is where the server will
 // look an answer up, and it is renumbered when an item above it is removed;
 // `key` never is. Notes are held against the key so a removal cannot slide
@@ -158,8 +316,30 @@ export function joinItemNotes(parts) {
 
 export function AiNotesStep({ items, values, onChange, onSubmit,
                               onDeletePhoto, onDeleteItem, onMergeItems,
-                              onSplit }) {
+                              onSplit, google, googleEnabled, onAskGoogle,
+                              approved: approvedProp, onApprovedChange }) {
   const notes = values || {};
+  const googleOn = !!googleEnabled;
+  // Approvals, by item identity. Controlled when the caller holds them —
+  // for the same reason it holds the notes: a failed submit remounts this
+  // step, and forty approvals are not something to ask for twice — and
+  // held here otherwise.
+  const [ownApproved, setOwnApproved] = useState({});
+  const approvals = approvedProp || ownApproved;
+  const setApprovals = (fn) => {
+    const next = fn(approvals);
+    if (onApprovedChange) onApprovedChange(next);
+    else setOwnApproved(next);
+  };
+  // "Submit Changes" answers at once with the card's new, pending lookup.
+  // A poll already in the air when it landed still carries the OLD answer,
+  // which must not flash back onto the card — so the pending one is held
+  // here until the status catches up with it (same ticket).
+  const [asked, setAsked] = useState({});
+  const [asking, setAsking] = useState({});
+  // What was submitted for each card when there is no Google to ask: the
+  // note is kept for the AI and the card approved with it.
+  const [submitted, setSubmitted] = useState({});
   // The rows as the last delete left them, once there has been one. While
   // the job is paused a delete is the ONLY thing that changes them, so its
   // answer is never older than a poll — but a poll already in the air when
@@ -179,7 +359,6 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
   // One card holding more than one photo can be two items. One photo cannot.
   const canSplit = !!onSplit && single
     && ((rows[0].photo_count || rows[0].photos?.length || 0) >= 2);
-  const typed = rows.filter((it) => (notes[idOf(it)] || "").trim()).length;
   // Photo URLs this seller has dropped, by the exact string the status gave
   // them. Optimistic: see the note above the component.
   const [deleted, setDeleted] = useState(() => new Set());
@@ -196,6 +375,38 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
   // up again here, by the photo or key it was aimed at, when it goes out.
   const known = useRef(null);
   const now = () => known.current || items || [];
+
+  // The Google answer a card shows: the status's, unless this card has just
+  // asked again and the status has not caught up yet.
+  const entryFor = (item) => {
+    const k = String(idOf(item));
+    const polled = (google || {})[k];
+    const mine = asked[k];
+    if (mine && polled?.ticket !== mine.ticket) return mine;
+    return polled;
+  };
+  // What the box says now, against what it said when Google was last asked
+  // (or, with no Google, when it was last submitted). Different means the
+  // seller has changes to send, and Approve becomes Submit Changes.
+  const typedFor = (item) => (notes[idOf(item)] || "").trim();
+  const sentFor = (item) => (googleOn
+    ? (entryFor(item)?.hint || "")
+    : (submitted[idOf(item)] || "")).trim();
+  const changedFor = (item) => typedFor(item) !== sentFor(item);
+  // Google is still working on this card: nothing to approve yet.
+  const waitingFor = (item) => {
+    if (!googleOn) return false;
+    const entry = entryFor(item);
+    return !entry || entry.status === "pending";
+  };
+  // An approval holds for the answer it was given to. A new answer (a photo
+  // removed, a re-ask) or an edit to the box since takes it back.
+  const stampFor = (item) => (googleOn ? (entryFor(item)?.ticket || "") : "ok");
+  const isApproved = (item) => {
+    const stamp = approvals[idOf(item)];
+    return stamp !== undefined && stamp === stampFor(item)
+      && !changedFor(item) && !waitingFor(item);
+  };
 
   const set = (key, value) => onChange(key, value.slice(0, MAX_ITEM_NOTES_CHARS));
 
@@ -306,6 +517,73 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
       .finally(() => setMerging(false));
   };
 
+  const approve = (item) => {
+    if (waitingFor(item) || changedFor(item)) return;
+    const stamp = stampFor(item);
+    setApprovals((cur) => ({ ...cur, [idOf(item)]: stamp }));
+    // One item: approving it IS writing the listing.
+    if (single) submit();
+  };
+
+  const unapprove = (item) => setApprovals((cur) => {
+    const next = { ...cur };
+    delete next[idOf(item)];
+    return next;
+  });
+
+  // Every card that can be approved as it stands — answered, and with no
+  // changes in its box waiting to be sent to Google. Without Google there is
+  // nothing to send them to, so a typed note is taken as submitted and its
+  // card approved with it: the note goes to the AI either way.
+  const approveAll = () => {
+    if (!googleOn) {
+      setSubmitted((cur) => {
+        const next = { ...cur };
+        rows.forEach((it) => { next[idOf(it)] = typedFor(it); });
+        return next;
+      });
+    }
+    setApprovals((cur) => {
+      const next = { ...cur };
+      rows.forEach((it) => {
+        if (!waitingFor(it) && (!googleOn || !changedFor(it))) {
+          next[idOf(it)] = stampFor(it);
+        }
+      });
+      return next;
+    });
+  };
+
+  // "Submit Changes": the seller's words go back to Google with the photo,
+  // and the card waits for the new answer. Queued behind the deletes like
+  // every other request that names a slot, and the slot looked up again
+  // when its turn comes.
+  const submitChanges = (item) => {
+    const key = idOf(item);
+    const text = typedFor(item);
+    if (!googleOn || !onAskGoogle) {
+      setSubmitted((cur) => ({ ...cur, [key]: text }));
+      setApprovals((cur) => ({ ...cur, [key]: "ok" }));
+      if (single) submit();
+      return;
+    }
+    setAsking((cur) => ({ ...cur, [key]: true }));
+    queue.current = queue.current
+      .then(async () => {
+        const row = now().find((it) => idOf(it) === key);
+        const photo = (row?.photos || []).find((p) => !deleted.has(p))
+          || row?.photos?.[0];
+        if (!row || !photo) throw new Error("gone");
+        const res = await onAskGoogle(row.gi, photo, text);
+        const entry = res?.google?.[String(key)];
+        if (entry) setAsked((cur) => ({ ...cur, [String(key)]: entry }));
+      })
+      // Refused (the caller says why): the card keeps its old answer and the
+      // button stays Submit Changes, so trying again is one tap.
+      .catch(() => {})
+      .finally(() => setAsking((cur) => ({ ...cur, [key]: false })));
+  };
+
   const submit = async () => {
     // Not while a merge is out: its answer moves notes between items, and
     // the boxes this would read are the ones from before it did.
@@ -329,6 +607,15 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
     onSubmit(out);
   };
 
+  // Where the batch stands, for the footer: how many cards are approved,
+  // how many could be with one press, and what is holding up the rest.
+  const approvedCount = rows.filter((it) => isApproved(it)).length;
+  const allApproved = rows.length > 0 && approvedCount === rows.length;
+  const readyCount = rows.filter((it) => !isApproved(it) && !waitingFor(it)
+    && (!googleOn || !changedFor(it))).length;
+  const waitingCount = rows.filter((it) => waitingFor(it)).length;
+  const unsentCount = rows.filter((it) => changedFor(it)).length;
+
   if (!rows.length) return null;
 
   return (
@@ -343,19 +630,34 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
           <MessageSquareText size={18} className="text-blue shrink-0 mt-0.5" aria-hidden />
           <div className="min-w-0">
             <h2 className="text-[15px] font-bold text-ink">
-              {single
-                ? "Anything the photos don't show?"
-                : `Your photos are sorted into ${rows.length} items — anything the photos don't show?`}
+              {googleOn
+                ? (single
+                  ? "Check what Google says before the listing is written"
+                  : `Your photos are sorted into ${rows.length} items — check what Google says about each one`)
+                : (single
+                  ? "Anything the photos don't show?"
+                  : `Your photos are sorted into ${rows.length} items — anything the photos don't show?`)}
             </h2>
-            <p className="mt-1 text-[13px] text-ink-secondary">
-              {single
-                ? "Tell the AI what it's looking at before it writes the listing — "
-                : "Tell the AI what each one is before it writes the listings — "}
-              the brand on a worn-off label, the size, the era, a flaw worth
-              mentioning. It reads this as the strongest hint it has about
-              {single ? " your item" : " that item"}, and it&apos;s what stops
-              you fixing the same field on every draft afterwards.
-            </p>
+            {googleOn ? (
+              <p className="mt-1 text-[13px] text-ink-secondary">
+                Google image search looked {single ? "your item" : "each item"} up
+                and says what it is and what it sells for — the listing is
+                written about that item and priced from that range. If it&apos;s
+                right, press <strong>Approve</strong>. If it isn&apos;t, say what
+                it is in the box and press <strong>Submit Changes</strong>:
+                Google is asked again with your words.
+              </p>
+            ) : (
+              <p className="mt-1 text-[13px] text-ink-secondary">
+                {single
+                  ? "Tell the AI what it's looking at before it writes the listing — "
+                  : "Tell the AI what each one is before it writes the listings — "}
+                the brand on a worn-off label, the size, the era, a flaw worth
+                mentioning. It reads this as the strongest hint it has about
+                {single ? " your item" : " that item"}, and it&apos;s what stops
+                you fixing the same field on every draft afterwards.
+              </p>
+            )}
             {canMerge && (
               <p className="mt-1.5 text-[13px] text-ink-secondary">
                 One thing split into two? Tick <strong>Same item</strong> on
@@ -378,12 +680,18 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
       {rows.map((item, i) => {
         const value = notes[idOf(item)] || "";
         const isPicked = picked.has(idOf(item));
+        const entry = entryFor(item);
+        const approvedHere = isApproved(item);
+        const changedHere = changedFor(item);
+        const waitingHere = waitingFor(item);
+        const askingHere = !!asking[idOf(item)];
         // Locked while the merge it is part of is out: the line in it is
         // about to be carried into another card (see mergePicked).
         const locked = merging && isPicked;
         return (
           <Card key={idOf(item)}
             className={cn("flex flex-col gap-3.5",
+              approvedHere && !isPicked && "border-success/50",
               isPicked && "border-blue ring-2 ring-blue/25")}>
             {/* Wraps rather than squeezes: on a phone the two controls
                 drop under the name, which is how the seller tells two
@@ -392,6 +700,12 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
               <p className="text-sm font-bold text-ink shrink-0">
                 {single ? "Your item" : `Item ${i + 1}`}
               </p>
+              {approvedHere && (
+                <span className="inline-flex items-center gap-1 text-[12.5px]
+                  font-bold text-success shrink-0">
+                  <CheckCircle2 size={14} aria-hidden /> Approved
+                </span>
+              )}
               {/* The name the grouping pass gave it. Useful and not
                   authoritative — it is the AI's first guess, which is the
                   very thing this box exists to correct. */}
@@ -454,13 +768,26 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
               onDelete={onDeletePhoto && !locked
                 ? (src) => drop(idOf(item), src) : undefined}
             />
+            {googleOn && (
+              <GooglePanel
+                entry={entry}
+                retrying={askingHere}
+                onRetry={entry?.status === "failed" && !locked
+                  ? () => submitChanges(item) : undefined}
+              />
+            )}
             <Field
-              label="Notes for the AI"
+              label={googleOn ? "Is this right?" : "Notes for the AI"}
               hint="optional"
-              help={"Anything you know that the photos don't show — brand, maker, "
-                + "model, era, material, size, or a flaw worth disclosing. Write it "
-                + "as a sentence; the AI treats it as a strong hint about this item "
-                + "and won't invent details it doesn't cover."}
+              help={googleOn
+                ? "If Google got it wrong or missed something — the exact model, "
+                  + "size, edition or era, or a flaw worth disclosing — say so here "
+                  + "and press Submit Changes. Google is asked again with your "
+                  + "words, and the listing is written from what it says."
+                : "Anything you know that the photos don't show — brand, maker, "
+                  + "model, era, material, size, or a flaw worth disclosing. Write it "
+                  + "as a sentence; the AI treats it as a strong hint about this item "
+                  + "and won't invent details it doesn't cover."}
             >
               <Textarea
                 rows={2}
@@ -475,11 +802,15 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
                 // The pile can be long, and reaching for the button at the
                 // bottom of forty cards is the wrong ending to typing.
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+                  if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;
+                  if (changedHere) submitChanges(item);
+                  else approve(item);
                 }}
-                placeholder={single
-                  ? "e.g. men's L, bought in Tokyo 2019, small mark on the left cuff"
-                  : "e.g. the darker one — Lacoste, size 5 (men's L), tiny hole by the hem"}
+                placeholder={googleOn
+                  ? "e.g. it's the 2.5 qt 403, not the 404 — small chip on the rim"
+                  : single
+                    ? "e.g. men's L, bought in Tokyo 2019, small mark on the left cuff"
+                    : "e.g. the darker one — Lacoste, size 5 (men's L), tiny hole by the hem"}
               />
             </Field>
             {value.length > MAX_ITEM_NOTES_CHARS - 100 && (
@@ -487,13 +818,56 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
                 {MAX_ITEM_NOTES_CHARS - value.length} characters left.
               </p>
             )}
+            {/* One button, and which one says what happens next: Approve
+                while the box says nothing Google has not been asked with,
+                Submit Changes the moment it does. */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              {approvedHere ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => unapprove(item)}
+                    disabled={locked}>
+                    Undo approval
+                  </Button>
+                  <p className="text-[12.5px] text-ink-secondary">
+                    Edit the box to change it.
+                  </p>
+                </>
+              ) : changedHere ? (
+                <>
+                  <Button variant="primary" onClick={() => submitChanges(item)}
+                    loading={askingHere} disabled={locked}>
+                    <Send aria-hidden /> Submit Changes
+                  </Button>
+                  <p className="text-[12.5px] text-ink-secondary min-w-0">
+                    {googleOn
+                      ? "Google is asked again with what you wrote."
+                      : single
+                        ? "Your note goes to the AI with the photos, and the listing is written."
+                        : "Your note goes to the AI with the photos."}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Button variant="success" onClick={() => approve(item)}
+                    disabled={locked || waitingHere}>
+                    <Check aria-hidden />
+                    {waitingHere ? "Waiting for Google…" : "Approve"}
+                  </Button>
+                  {single && !waitingHere && (
+                    <p className="text-[12.5px] text-ink-secondary min-w-0">
+                      Approving writes your listing.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
           </Card>
         );
       })}
 
-      {/* One button, and no way to get stuck behind it: leaving every box
-          blank is the skip, and says so rather than needing a second control
-          that means "throw away what I just typed". */}
+      {/* The batch's own controls: the merge while cards are ticked, and
+          the button that writes every approved item. Leaving a box blank is
+          still no obstacle — an untouched box is approved as it stands. */}
       <div className={cn("flex flex-col gap-3",
         (rows.length > 2 || pickedRows.length > 0)
           && "sticky bottom-0 -mx-1 px-1 py-3 bg-bg/95 backdrop-blur")}>
@@ -526,10 +900,25 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
           </div>
         )}
         <div className="flex flex-wrap items-center gap-3">
-          <Button variant="primary" size="lg" onClick={submit} disabled={merging}>
-            <Sparkles aria-hidden />
-            {single ? "Write my listing" : `Write ${rows.length} listings`}
-          </Button>
+          {/* One item is written by its own Approve; the footer is only the
+              way out to a split. A batch is written from here, once every
+              card is approved — "Approve all" is the fast way there for a
+              pile whose answers all look right. */}
+          {!single && (
+            <Button variant="primary" size="lg" onClick={submit}
+              disabled={merging || !allApproved}
+              title={allApproved ? undefined
+                : "Approve every item first — or press Approve all"}>
+              <Sparkles aria-hidden />
+              {`Write ${rows.length} listings`}
+            </Button>
+          )}
+          {!single && !allApproved && (
+            <Button variant="secondary" size="lg" onClick={approveAll}
+              disabled={merging || readyCount === 0}>
+              <Check aria-hidden /> Approve all{readyCount ? ` (${readyCount})` : ""}
+            </Button>
+          )}
           {/* The way back from the bulk toggle the seller did not tick.
               Beside the button that writes ONE listing, because that is the
               moment they notice the pile is two. */}
@@ -541,11 +930,14 @@ export function AiNotesStep({ items, values, onChange, onSubmit,
               It&apos;s more than one item
             </Button>
           )}
-          <p className="text-[13px] text-ink-secondary min-w-0">
-            {typed
-              ? `${typed} of ${rows.length} filled in — the rest work from the photos alone.`
-              : "Every box is optional — leave them blank and the AI works from the photos alone."}
-          </p>
+          {!single && (
+            <p className="text-[13px] text-ink-secondary min-w-0">
+              {`${approvedCount} of ${rows.length} approved`}
+              {waitingCount > 0 && ` · ${waitingCount} waiting on Google`}
+              {unsentCount > 0
+                && ` · ${unsentCount} with changes to submit`}
+            </p>
+          )}
         </div>
       </div>
     </motion.div>
