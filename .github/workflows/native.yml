@@ -28,6 +28,9 @@ on:
       - frontend/capacitor.config.json
       - frontend/assets/**
       - frontend/scripts/native-prepare.mjs
+      # The app's own plugin (on-device background removal): its Swift
+      # package and Gradle module only compile here.
+      - frontend/native/**
       - .github/workflows/native.yml
 
 permissions:

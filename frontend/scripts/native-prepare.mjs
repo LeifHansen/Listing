@@ -114,9 +114,10 @@ const COLLECTED = [
 ];
 
 // The app-level privacy manifest. It declares no "required reason" APIs: none
-// of Capacitor 8, its three plugins or the app template calls one (Capacitor
-// ships its own manifest saying so), and a reason declared for an API that is
-// never called is a claim nobody can back up.
+// of Capacitor 8, its three plugins, the app's own thryft-cutout plugin
+// (frontend/native: Vision, ImageIO and CoreVideo only) or the app template
+// calls one (Capacitor ships its own manifest saying so), and a reason
+// declared for an API that is never called is a claim nobody can back up.
 export function privacyManifest() {
   const collected = COLLECTED.map((type) => `
     <dict>

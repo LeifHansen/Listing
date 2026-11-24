@@ -1,0 +1,26 @@
+{
+  "name": "thryft-cutout",
+  "version": "1.0.0",
+  "private": true,
+  "description": "On-device background removal for the Thryft Shop app: Apple Vision on iOS 17+, Google ML Kit subject segmentation on Android. Answers a soft greyscale matte of the photo it is handed; the server composites it.",
+  "license": "UNLICENSED",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "android/src/main/",
+    "android/build.gradle",
+    "ios/Sources",
+    "Package.swift"
+  ],
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0"
+  },
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
+  }
+}

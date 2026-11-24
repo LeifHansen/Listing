@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Ask Google Play services to download the subject segmentation
+             model when the app is installed, so the first cutout does not
+             wait on it. The plugin still checks, and downloads it on demand
+             (ModuleInstallClient) when it is missing. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="subject_segment" />
+    </application>
+</manifest>
