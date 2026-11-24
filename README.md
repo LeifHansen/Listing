@@ -31,7 +31,7 @@ Getting ready to ship? Start with [`LAUNCH_CHECKLIST.md`](LAUNCH_CHECKLIST.md).
 | Identify | Photos sent to a vision model — the frame as shot, not the cutout, so a background removal can never cost the pass the tag it has to read; returns structured listing draft (keyword-ordered title, and a long SEO description in labelled sections — overview, key details, condition, measurements, why you'll love it) + an overall confidence (low / medium / high) that is stamped onto the draft and shown on its card + "missing info" to verify | Google Gemini API (`GOOGLE_API_KEY`) or Anthropic API |
 | Price | The draft's price is the one thing the photos cannot answer, so a second pass looks it up. On the Google backend it runs with **Google Search grounding**: the model searches for what comparable items actually sold for and answers with the pages it read, and those URLs — the ones the API vouches for, not the ones the model typed — are what the finding is cited with. Never lowers a price and never demotes an item; it may raise a price to the bottom of the researched range, name a hedged item, and flag the more valuable variant the photos cannot rule out | Google Search grounding, or Claude's web search |
 | Hints | Optional "Notes for the AI" on the uploader — the seller's own comma-separated list (`one vintage ralph lauren polo, two lacoste polos different size color`). Read as a strong prior by the draft, and as the expected inventory by bulk grouping; the photos still decide the facts. Saved with the session, so "Start over" re-drafts with them | Anthropic API |
-| Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). Every box is optional and one button moves on — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it. The photos are on screen, so they can be pruned there too: every thumbnail carries a delete (`POST /api/bulk/notes/{job_id}/delete-photo`), and the blurred shot or the one of the floor leaves the item before anything is drafted from it — the last photo of an item stays, since an item with none cannot be drafted at all. In a batch, the grouping's usual mistake — one thing shot from enough angles to come back as two or three items — is fixed there as well: tick **Same item** on each card and merge them (`POST /api/bulk/notes/{job_id}/merge-items`), and they become one item with all their photos in pile order, the earliest slot, the name without its "#1", and whatever was typed under each card. The opposite mistake — the bulk toggle left off, so two items' photos reach the question as ONE item — has its way back here too: **It's more than one item** (`POST /api/bulk/notes/{job_id}/split`) sorts the pile the way a batch would have, with what was typed under the card as the inventory it reads first, and the job becomes a paused batch with the merge and remove tools above; a sort that still sees one item, or fails, puts the single-item question back as it was and says why. The up-front draft charge goes back, since a batch charges per item | Anthropic API |
+| Ask | The pipeline **stops before it drafts** and asks, once per item, with that item's optimized photos on screen and the grouping's own guess beside them (`awaiting_notes` on the job status; `POST /api/bulk/notes/{job_id}` answers it). With `SERPAPI_KEY` set it is a **review**: each card shows what Google image search (AI Mode) says the item is and sells for (the job's `google` field, filled as each lookup lands), with **Approve** — or **Submit Changes**, which asks Google again with what the seller typed (`POST /api/bulk/notes/{job_id}/google`). A batch is written once every card is approved; see "The primary identifier" below. Every box is optional — all blank is byte-identical to a run without the step. What is typed outranks the pile-wide hints for that item, since it was written looking at these photos. Nothing is drafted or charged while it waits, the worker returns instead of holding a thread, and the pause survives a restart, so a seller can answer after lunch. Saved per item, so "Start over" keeps it. The photos are on screen, so they can be pruned there too: every thumbnail carries a delete (`POST /api/bulk/notes/{job_id}/delete-photo`), and the blurred shot or the one of the floor leaves the item before anything is drafted from it — the last photo of an item stays, since an item with none cannot be drafted at all. In a batch, the grouping's usual mistake — one thing shot from enough angles to come back as two or three items — is fixed there as well: tick **Same item** on each card and merge them (`POST /api/bulk/notes/{job_id}/merge-items`), and they become one item with all their photos in pile order, the earliest slot, the name without its "#1", and whatever was typed under each card. The opposite mistake — the bulk toggle left off, so two items' photos reach the question as ONE item — has its way back here too: **It's more than one item** (`POST /api/bulk/notes/{job_id}/split`) sorts the pile the way a batch would have, with what was typed under the card as the inventory it reads first, and the job becomes a paused batch with the merge and remove tools above; a sort that still sees one item, or fails, puts the single-item question back as it was and says why. The up-front draft charge goes back, since a batch charges per item | Anthropic API |
 | Preview | Edit every field; add/remove item specifics; refine with a natural-language prompt. A draft the AI wrote for two items (the bulk toggle left off, noticed too late) can be **split in two** from the editor's menu or its card in Drafts (`POST /api/listings/{listing_id}/split`): tick the other item's photos and they move to a new draft the AI writes, and by default the AI rewrites this one from the photos it keeps — the inverse of the merge, drafts only | Web UI |
 | Category | Resolves a numeric eBay leaf categoryId from the item via the Taxonomy API (auto during identify + a "Suggest categories" picker in the preview) | eBay Taxonomy API |
 | Publish | Fans out to every selected marketplace — eBay (Trading API), Etsy (draft → activate), Depop — each succeeding or failing independently; dry-run payloads when not connected | eBay / Etsy / Depop APIs |
@@ -55,6 +55,47 @@ cp .env.example .env
 
 Only `ANTHROPIC_API_KEY` is required to get the full upload → identify →
 optimize → preview flow working. eBay credentials are optional.
+
+### The primary identifier: Google image search in AI Mode
+
+What an item **is** and what it **sells for** come from Google image search
+in AI Mode — the answer a seller gets by pointing the Google app at the thing
+in their hand. Google matches the *photo* against the web (product pages,
+sold listings, catalogues) before its AI answers, which no model reading the
+photo alone can do; drafts identified from the photos alone named lookalikes
+and priced them low. It runs through SerpApi's `google_ai_mode` engine with
+the photo passed as `image_url` (`backend/services/google_lookup.py`).
+
+**The review step.** When a batch (or a single upload) pauses before drafting,
+every item is looked up and its card shows Google's answer: the name, the
+used/new price range, Google's own summary and the pages it cited. Under it
+is the text box and one button:
+
+- **Approve** — the answer is right. One item is written straight away; a
+  batch is written once every card is approved (**Approve all** does every
+  ready card at once).
+- **Submit Changes** — shown instead of Approve as soon as the box has text
+  Google hasn't been asked with. The seller's words go back to Google *with
+  the photo* (`POST /api/bulk/notes/{job_id}/google`), the card shows the new
+  answer, and that is what they approve.
+
+**The draft.** The vision model (Gemini or Claude) still writes the listing —
+title, specifics, description, condition — but is told Google's
+identification is the answer, and the price is taken from Google's range for
+the item's condition (used, or new when graded new) at the point the
+account's pricing strategy picks: low end for Quick Flip, middle for Median,
+high end for Long Sale. The grounded research pass and the eBay keyword comps
+now run **only as fallbacks** when Google had no answer (or, for the comps, no
+price for that condition). Shop Mode asks Google inline, since it has no
+review step.
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `SERPAPI_KEY` | — | The switch (same key as the Google Lens art lookup). Needs R2 too: Google fetches the photo from a bucket URL, and `/api/health` warns when R2 is missing |
+| `GOOGLE_AI_MODE` | `auto` | `auto`: on whenever `SERPAPI_KEY` is set. `off`: back to the photos-only identifier and the fallbacks |
+| `GOOGLE_AI_MODE_TIMEOUT_SECONDS` | `75` | How long one lookup may take |
+| `GOOGLE_LOOKUP_WORKERS` | `4` | Lookups in flight at once across the server |
+| `GOOGLE_LOOKUP_MAX_AGE_DAYS` | `14` | How long an approved answer stands for a "Start over"; older ones are asked for again |
 
 ### Identifying on Google instead
 

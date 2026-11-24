@@ -422,7 +422,8 @@ def _generate(tag: str, parts: list[dict], system: str = "",
 
 def identify(image_paths: list[Path], image_names: list[str],
              strategy: str = "", notes: str = "",
-             item_notes: str = "", subject=None) -> IdentifyResult:
+             item_notes: str = "", subject=None,
+             lookup: Optional[dict] = None) -> IdentifyResult:
     """Identify the item(s) in the photos and draft a full listing.
 
     Signature, prompt and result are claude_ai.identify's — the two backends
@@ -436,7 +437,8 @@ def identify(image_paths: list[Path], image_names: list[str],
     from . import claude_ai
 
     parts: list[dict] = [_image_part(p) for p in image_paths[:_MAX_IDENTIFY_IMAGES]]
-    parts.append({"text": claude_ai._identify_ask(strategy, notes, item_notes)})
+    parts.append({"text": claude_ai._identify_ask(strategy, notes, item_notes,
+                                                  lookup)})
 
     payload = _generate("identify", parts,
                         system=claude_ai._identify_system(subject),

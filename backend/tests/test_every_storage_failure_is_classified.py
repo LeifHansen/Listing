@@ -303,6 +303,14 @@ WHY_A_BLANK_IS_SAFE = {
     "load_item_notes":
         "\"\" means 'the seller skipped the guidance step for this item', "
         "which is a prompt byte-identical to one without the step at all",
+    "save_lookup":
+        "an unsaved Google answer costs one more search: the draft chain "
+        "finds none on disk and asks Google again (main._google_for_draft), "
+        "and no screen reads the file back to claim it was kept",
+    "load_lookup":
+        "None means 'no approved Google answer on disk', which the draft "
+        "chain answers by asking Google again — never by drafting as if "
+        "Google had said the item was nothing",
     "session_touched_at":
         "an unknown mtime makes the orphan sweep skip the dir rather than delete it",
     "sweep_orphan_sessions":
