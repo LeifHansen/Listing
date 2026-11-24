@@ -319,8 +319,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       // photo's file. Staying quiet is right: the seller moved on.
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
-      toast("Background removed — review and Save to keep it.",
-        { kind: "success" });
       loadBgRemovalStatus();
     } catch (e) {
       toast(`Remove background failed: ${e.message}`, { kind: "error" });
@@ -577,7 +575,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       await studioCall("/api/image/restore-original", sessionId, name);
       await load();      // repaint from the file the server just rewrote
       onSaved();
-      toast("Put back the photo as you shot it.", { kind: "success" });
     } catch (e) {
       // The originals are pruned on a timer, so "there is nothing to restore"
       // is a real answer and the server's sentence says so.
