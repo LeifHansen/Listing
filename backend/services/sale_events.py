@@ -489,6 +489,18 @@ def _put_back(uid: str, creds: dict, moving: dict[str, list[str]],
                         pid, len(items), exc)
 
 
+def _unplaced(moving: dict[str, list[str]], moved: list[dict],
+              went: list[dict]) -> dict[str, list[str]]:
+    """{old sale: item ids} for the listings that left their old sale (still
+    in `moved`, the records _apply_moves let go) but did not go into the new
+    one (`went`) -- eBay refused them there. _put_back's argument."""
+    left = {_item(r) for r in moved}
+    placed = {_item(r) for r in went}
+    out = {pid: [i for i in items if i in left and i not in placed]
+           for pid, items in moving.items()}
+    return {pid: items for pid, items in out.items() if items}
+
+
 def _changed(result: BulkResult, records: list[dict], moved_from: dict[str, str]) -> None:
     for rec in records:
         row = {"listing_id": rec.get("id") or "", "title": _title(rec)}
@@ -546,6 +558,8 @@ def create(uid: str, creds: dict, records: list[dict], *, percent: float,
             if not made.get("pid"):
                 _put_back(uid, creds, moving, http, now)
                 return None, result
+            # Moved, then dropped by eBay from the new sale: back, not nowhere.
+            _put_back(uid, creds, _unplaced(moving, ok, went), http, now)
             row = _resync(uid, creds, made["pid"], http, now, source="app")
             _changed(result, went, moved_from)
             return row, result
@@ -574,9 +588,10 @@ def add(uid: str, creds: dict, event_id: str, records: list[dict], *,
         moved_from = {i: names.get(p, "") for p, items in moving.items() for i in items}
         http = httpx.Client(timeout=30)
         try:
-            ok = _apply_moves(uid, creds, moving, ok, result, http, now)
-            if not ok:
-                return public(row, now), result
+            # Read and checked BEFORE anything leaves its old sale. A refusal
+            # here used to come after the moves, stranding the listings in no
+            # sale and ending an old sale the move had emptied. The moves touch
+            # only the OLD sales, so this is still the copy the PUT starts from.
             detail = ebay_markdowns.get_markdown(creds, pid, client=http)
             verdict = ebay_markdowns.classify(detail)
             if not verdict.editable or verdict.item_ids is None:
@@ -584,13 +599,21 @@ def add(uid: str, creds: dict, event_id: str, records: list[dict], *,
             if len(verdict.item_ids) + len(ok) > ebay_markdowns.MAX_LISTINGS:
                 raise Refused(f"A sale holds at most {ebay_markdowns.MAX_LISTINGS} "
                               "listings — start a second sale for the rest.")
+            ok = _apply_moves(uid, creds, moving, ok, result, http, now)
+            if not ok:
+                return public(row, now), result
 
             def _put(ids: list[str]) -> None:
                 ebay_markdowns.update(creds, pid, ebay_markdowns.patch_body(
                     detail, item_ids=list(dict.fromkeys(verdict.item_ids + ids))),
                     client=http)
 
-            went = _with_drops(_put, ok, result)
+            try:
+                went = _with_drops(_put, ok, result)
+            except Exception:
+                _put_back(uid, creds, _unplaced(moving, ok, []), http, now)
+                raise
+            _put_back(uid, creds, _unplaced(moving, ok, went), http, now)
             fresh = _resync(uid, creds, pid, http, now) or row
             _changed(result, went, moved_from)
             return public(fresh, now), result

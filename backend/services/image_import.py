@@ -171,6 +171,8 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
     from io import BytesIO
     from PIL import Image, ImageOps
 
+    from . import images
+
     urls = [u for u in urls if u][:24]
     if not urls:
         return []
@@ -183,8 +185,11 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
             own = own_media_ref(url)
             data = read_own_media(*own) if own else fetch_ebay_image(url)
             img = Image.open(BytesIO(data))
+            images.check_pixels(img)  # from the header, before decoding
             img.load()
-            img = ImageOps.exif_transpose(img).convert("RGB")
+            # images.flatten, not a bare convert("RGB"): that paints a
+            # transparent pixel black.
+            img = images.flatten(ImageOps.exif_transpose(img))
             if max(img.size) > _MAX_SIDE:
                 img.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
             # Three digits, the shape optimize_all writes and the ONLY shape
@@ -193,7 +198,8 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
             # restore" for an original that was sitting right here.
             (orig / f"src_{i:03d}.jpg").write_bytes(data)
             name = f"img_{i:03d}.jpg"
-            img.save(opt / name, "JPEG", quality=88, optimize=True)
+            # Atomically: eBay may be fetching this /media URL right now.
+            images.write_jpeg(img, opt / name, quality=88)
             return i, name, file_sha(opt / name), url
         except Exception as exc:  # noqa: BLE001 - skip one bad photo
             log.warning("image import: photo %d of %s failed: %s", i, record_id, exc)

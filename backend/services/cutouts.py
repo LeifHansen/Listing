@@ -193,8 +193,11 @@ def sha256(data: bytes) -> str:
 
 
 def decode(data: bytes) -> Image.Image:
-    """Source bytes as an opaque RGB image."""
+    """Source bytes as an opaque RGB image. Refused from its header past
+    images.MAX_PIXELS: the studio's preview takes these bytes from the
+    client."""
     img = Image.open(BytesIO(data))
+    images.check_pixels(img)
     img.load()
     return images.flatten(img)
 

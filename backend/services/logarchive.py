@@ -50,6 +50,32 @@ def bundle(rows: list[dict]) -> bytes:
     return gzip.compress(body.encode("utf-8"))
 
 
+def _with_what_is_there(key: str, rows: list[dict]) -> list[dict]:
+    """`rows` plus every row an earlier write of `key` holds that they do
+    not, one per fingerprint, the fresh read winning.
+
+    The writer archives "yesterday" on EVERY boot, over the 48 hours before
+    now, so a deploy late in the day used to overwrite the object with a
+    window that had moved on: a failure seen early yesterday and not since
+    was in the first write and in neither file after the second. Missing or
+    unreadable is simply nothing to keep."""
+    try:
+        old = gzip.decompress(objstore.get_bytes(key)).decode("utf-8")
+    except Exception:  # noqa: BLE001 - nothing there yet, or nothing usable
+        return rows
+    fresh = {str(r.get("fingerprint") or r.get("id") or "") for r in rows}
+    kept = []
+    for line in old.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict)
+                and str(row.get("fingerprint") or row.get("id") or "") not in fresh):
+            kept.append(row)
+    return rows + kept
+
+
 def archive_day(day: _dt.date | None = None) -> bool:
     """Write yesterday's distinct failures to R2. Returns whether it landed.
 
@@ -66,6 +92,7 @@ def archive_day(day: _dt.date | None = None) -> bool:
         rows = db.error_events_list(limit=MAX_ROWS, since_hours=48)
         if not rows:
             return False
+        rows = _with_what_is_there(key_for(day), rows)
         objstore.put_bytes(bundle(rows), key_for(day), "application/gzip")
         log.info("logarchive: wrote %d error(s) to %s", len(rows), key_for(day))
         return True
