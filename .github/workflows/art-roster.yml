@@ -62,11 +62,15 @@ jobs:
       - name: Install
         run: pip install httpx pytest python-dotenv pydantic
 
+      # The inputs travel as environment variables, never spliced into the
+      # script: `limit` is free text, and `${{ }}` inside `run:` is pasted in
+      # before the shell parses it, in a job that can push and open PRs.
       - name: Rebuild the roster
+        env:
+          LIMIT: ${{ github.event.inputs.limit || '1000' }}
+          NO_MET: ${{ github.event.inputs.no_met == 'true' && '--no-met' || '' }}
         run: |
-          python3 scripts/build_art_roster.py \
-            --limit "${{ github.event.inputs.limit || '1000' }}" \
-            ${{ github.event.inputs.no_met == 'true' && '--no-met' || '' }}
+          python3 scripts/build_art_roster.py --limit "$LIMIT" $NO_MET
 
       # The roster's own tests. A refresh that produces a file the app cannot
       # read, or that drops the seeded resale names, fails HERE rather than in

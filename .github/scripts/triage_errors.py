@@ -21,6 +21,7 @@ review, and enough of them cost the whole idea its credibility.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -118,7 +119,27 @@ def module_file(module: str) -> str | None:
     """
     if not module or module == "browser" or "." not in module:
         return None
-    return module.replace(".", "/") + ".py"
+    parts = module.split(".")
+    # It came from production: never a path that walks out of the tree.
+    if not all(part.isidentifier() for part in parts):
+        return None
+    return "/".join(parts) + ".py"
+
+
+def stem_files(stem: str, repo_root: str) -> list[str] | None:
+    """The files under backend/ a BARE module stem could be, or None when
+    `stem` is not one.
+
+    A row recorded from a log line names its module the way logging does:
+    the file's stem, "images", where a crash names it dotted. The fingerprint
+    is built on that name and must not change, so the stem is resolved here
+    instead -- and with no file of that name anywhere, the row was recorded
+    by an older build, exactly as for a dotted module that is gone."""
+    if not stem or stem == "browser" or not stem.isidentifier():
+        return None
+    pattern = os.path.join(repo_root, "backend", "**", f"{stem}.py")
+    return [p for p in glob.glob(pattern, recursive=True)
+            if f"{os.sep}tests{os.sep}" not in p]
 
 
 def is_dependency(module: str, repo_root: str) -> bool:
@@ -169,6 +190,9 @@ def why_not(row: dict, known: dict, repo_root: str) -> str | None:
                     "nothing in the tree is named by this row")
         if not os.path.exists(os.path.join(repo_root, path)):
             return f"{path} is not in the tree - recorded by an older build"
+    elif stem_files(module, repo_root) == []:
+        return (f"no {module}.py anywhere in backend/ - recorded by an older "
+                "build")
     return None
 
 
@@ -185,7 +209,7 @@ def candidates(feed: dict, known: dict, repo_root: str) -> list[dict]:
         if reason is None:
             keep.append(row)
         else:
-            print(f"  skipped {row.get('fingerprint', '?')}: {reason}")
+            print(one_line(f"  skipped {row.get('fingerprint', '?')}: {reason}"))
     keep.sort(key=lambda r: (r.get("severity") != "high", -(r.get("count") or 0)))
     return keep[:MAX_CANDIDATES]
 
@@ -211,6 +235,16 @@ def work_item(row: dict) -> dict:
         "traceback": row.get("traceback"),
         "component_stack": (row.get("data") or {}).get("component_stack"),
     }
+
+
+def one_line(text: str) -> str:
+    """`text` with every line break and control character made a space.
+
+    What this prints from a row is text from production, some of it typed
+    into a browser, and in an Actions step a line starting with `::` is a
+    command to the runner: a message carrying "\n::add-mask::..." or
+    "\n::stop-commands::..." would be obeyed rather than shown."""
+    return "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in text)
 
 
 def emit_output(name: str, value: str) -> None:
@@ -243,8 +277,9 @@ def main(feed_path: str, known_path: str, out_path: str,
     emit_output("path", out_path)
     print(f"{total} distinct error(s) in the window, {len(picked)} worth a fix")
     for row in picked:
-        print(f"::notice::{row.get('fingerprint')} {row.get('exc_type')} "
-              f"x{row.get('count')} - {row.get('message', '')[:120]}")
+        print("::notice::" + one_line(
+            f"{row.get('fingerprint')} {row.get('exc_type')} "
+            f"x{row.get('count')} - {str(row.get('message') or '')[:120]}"))
     # Zero either way. Finding work is an ordinary day; only being unable to
     # look is a failure. See the module docstring.
     return 0

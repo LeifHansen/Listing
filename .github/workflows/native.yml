@@ -62,9 +62,13 @@ jobs:
         run: npm ci
         working-directory: frontend
       # The upload key arrives base64-encoded in a secret and is written to the
-      # runner's temp directory, which is wiped with the job. Pull requests
-      # from forks get no secrets and build unsigned.
+      # runner's temp directory, which is wiped with the job. NO pull request
+      # gets it, a branch in this repository included: the steps around it run
+      # `npm ci` and the PR's own package scripts, so any dependency or script
+      # a PR brings in could read the key and its passwords. A PR proves the
+      # bundle builds, unsigned; signing is for a manual run.
       - name: Upload key
+        if: github.event_name != 'pull_request'
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
         run: |
@@ -78,9 +82,9 @@ jobs:
         run: npm run native:android -- --bundle
         working-directory: frontend
         env:
-          THRYFT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
-          THRYFT_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
-          THRYFT_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+          THRYFT_ANDROID_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD || '' }}
+          THRYFT_ANDROID_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.ANDROID_UPLOAD_KEY_ALIAS || '' }}
+          THRYFT_ANDROID_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_UPLOAD_KEY_PASSWORD || '' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-app-bundle
