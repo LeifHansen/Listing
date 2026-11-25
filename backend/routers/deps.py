@@ -15,6 +15,7 @@ reads the real one (tests/test_a_patch_on_main_never_silently_misses.py).
 from __future__ import annotations
 
 import base64
+import ipaddress
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -119,13 +120,58 @@ def client_ip(request: Request) -> str:
             or (request.client.host if request.client else "?"))
 
 
+_TOO_MANY = "Too many attempts. Wait a few minutes and try again."
+
+
+def _limit_client(ip: str) -> str:
+    """The client an auth limit counts: the address, or for IPv6 its /64.
+
+    One subscriber is handed a whole /64, so keyed per address an attacker
+    rotating through it was 2^64 clients with ten guesses each. Only the auth
+    buckets group this way; everything else keeps the exact address.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6 and not addr.ipv4_mapped:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return ip
+
+
 def rate_limit_auth(request: Request, bucket: str) -> None:
     """429 when one client floods an auth endpoint (see backend/ratelimit)."""
     ip = client_ip(request)
-    if not ratelimit.check(f"{bucket}:{ip}"):
+    if not ratelimit.check(f"{bucket}:{_limit_client(ip)}"):
         log.warning("auth: rate limited %s from %s", bucket, ip)
-        raise HTTPException(
-            429, "Too many attempts. Wait a few minutes and try again.")
+        raise HTTPException(429, _TOO_MANY)
+
+
+def _account_key(bucket: str, account: str) -> str:
+    return f"{bucket}-account:{(account or '').strip().lower()}"
+
+
+def refuse_if_account_resting(bucket: str, account: str) -> None:
+    """429 when `account` has had ratelimit.ACCOUNT_MAX_FAILURES failed
+    attempts this window, from whatever addresses.
+
+    Keyed on what the caller TYPED, so an address with no account behind it
+    rests exactly like one with an account, and the same words come back as
+    the per-client limit's: a throttle that only ever fired for real accounts
+    would answer the question the login error is careful never to answer.
+    Checked BEFORE the password, so a resting account costs no bcrypt.
+    """
+    if not ratelimit.allowed(_account_key(bucket, account),
+                             max_attempts=ratelimit.ACCOUNT_MAX_FAILURES):
+        log.warning("auth: %s resting for one account after repeated "
+                    "failures", bucket)
+        raise HTTPException(429, _TOO_MANY)
+
+
+def note_account_failure(bucket: str, account: str) -> None:
+    """Count one failed attempt against `account` (see the function above)."""
+    ratelimit.check(_account_key(bucket, account),
+                    max_attempts=ratelimit.ACCOUNT_MAX_FAILURES)
 
 
 def page_cursor(stamp: Optional[str], row_id: Optional[str]) -> Optional[str]:

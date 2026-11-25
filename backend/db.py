@@ -1159,7 +1159,8 @@ def get_listings(listing_ids: Sequence[str], user_id: str) -> list[dict]:
 
 def list_releasable_listings(user_id: str, account: str,
                              include_unowned: bool = False,
-                             limit: int = 1000) -> list[dict]:
+                             limit: int = 1000,
+                             account_id: str = "") -> list[dict]:
     """Records the unlink pass should consider — oldest first.
 
     RAISES on a read failure, like every other read whose blank would be a
@@ -1178,6 +1179,7 @@ def list_releasable_listings(user_id: str, account: str,
     counted twelve in SQL and the button unlinked seven, every time.
     """
     account = (account or "").strip()
+    account_id = (account_id or "").strip()
     eng = _get_engine()
     if eng is None:
         return []
@@ -1185,7 +1187,7 @@ def list_releasable_listings(user_id: str, account: str,
         with Session(eng) as s:
             # Stamped with somebody else's name. The sentinel a switch writes
             # is just another name, so it lands here too.
-            foreign = _other_ebay_owner(account)
+            foreign = _other_ebay_owner(account, account_id)
             where = foreign
             if include_unowned:
                 # No owner recorded at all. Not narrowed to records carrying
@@ -1374,7 +1376,11 @@ def save_prefs(user_id: str, prefs: dict) -> dict:
         return {}
     try:
         with Session(eng) as s:
-            u = s.get(User, user_id)
+            # Locked: `prefs` holds several independent things (defaults,
+            # saved views, dismissals), and two unlocked merges that overlap
+            # both start from the same old copy -- the later commit erases the
+            # earlier one's key. Same reason as mutate_listing_data.
+            u = s.get(User, user_id, with_for_update=True)
             if u is None:
                 return {}
             merged = dict(u.prefs) if isinstance(u.prefs, dict) else {}
@@ -1758,6 +1764,12 @@ def delete_user(user_id: str) -> Optional[list[str]]:
             # personal data about anyone else, but keyed to the person who
             # asked to be forgotten.
             s.execute(delete(SaleEvent).where(SaleEvent.user_id == user_id))
+            # The seller's own reference links: their URL and their note. A
+            # GLOBAL reference is a superadmin's contribution to every draft
+            # and carries account_id "", so it is never matched here.
+            s.execute(delete(ExpertKnowledge).where(
+                ExpertKnowledge.scope == "account",
+                ExpertKnowledge.account_id == user_id))
             s.execute(delete(User).where(User.id == user_id))  # prefs ride along
             # In THIS transaction, before the commit: the rows that name these
             # photos are about to stop existing, so the obligation to erase
@@ -2137,11 +2149,22 @@ def _no_ebay_owner():
     return or_(account_col.is_(None), account_col == "")
 
 
-def _other_ebay_owner(account: str):
+def _other_ebay_owner(account: str, account_id: str = ""):
     """Labelled with some eBay account other than `account`. An absent label
-    is NULL, which neither comparison admits, so it is not "other"."""
+    is NULL, which neither comparison admits, so it is not "other".
+
+    `account_id` is the connected account's immutable eBay user id. A record
+    stamped with that same id is this seller's under any name: a renamed
+    handle left the seller's own sold and ended records (which eBay no longer
+    lists, so no import renames them) counted as another account's -- and
+    "release" unlinked them. The same rule ebay_account.releasable applies."""
     account_col = _json_text(ListingRecord.data, "ebay_account")
-    return and_(account_col != "", account_col != account)
+    other = and_(account_col != "", account_col != account)
+    if not account_id:
+        return other
+    id_col = _json_text(ListingRecord.data, "ebay_account_id")
+    return and_(other, or_(id_col.is_(None), id_col == "",
+                           id_col != account_id))
 
 
 def _unowned_ebay_record():
@@ -2197,7 +2220,8 @@ def stamp_ebay_account(user_id: str, account: str) -> int:
         return 0
 
 
-def count_foreign_listings(user_id: str, account: str) -> int:
+def count_foreign_listings(user_id: str, account: str,
+                           account_id: str = "") -> int:
     """How many of this user's eBay-linked records belong to some OTHER eBay
     account than `account` — what the UI needs to explain why a just-connected
     store looks like it still holds the previous one's items."""
@@ -2216,7 +2240,7 @@ def count_foreign_listings(user_id: str, account: str) -> int:
                 select(func.count())
                 .select_from(ListingRecord)
                 .where(ListingRecord.user_id == user_id)
-                .where(_other_ebay_owner(account))
+                .where(_other_ebay_owner(account, (account_id or "").strip()))
             ).scalar_one() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning(f"db: count_foreign_listings failed: {exc}")
@@ -4305,12 +4329,21 @@ def expert_knowledge_list(account_id: str, expert: str = "",
 
 
 def expert_knowledge_get(record_id: str) -> Optional[dict]:
+    """One reference, or None when there is no such row. RAISES on a read
+    failure: the routes turn None into a 404, and an unclassified error into
+    a 500, where an outage is a 503 everywhere else."""
     eng = _get_engine()
     if eng is None:
         return None
-    with Session(eng) as s:
-        row = s.get(ExpertKnowledge, str(record_id or ""))
-        return _knowledge_dict(row) if row else None
+    try:
+        with Session(eng) as s:
+            row = s.get(ExpertKnowledge, str(record_id or ""))
+            return _knowledge_dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001 - reported, never swallowed
+        log.warning(f"db: expert_knowledge_get failed: {exc}")
+        raise StorageUnavailable(
+            "Couldn't load that reference just now. Try again in a moment."
+        ) from exc
 
 
 def expert_knowledge_update(record_id: str, **fields) -> bool:

@@ -473,7 +473,31 @@ class _DropDeletionAcks(logging.Filter):
             return True
 
 
+class _ScrubAccessPath(logging.Filter):
+    """Run the access line's PATH through redact.scrub.
+
+    config.py's RedactingFormatter sits on the app's own handler; uvicorn's
+    access log has its own and was never scrubbed, so a query string reached
+    stdout whole -- the connect ticket on /api/*/connect?ticket=eyJ..., the
+    OAuth `code` on the callbacks. A filter rather than a formatter because
+    uvicorn installs its handlers before this module is imported, and
+    rewriting the path arg is safe here where RedactingFormatter's docstring
+    says it is not: access records are INFO, below what services/errorlog
+    captures and fingerprints."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) == 5 and "?" in str(args[2]):
+                record.args = (args[0], args[1], redact.scrub(str(args[2])),
+                               args[3], args[4])
+        except Exception:  # noqa: BLE001 - never eat a line over scrubbing
+            pass
+        return True
+
+
 logging.getLogger("uvicorn.access").addFilter(_DropDeletionAcks())
+logging.getLogger("uvicorn.access").addFilter(_ScrubAccessPath())
 
 # Mirror WARNING-and-above into error_events, so the Errors tab and the daily
 # triage job have something to read. Installed here, beside the other log
@@ -646,6 +670,17 @@ _RECLAIM_INTERVAL_LOW = 15 * 60
 _OFFLOADABLE = {"optimized": "image/jpeg", storage.VIDEO_SUBDIR: "video/mp4"}
 
 
+def _bucket_holds(head: Optional[dict], st: os.stat_result) -> bool:
+    """Is the bucket's copy (objstore.head) THIS file, as far as can be told
+    without downloading it? Same size, and stored no earlier than the file was
+    last written. Either alone can miss: a rotation can keep the byte count,
+    and the clocks of this machine and the bucket are not the same clock -- so
+    a two-second allowance, and both tests."""
+    if head is None:
+        return False
+    return head["size"] == st.st_size and head["modified"] >= st.st_mtime - 2
+
+
 def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
                    upload_budget: int = 300) -> int:
     """Free local copies of photos and videos that are safely in R2.
@@ -684,7 +719,14 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
                             continue
                         checked += 1
                         key = objstore.key_for(d.name, p.name, kind=kind)
-                        if not objstore.exists(key):
+                        st = p.stat()
+                        if not _bucket_holds(objstore.head(key), st):
+                            # Missing -- or there but OLDER than this file:
+                            # an edit, rotate or cutout whose push was skipped
+                            # (the R2 latch) or failed. "Some object exists"
+                            # was the old test, and it freed the newer local
+                            # copy, so /media and eBay went back to serving
+                            # the photo from before the edit.
                             if uploaded >= upload_budget:
                                 continue
                             uploaded += 1
@@ -696,9 +738,9 @@ def _offload_to_r2(max_age_seconds: int, budget: int = 4000,
                                     p, key,
                                     content_type=_OFFLOADABLE[kind]) is None:
                                 continue
-                            if not objstore.exists(key):
+                            if not _bucket_holds(objstore.head(key), st):
                                 continue
-                        size = p.stat().st_size
+                        size = st.st_size
                         p.unlink(missing_ok=True)
                         freed += size
                     except Exception:  # noqa: BLE001 - keep going
@@ -1701,7 +1743,11 @@ def _retitle_for_brand(listing: Listing, maker: str) -> None:
     title = listing.title or ""
     if was and was.lower() in title.lower():
         pattern = re.compile(re.escape(was), re.IGNORECASE)
-        listing.title = pattern.sub(maker, title, count=1)[:TITLE_MAX_CHARS]
+        # A function, not the string: the brand is the AI's text, and as a
+        # replacement TEMPLATE a backslash in it raised re.error ("bad
+        # escape") inside a pass documented never to raise.
+        listing.title = pattern.sub(lambda _m: maker, title,
+                                    count=1)[:TITLE_MAX_CHARS]
     else:
         listing.missing_info = [*(listing.missing_info or []),
                                 f"Check the title — the tag reads {maker}, "
@@ -1969,7 +2015,12 @@ def _photos_for_fill(session_id: str, listing: Listing,
     the callers fall back to true when they do have to say it.
     """
     opt_dir = storage.optimized_dir(session_id)
-    names = list(listing.images) or storage.list_optimized(session_id)
+    # Only names that stay inside this session's folder. Listing's validator
+    # already drops the rest; this is the second lock on a door that sends
+    # file bytes to a third party, for a caller holding a Listing built some
+    # other way.
+    names = [n for n in (list(listing.images) or storage.list_optimized(session_id))
+             if _photo_path(session_id, n, create=False) is not None]
     # The volume alone first, for EVERY name, before anything reaches for the
     # network. A listing the reclaim pass has not touched answers here, which
     # is almost all of them and is what the old filter did; and a listing
@@ -2259,6 +2310,9 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
     # Password-guessing here is the same attack as on /login, with a worse
     # payoff for the victim — throttle it the same way.
     deps.rate_limit_auth(request, "account-delete")
+    # ...and per ACCOUNT, as login is: the per-address limit alone is no limit
+    # to a caller holding a stolen session and a pool of addresses.
+    deps.refuse_if_account_resting("account-delete", uid)
 
     # Re-authenticate: a leaked session token must not be enough to erase an
     # account. (A password is always set — signup is the only way in.)
@@ -2268,6 +2322,7 @@ def account_delete(request: Request, response: Response, payload: dict) -> dict:
         raise HTTPException(
             503, "Account service is temporarily unavailable. Please try again shortly.")
     if not auth.verify_password(password, stored):
+        deps.note_account_failure("account-delete", uid)
         raise HTTPException(401, "That password doesn't match. Try again.")
 
     listing_ids = db.delete_user(uid)
@@ -2404,14 +2459,25 @@ def _finish_connect(request: Request, path: str):
             return resp
         return RedirectResponse(path)
     target = f"{config.NATIVE_APP_ORIGIN}{path}"
+    script = f"location.replace({json.dumps(target)});"
     resp = HTMLResponse(f"""<!doctype html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Returning to Thryft Shop…</title></head>
 <body style="font-family:-apple-system,sans-serif;display:grid;place-items:center;min-height:90vh;text-align:center">
 <div><p>All done — heading back to the app…</p>
 <p><a href="{target}" style="display:inline-block;padding:12px 20px;border-radius:10px;background:#2563eb;color:#fff;text-decoration:none">Return to Thryft Shop</a></p></div>
-<script>location.replace({json.dumps(target)});</script>
+<script>{script}</script>
 </body></html>""")
+    # This page's own policy. The app-wide one allows only index.html's
+    # scripts by hash, so the line above -- the one that does the returning --
+    # was blocked and every seller had to find and tap the button. The
+    # security-headers middleware only fills in headers a response has not
+    # set, so this one stands, and it allows exactly this script.
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    resp.headers["Content-Security-Policy"] = (
+        f"default-src 'none'; script-src 'sha256-{digest}'; "
+        "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'")
     resp.delete_cookie(NATIVE_RETURN_COOKIE)
     resp.delete_cookie(RETURN_ORIGIN_COOKIE)
     return resp
@@ -2631,7 +2697,8 @@ def ebay_status(request: Request) -> dict:
         # the UI has to be able to explain them rather than let them read as
         # "the new account somehow has my old items".
         "foreign_listings": (db.count_foreign_listings(
-            uid, acct.get("ebay_username") or "") if connected and uid else 0),
+            uid, acct.get("ebay_username") or "",
+            acct.get("ebay_user_id") or "") if connected and uid else 0),
         # eBay-linked records with no owner recorded — they predate ownership
         # stamping, so after an undetected switch they are the old account's
         # items wearing no label. Reported separately because only the seller
@@ -2671,14 +2738,17 @@ def release_foreign_listings(request: Request,
     # listings were linked to the old account, pressed the button, and was
     # told seven were unlinked, every time. One row past the cap, so a run
     # that did part of the job can say so.
-    candidates = db.list_releasable_listings(uid, connected, include_unowned,
-                                             limit=RELEASE_CAP + 1)
+    candidates = db.list_releasable_listings(
+        uid, connected, include_unowned, limit=RELEASE_CAP + 1,
+        account_id=acct.get("ebay_user_id") or "")
     released = unowned = 0
     remaining = 0
     for rec in candidates:
         data = rec.get("listing") or {}
         # The SQL is a superset; this is still where the decision is made.
-        if not ebay_account.releasable(data, connected, include_unowned):
+        # The account row, not just its name: its immutable id is what keeps
+        # a renamed seller's own records from reading as another account's.
+        if not ebay_account.releasable(data, acct, include_unowned):
             continue
         if released >= RELEASE_CAP:
             # Each release is a write, and a request that walks an entire
@@ -3701,7 +3771,12 @@ def save_prefs(request: Request, payload: dict) -> dict:
             clean[key] = value
             continue
         try:
-            val = typ(float(raw or 0))
+            num = float(raw or 0)
+            # "inf" made int() raise OverflowError (a 500) and "nan" slipped
+            # through min/max -- both compare false -- into the stored prefs.
+            if not math.isfinite(num):
+                raise ValueError(raw)
+            val = typ(num)
         except (TypeError, ValueError):
             val = typ(0) if typ is float else lo
         clean[key] = min(max(val, lo), hi) if val else val
@@ -5592,13 +5667,28 @@ async def upload(
     orig = storage.original_dir(session_id)
     await run_in_threadpool(storage.save_notes, session_id,
                             listing_prompt.clean_seller_notes(notes))
+    total = 0
     try:
         for i, f in enumerate(files):
             data = await f.read()
+            total += len(data)
+            refused = None
             if len(data) > MAX_UPLOAD_BYTES:
-                await run_in_threadpool(_refund_cutouts, spent, held)
-                raise HTTPException(
+                refused = HTTPException(
                     400, f"'{f.filename or 'image'}' is too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB per image)")
+            elif total > MAX_BULK_BATCH_BYTES:
+                # The per-request bound the bulk route already has. Per-file
+                # and per-count caps alone let one anonymous request write
+                # 40 x 60MB = 2.4GB onto a 1GB volume shared by every seller.
+                refused = HTTPException(
+                    413, f"That's over {MAX_BULK_BATCH_BYTES // (1024 * 1024)}MB "
+                         "of photos in total. Upload fewer at a time.")
+            if refused is not None:
+                await run_in_threadpool(_refund_cutouts, spent, held)
+                # The files already written are an orphan session otherwise,
+                # left for the three-hour sweep.
+                await run_in_threadpool(storage.purge_session, session_id)
+                raise refused
             suffix = Path(f.filename or f"upload_{i}").suffix or ".jpg"
             # Off the event loop: a 40-photo batch is hundreds of MB of
             # synchronous write() syscalls, and while they run nothing else on
@@ -5907,6 +5997,9 @@ async def edit_image(
         from io import BytesIO
         from PIL import Image
         img = Image.open(BytesIO(data))
+        # From the header, before a pixel is decoded: this is a client's file,
+        # and a small PNG can decode to gigabytes (see images.MAX_PIXELS).
+        images.check_pixels(img)
         img.load()
         # Every edit is a new version — the outgoing working copy is snapshot
         # to history first (never destroyed), then atomically replaced so a
@@ -5924,6 +6017,8 @@ async def edit_image(
 
     try:
         await run_in_threadpool(_save)
+    except images.TooLarge as exc:
+        raise HTTPException(413, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         reference = deps.support_reference()
         log.warning("edit-image: could not process (session=%s name=%s) [%s]: %s",
@@ -6078,6 +6173,10 @@ def _studio_load(request: Request, session_id: str, name: str,
 
     if data:
         img = Image.open(BytesIO(data))
+        try:
+            images.check_pixels(img)   # before decoding; see edit-image
+        except images.TooLarge as exc:
+            raise HTTPException(413, str(exc)) from exc
         img.load()
         return img
     session_id = (session_id or "").strip()
@@ -6108,6 +6207,17 @@ def _data_url(img) -> str:
     return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
+def _put_back_bytes(originals: dict) -> None:
+    """Write each file's saved bytes back, atomically and best-effort."""
+    for target, data in originals.items():
+        try:
+            tmp = target.with_name(f".{target.name}.{threading.get_ident():x}.undo")
+            tmp.write_bytes(data)
+            os.replace(tmp, target)
+        except OSError as exc:
+            log.warning("rotate: couldn't put %s back: %s", target.name, exc)
+
+
 @app.post("/api/rotate-image")
 async def rotate_image(payload: dict, request: Request) -> dict:
     """Quick-rotate an optimized photo 90° clockwise, in place. Atomic replace
@@ -6122,9 +6232,14 @@ async def rotate_image(payload: dict, request: Request) -> dict:
     if path is None or not await run_in_threadpool(_ensure_local, session_id, name, path):
         raise HTTPException(404, "That photo isn’t on the server anymore — re-upload it.")
 
+    # The bytes of every file the turn rewrites, as they were -- so a turn
+    # the bucket did not take can be put back exactly (see below).
+    originals: dict[Path, bytes] = {}
+
     def _rotate() -> None:
         from PIL import Image
         storage.snapshot_image(session_id, name)  # rotations version too
+        originals[path] = path.read_bytes()
         # What sits behind a cutout -- the photo as shot and its matte --
         # turns with it while it still speaks for it. Left as it was, the
         # next cut would segment the composite (sideways) and a transparent
@@ -6145,6 +6260,7 @@ async def rotate_image(payload: dict, request: Request) -> dict:
         # After the working copy, so each stays at least as new as it.
         for kept in behind:
             try:
+                originals[kept] = kept.read_bytes()
                 with Image.open(kept) as k:
                     turned = k.transpose(Image.Transpose.ROTATE_270)
                     turned.load()
@@ -6184,9 +6300,14 @@ async def rotate_image(payload: dict, request: Request) -> dict:
             objstore.upload, path, objstore.key_for(session_id, name))
         if not url:
             log.warning("rotate: R2 push failed for %s/%s", session_id, name)
+            # Put the photo back as it was. A turn is relative: the card takes
+            # its own turn back on this refusal, and "try again" used to land
+            # on a file that was ALREADY turned -- 180 degrees, which is what
+            # then reached eBay. Undone, the retry is exactly one turn.
+            await run_in_threadpool(_put_back_bytes, originals)
             raise HTTPException(
-                502, "The photo was rotated here but the copy we publish from "
-                     "didn't update. Try the rotation again in a moment.")
+                502, "The copy we publish from didn't update, so the photo "
+                     "was left as it was. Try the rotation again in a moment.")
     deps.in_background(db.touch_listing, session_id, what="rotate touch")
     # The rotated file's own timestamp, for the client's cache-buster. Its
     # per-open counter restarted at 0 on every open of the editor, and a
@@ -6714,6 +6835,10 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
     spent = deps.charge_ai(request, "identify")
+    # Once per scan, as the identify job does: strategy, defaults and the
+    # price check each read it, and each read was a cross-region query.
+    uid = deps.uid(request)
+    prefs = _load_prefs(uid)
     item_notes = storage.load_item_notes(session_id)
     # Google first: what the item is and what it sells for. Shop Mode has no
     # review step, so it is asked here, inside the scan — the seller standing
@@ -6721,7 +6846,7 @@ def identify(session_id: str, request: Request) -> dict:
     google = _google_for_draft(session_id, paths, item_notes)
     try:
         result = claude_ai.identify(paths, names,
-                                    strategy=_pricing_strategy(deps.uid(request)),
+                                    strategy=_pricing_strategy(uid, prefs),
                                     notes=storage.load_notes(session_id),
                                     item_notes=item_notes,
                                     **_lookup_kwarg(google))
@@ -6741,7 +6866,7 @@ def identify(session_id: str, request: Request) -> dict:
     # it from the record, and the record is all that outlives this request
     # (see Listing.ai_confidence).
     result.listing.ai_confidence = result.confidence
-    _apply_listing_defaults(result.listing, deps.uid(request))
+    _apply_listing_defaults(result.listing, uid, prefs)
     # Before the category and before the comps: a verified UPC is both an
     # item specific and the sharpest possible comp query, and both of the
     # passes below are better for having it.
@@ -6760,7 +6885,7 @@ def identify(session_id: str, request: Request) -> dict:
     _resolve_category_after_research(result.listing)
     # Google's price first; the eBay comps only when it had none; then the
     # item's own tag, capped by whichever market answered. See _price_draft.
-    _price_draft(result.listing, google, deps.uid(request))
+    _price_draft(result.listing, google, uid, prefs)
     storage.save_listing(session_id, result.listing)
     # A SCAN, not a draft. This route is Shop Mode's alone (the pipeline
     # drafts through /api/identify-async), and the seller who triggered it is
@@ -6797,10 +6922,15 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
         # httpx's words name the API base, the path and the category id.
         raise _lookup_failed("load eBay's item specifics for that category",
                              exc) from exc
+    # The stored record, read ONCE and strictly, before anything is charged:
+    # the save at the end has to put the server-owned state back over the
+    # client's copy (see _restore_server_state), and a store that cannot be
+    # read must refuse here as a 503 rather than after the AI has been paid.
+    stored_rec = db.get_listing(session_id)
     # _photos_for_fill, not a bare is_file() filter: an offloaded photo is
     # still the seller's photo, and this route refused every listing the
     # reclaim pass had touched.
-    paths = _photos_for_fill(session_id, listing)
+    paths = _photos_for_fill(session_id, listing, stored_rec or {})
     if not paths:
         raise HTTPException(400, _NO_PHOTOS)
     spent = deps.charge_ai(request, "specifics")
@@ -6826,6 +6956,15 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # reason. See Listing.enriched_at and _enrich_listing, which stamps it the
     # same way for the identify-time pass.
     listing.enriched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # The client's copy is a full Listing, so it goes through the same
+    # restore /api/save and /api/refine do. Without it this route wrote the
+    # editor's stale `marketplaces`, `ebay_listing_id` and `source` over the
+    # server's -- the next publish then created a DUPLICATE live listing
+    # instead of revising -- and replaced the stored `dirty_fields` with the
+    # editor's, so a price edited since the editor loaded was never sent to
+    # eBay. Restoring also marks the specifics just added as dirty, which is
+    # what gets them onto a live listing at the next revise.
+    prev = _restore_server_state(session_id, listing, stored_rec or {})
     storage.save_listing(session_id, listing)
     # _sticky_status, not a second hand-written copy of the rule. This was the
     # one status write that re-implemented it, and it listed only
@@ -6834,8 +6973,7 @@ def autofill_specifics(session_id: str, req: PublishRequest, request: Request) -
     # tabs. Autofill also runs by itself when the editor opens
     # (IdentifyResult.specifics_autofilled), so nobody had to click anything.
     db.upsert_listing(session_id, listing.model_dump(),
-                      status=_sticky_status(db.get_listing_best_effort(session_id)),
-                      user_id=deps.uid(request))
+                      status=_sticky_status(prev), user_id=deps.uid(request))
     log.info("autofill-specifics: session=%s added=%d", session_id, added)
     return {"item_specifics": [s.model_dump() for s in listing.item_specifics],
             "added": added, "enriched_at": listing.enriched_at}
@@ -7627,8 +7765,11 @@ def _save_image_order(session_id: str, rec: Optional[dict],
         # every other write that shares a listing with publish's background
         # threads — and a failure is reported, not papered over with the disk
         # copy, because the row is what the next page load reads.
+        # status=None: a photo-order write never changes the stage. Passing
+        # the status read before the request did let a stale read demote a
+        # listing published in between back to "draft".
         data = db.mutate_listing_data(session_id, _set_order,
-                                      status=_sticky_status(rec), user_id=user_id)
+                                      status=None, user_id=user_id)
         if data is None:
             raise errors.StorageUnavailable(
                 "Couldn't update this listing's photos just now — nothing has "
@@ -7731,6 +7872,11 @@ def item_conditions(payload: dict, request: Request) -> dict:
         raise HTTPException(400, "category_id is required")
     creds = deps.ebay_creds_for(request)
     token = creds.get("access_token") if creds else None
+    if not token:
+        # Without a seller this spends the APPLICATION token's allowance, the
+        # one every seller shares -- so it joins the budget its siblings
+        # (/api/item-aspects, suggestions, comps) already draw on.
+        _taxonomy_guard(request)
     try:
         return {**taxonomy.item_conditions(cid, access_token=token),
                 "checked": True}
@@ -7890,8 +8036,11 @@ def _save_listing_videos(session_id: str, rec: Optional[dict],
         return data
 
     if rec:
+        # status=None for the reason _save_image_order gives: the upload
+        # worker's read can be minutes old, and a publish that landed in
+        # between was being written back as a draft.
         data = db.mutate_listing_data(session_id, _set_videos,
-                                      status=_sticky_status(rec), user_id=user_id)
+                                      status=None, user_id=user_id)
         if data is None:
             raise errors.StorageUnavailable(
                 "Couldn't update this listing's video just now — nothing has "
@@ -7918,6 +8067,54 @@ def _save_listing_videos(session_id: str, rec: Optional[dict],
             "Couldn't update this listing's video just now — nothing has "
             "changed. Try again in a moment.") from exc
     return [v.model_dump() for v in listing.videos]
+
+
+# The parts of a video entry eBay decides. Everything else is the seller's.
+_VIDEO_EBAY_KEYS = ("ebay_video_id", "status", "message")
+
+
+def _video_key(v: dict) -> str:
+    # A video this app uploaded is known by its file; one imported from eBay
+    # has no file here and is known by eBay's id.
+    return str(v.get("file") or "") or "id:" + str(v.get("ebay_video_id") or "")
+
+
+def _stamp_video_state(session_id: str, rec: Optional[dict],
+                       videos: list[dict], user_id: Optional[str]) -> None:
+    """Record what eBay said about the videos onto the list as it is NOW.
+
+    For the background writers -- the upload worker and the status poll --
+    which read the listing and then talk to eBay (the worker for minutes: a
+    150MB upload). Writing their copy of the whole list back, as
+    _save_listing_videos does for the seller's own edit, put back a video the
+    seller deleted meanwhile (its file already gone) and erased one they
+    added. So this only stamps eBay's fields onto entries that still exist,
+    and never adds or removes one.
+    """
+    by_key = {_video_key(v): v for v in videos}
+
+    def _stamp(data: dict) -> dict:
+        out = []
+        for v in data.get("videos") or []:
+            v = dict(v)
+            src = by_key.get(_video_key(v))
+            if src is not None:
+                v.update({k: src[k] for k in _VIDEO_EBAY_KEYS if k in src})
+            out.append(v)
+        data["videos"] = out
+        return data
+
+    if rec:
+        data = db.mutate_listing_data(session_id, _stamp, status=None,
+                                      user_id=user_id)
+        if data is None:
+            raise errors.StorageUnavailable("video state not recorded")
+    else:
+        disk = storage.load_listing(session_id)
+        if disk is None:
+            return
+        data = _stamp(dict(disk))
+    storage.save_listing(session_id, Listing(**data))
 
 
 # What each of eBay's status words MEANS for the seller, said once here.
@@ -7989,8 +8186,8 @@ def _run_video_upload(session_id: str, name: str, uid: Optional[str]) -> None:
     if not listing_sync.push_videos(creds["access_token"], session_id, listing):
         return
     try:
-        _save_listing_videos(session_id, rec,
-                             [v.model_dump() for v in listing.videos], uid)
+        _stamp_video_state(session_id, rec,
+                           [v.model_dump() for v in listing.videos], uid)
     except Exception as exc:  # noqa: BLE001 - the video is on eBay either way
         # The bytes ARE on eBay; only the bookkeeping failed. Worth a warning
         # because the consequence is a second 150MB upload at publish time,
@@ -8110,8 +8307,8 @@ def listing_video_status(session_id: str, request: Request) -> dict:
     creds = _ebay_creds(uid)
     if creds and listing_sync.refresh_video_status(creds["access_token"], listing):
         try:
-            _save_listing_videos(session_id, rec,
-                                 [v.model_dump() for v in listing.videos], uid)
+            _stamp_video_state(session_id, rec,
+                               [v.model_dump() for v in listing.videos], uid)
         except Exception as exc:  # noqa: BLE001 - a poll must not fail on a write
             log.info("video: status not persisted for %s: %s", session_id, exc)
     return {"videos": _video_payload(
@@ -8906,15 +9103,7 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         result.listing.ai_confidence = result.confidence
         listing = _apply_listing_defaults(result.listing, ctx.uid, ctx.prefs)
         barcodes.apply_to_listing(listing, result.identifiers)
-        # Carry the account's Promote default onto the draft itself, so
-        # the queue card shows what will actually happen at publish
-        # rather than an unchecked box that promotes anyway.
-        listing.promote = listing.promote or ctx.auto_promote
-        if ctx.auto_promote and not listing.ad_rate_percent \
-                and ctx.auto_promote_rate:
-            # And the rate it will run at, so the card shows the number the
-            # seller typed rather than a blank that bills at it anyway.
-            listing.ad_rate_percent = ctx.auto_promote_rate
+        _show_auto_promote(listing, ctx.auto_promote, ctx.auto_promote_rate)
         _resolve_category(listing)
         _assign_store_category(listing, ctx.uid)
         # Fill item specifics (and the maker) up front so the draft the
@@ -9497,6 +9686,12 @@ def bulk_cancel(job_id: str, request: Request) -> dict:
         raise HTTPException(404, "Unknown bulk job.")
     if was and was.get("phase") == _AWAITING_NOTES and was.get("_staging_id"):
         storage.purge_session(str(was["_staging_id"]))
+    if was and was.get("phase") == _AWAITING_NOTES and was.get("_refunds"):
+        # The same missing worker: a paused job's up-front charge was taken
+        # for drafting that will now never run, and nothing else in this
+        # process is going to give it back. Keyed refunds, so the boot pass
+        # that also settles cancelled mirrors cannot pay it twice.
+        tokens.refund_all(was["_refunds"])
     # "It had already finished" is not a failure — the seller asked for it to
     # be over, and it is. Say which happened so the UI can word it honestly.
     return {"ok": True, "stopped": outcome == "stopping",
@@ -10398,8 +10593,24 @@ def bulk_status_brief(job_id: str, request: Request) -> Response:
     return Response(content=body, media_type="application/json")
 
 
+def _show_auto_promote(listing: Listing, auto: bool,
+                       rate: Optional[float]) -> None:
+    """Carry the account's Promote default onto a fresh draft, so its card
+    shows what will actually happen at publish rather than an unchecked box
+    that promotes anyway -- and the rate it will run at, so the card shows the
+    number the seller typed rather than a blank that bills at it anyway.
+
+    One helper for both draft chains: only the bulk one used to do this, so
+    every single upload, Start over and split showed Promote off on a draft
+    that publish then promoted."""
+    listing.promote = listing.promote or auto
+    if auto and not listing.ad_rate_percent and rate:
+        listing.ad_rate_percent = rate
+
+
 def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
-                      spent: Optional[dict] = None) -> None:
+                      spent: Optional[dict] = None,
+                      carry: Optional[dict] = None) -> None:
     """Background worker for a single-item identify. Claude vision over several
     photos can take long enough that a synchronous request outlives the
     proxy/browser timeout ('server taking too long'); running it as a job the
@@ -10447,10 +10658,18 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # the job, the cards read the record (see Listing.ai_confidence).
         result.listing.ai_confidence = result.confidence
         _apply_listing_defaults(result.listing, uid, prefs)
+        _show_auto_promote(result.listing, *_auto_promote_settings(uid))
         barcodes.apply_to_listing(result.listing, result.identifiers)
         _beat("category")
         _resolve_category(result.listing)
         _assign_store_category(result.listing, uid)
+        # The seller's own settings a caller asked to keep (split: the
+        # shipping, store shelf and promotion the listing had). Applied after
+        # the account defaults and the store-category pick above, which are
+        # exactly what used to overwrite them.
+        for key, value in (carry or {}).items():
+            if key in Listing.model_fields:
+                setattr(result.listing, key, value)
         # Fill the category's item specifics (and hunt the maker) so the draft
         # is SEO-ready, in one consolidated call.
         added = _enrich_listing(result.listing, [opt_dir / n for n in names],
@@ -10630,10 +10849,12 @@ def identify_async(session_id: str, request: Request) -> dict:
 
 
 def _start_identify_job(session_id: str, uid: Optional[str],
-                        spent: Optional[dict]) -> str:
+                        spent: Optional[dict],
+                        carry: Optional[dict] = None) -> str:
     """Register and start a background identify over a session's photos, and
     return the job id to poll. `spent` is the charge the caller already took
-    for it; the job refunds it if the chain fails."""
+    for it; the job refunds it if the chain fails. `carry` is listing fields
+    the new draft keeps rather than taking fresh (see _run_identify_job)."""
     job_id = storage.new_session_id()
     _register_bulk_job(job_id, {
         "id": job_id, "kind": "identify", "phase": "identifying",
@@ -10641,7 +10862,8 @@ def _start_identify_job(session_id: str, uid: Optional[str],
         "_refunds": tokens.receipts(spent),
     }, uid=uid)
     threading.Thread(
-        target=_run_identify_job, args=(job_id, session_id, uid, spent), daemon=True,
+        target=_run_identify_job, args=(job_id, session_id, uid, spent, carry),
+        daemon=True,
     ).start()
     log.info("identify job %s: started (session=%s)", job_id, session_id)
     return job_id
@@ -10692,13 +10914,20 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
     if not uid:
         raise HTTPException(401, "Log in to save items to your inventory.")
     deps.assert_session_owner(req.session_id, request)
+    # The client's copy goes through the same restore every save does, and a
+    # record already past this stage keeps its stage: a second tap on Buy for
+    # an item since published used to blank its eBay id and move it back to
+    # "unlisted" -- and the next publish then made a DUPLICATE live listing.
+    prev = _restore_server_state(req.session_id, req.listing)
+    status = _sticky_status(prev)
     storage.save_listing(req.session_id, req.listing)
     # Shop Mode's "Buy" is a decision made in a shop, on this answer: the
     # seller taps it and then pays for the item. A write that did not land
     # means the thing they just bought is not in the dashboard they will look
     # for it in, and `ok: true` gave them no reason to check.
     landed = db.upsert_listing(req.session_id, req.listing.model_dump(),
-                               status="unlisted", user_id=uid)
+                               status=status if status != "draft" else "unlisted",
+                               user_id=uid)
     if db.enabled() and not landed:      # see the note in merge_listings
         raise errors.StorageUnavailable(
             "Couldn't save that to your inventory just now. Try again in a "
@@ -10715,6 +10944,14 @@ def inventory_add(req: PublishRequest, request: Request) -> dict:
 # import capped at 300 + 100 sold + 100 ended — a seller with 616 active
 # listings lost the overflow twice over, once on import and again on read.
 LIST_CAP = int(os.getenv("LISTING_LIST_CAP", "3000") or "3000")
+
+# The stages services/recommender gives a suggestion to (it returns nothing
+# for any other). The routes that rank suggestions ask the database for these
+# alone: LIST_CAP over EVERY status is the newest 3,000 records, and on a
+# store whose sold archive has grown past that, the older live listings never
+# got a suggestion and "Finish everything" never reached them -- while each
+# dashboard load read thousands of archive blobs to discard them.
+RECOMMENDABLE_STATUSES = ("published", "live", "unlisted")
 # How many listings one unlink pass may release. Each one is its own
 # write, so an unbounded pass over a switched-account store outlives the
 # gateway; the remainder is reported so a second press finishes the job.
@@ -11241,7 +11478,8 @@ def insights(request: Request) -> dict:
                 "finish_all": {"total": 0, "enrich": 0, "accept": 0},
                 "bulk_caps": _bulk_caps()}
     try:
-        items = db.list_listings(limit=LIST_CAP, user_id=user["id"])
+        items = db.list_listings(limit=LIST_CAP, user_id=user["id"],
+                                 statuses=RECOMMENDABLE_STATUSES)
         creds = deps.ebay_creds_for(request)
         metrics_by_id = _metrics_by_record_id(creds, items)
         recs = recommender.ranked(
@@ -11825,7 +12063,8 @@ def send_offers_all(payload: dict, request: Request) -> dict:
         return {"job_id": joined[0], "running": True, "total": 0,
                 "deferred": 0}
     try:
-        items = db.list_listings(limit=LIST_CAP, user_id=uid)
+        items = db.list_listings(limit=LIST_CAP, user_id=uid,
+                                 statuses=RECOMMENDABLE_STATUSES)
         records = _suggestion_set(items, creds, SEND_OFFERS_ALL_TYPES)
         if not records:
             raise HTTPException(400, "There's nobody left to send an offer to.")
@@ -12136,6 +12375,17 @@ def _enrich_one(rec: dict, uid: str, creds: Optional[dict], base_url: str,
     {"message": why it failed}.
     """
     rid = rec["id"]
+    # Judged on the record as it is NOW, like every other bulk worker. The
+    # jobs hand over what they read when the button was pressed, and "Finish
+    # everything" is uncapped -- a listing can sell, be deleted or be edited
+    # hours before the run reaches it. Acting on that copy re-downloaded a
+    # sold listing's photos and wrote it back as live, recreated a deleted
+    # one, and saved over the seller's edits.
+    fresh = _owned_by(rid, uid)
+    if fresh is None:
+        return {"skip": "This listing was removed before the run reached it.",
+                "needs_you": False}
+    rec = fresh
     status = rec.get("status") or ""
     if status in ("sold", "ended"):
         # A settled listing is an archive record: its photos are purged on
@@ -12488,12 +12738,15 @@ def _run_finish_job(job_id: str, records: list[dict], uid: str,
             # Re-read: the fill above just wrote to this record and dropped
             # the notes it answered, so `rec` is stale by exactly the field
             # this reads.
+            # A listing that is gone (deleted, or no longer this seller's)
+            # is skipped: `or rec` used to hand the stale copy on, and
+            # accepting its notes WROTE it back -- a deleted listing returned.
             try:
-                fresh = db.get_listing(rid) or rec
+                fresh = _owned_by(rid, uid)
             except Exception:  # noqa: BLE001 - a stale read, not a lost run
-                fresh = rec
+                fresh = None
             try:
-                if _accept_remaining_notes(fresh, uid).get("ok"):
+                if fresh is not None and _accept_remaining_notes(fresh, uid).get("ok"):
                     accepted += 1
             except Exception as exc:  # noqa: BLE001 - one listing, not the run
                 log.warning("finish: couldn't accept notes on %s: %s", rid, exc)
@@ -12566,7 +12819,8 @@ def finish_all(request: Request) -> dict:
         return {"job_id": joined[0], "running": True, "total": 0,
                 "deferred": 0}
     try:
-        items = db.list_listings(limit=LIST_CAP, user_id=uid)
+        items = db.list_listings(limit=LIST_CAP, user_id=uid,
+                                 statuses=RECOMMENDABLE_STATUSES)
         creds = deps.ebay_creds_for(request)
         records = _suggestion_set(items, creds, FINISH_ALL_TYPES)
         if not records:
@@ -12807,6 +13061,13 @@ def _clone_listing(listing_id: str, rec: dict,
     # reviewed it, published it and sold it. Carried over, "AI: low" would sit
     # on the new draft's card as a verdict on copy that has already sold once.
     data["ai_confidence"] = ""
+    # The old item's sync bookkeeping, which _DUPLICATE_CLEARED already drops
+    # for a duplicate: carried here, the new draft opened with the old item's
+    # conflicts, the next sync diffed it against the OLD item's shadow, offer
+    # nudges stayed silenced, and its video entries named files this copy
+    # never made.
+    data.update({"dirty_fields": [], "remote_shadow": {}, "conflicts": {},
+                 "offer_sent_at": "", "publish_error": "", "videos": []})
     listing = Listing(**{k: v for k, v in data.items() if k in Listing.model_fields})
 
     new_id = storage.new_session_id()
@@ -12880,6 +13141,12 @@ def _copy_photos(src_id: str, new_id: str, names: list[str]) -> list[str]:
     dst_dir = storage.optimized_dir(new_id)
     copied: list[str] = []
     for name in names:
+        # The same containment every name-taking route gets: these come from a
+        # stored record, and a "../" name would copy a file from outside the
+        # session into one /media serves.
+        if (_photo_path(src_id, name, create=False) is None
+                or _photo_path(new_id, name, create=False) is None):
+            continue
         src = src_dir / name
         dst = dst_dir / name
         try:
@@ -13069,9 +13336,17 @@ def split_listing(listing_id: str, req: SplitListingRequest,
     except errors.StorageUnavailable:
         _undo_charges()
         raise
-    jobs = {"new": _start_identify_job(new_id, uid, spent_new)}
+    # The stub carried these, but the identify job saves a fresh draft over
+    # it -- so they are handed to the job as well, or the second listing
+    # lost its shipping, store shelf and promotion the moment it was written.
+    jobs = {"new": _start_identify_job(new_id, uid, spent_new, carry=carried)}
     if req.redraft:
-        jobs["original"] = _start_identify_job(listing_id, uid, spent_old)
+        # The original keeps what is the seller's, not the AI's: the same
+        # settings, plus what they paid and the video still on it.
+        keep = {**carried, **{k: data[k] for k in ("purchase_price", "videos")
+                              if k in data}}
+        jobs["original"] = _start_identify_job(listing_id, uid, spent_old,
+                                               carry=keep)
     log.info("split: %s -> new draft %s (%d photo(s) moved, %d kept, "
              "redraft=%s) user=%s", listing_id, new_id, len(copied),
              len(remaining), req.redraft, uid)
@@ -13123,8 +13398,11 @@ def bulk_delete_listings(payload: dict, request: Request) -> dict:
         deps.in_background(_purge_session_images_best_effort, lid,
                            what="bulk-delete cleanup")
     log.info("bulk delete: %d/%d removed user=%s", len(deleted), len(ids), uid)
+    # `refused` is the subset of `skipped` the database turned away (try
+    # again), as against ids that are gone or not this seller's.
     return {"ok": True, "deleted": deleted,
-            "skipped": [i for i in ids if i not in deleted]}
+            "skipped": [i for i in ids if i not in deleted],
+            "refused": refused}
 
 
 # --- Merging duplicate drafts ------------------------------------------------
@@ -13229,10 +13507,13 @@ def merge_listings(payload: dict, request: Request) -> dict:
                for n in base + storage.list_optimized(target_id)), default=-1) + 1
     added: list[str] = []
     for sid, s_listing in sources:
-        sdir = storage.optimized_dir(sid)
         for n in (s_listing.get("images") or storage.list_optimized(sid)):
-            src = sdir / n
-            if not src.is_file():
+            # _photo_path, not `sdir / n`: these names come from the stored
+            # record's raw dict, which never passed Listing's name guard if it
+            # was saved before that existed -- and the copy below lands under
+            # a server-minted name that /media serves to anyone.
+            src = _photo_path(sid, n, create=False)
+            if src is None or not src.is_file():
                 continue  # photo already lost from disk — skip, keep merging
             dst_name = f"img_{nxt:03d}.jpg"
             try:
@@ -13761,9 +14042,13 @@ def _end_and_relist_one(rec: dict, uid: str, creds: dict, base_url: str,
         log.warning("end-and-relist: photo adoption failed for %s: %s",
                     listing_id, exc)
     src_dir = storage.optimized_dir(listing_id)
-    for name in (data.get("images") or []):
+    # Contained names only: these come from the stored record's raw dict, and
+    # _ensure_local WRITES to the path it is given.
+    names = [n for n in (data.get("images") or [])
+             if _photo_path(listing_id, n, create=False) is not None]
+    for name in names:
         _ensure_local(listing_id, name, src_dir / name)
-    if not any((src_dir / n).is_file() for n in (data.get("images") or [])):
+    if not any((src_dir / n).is_file() for n in names):
         return {"message": "This listing has no photos we can relist with — "
                            "open it and add one, then try again."}
     # Photos eBay would refuse for size. The new listing carries these same
@@ -13773,10 +14058,9 @@ def _end_and_relist_one(rec: dict, uid: str, creds: dict, base_url: str,
     # anything is copied or ended, so they still have exactly what they had.
     # The common case is an imported listing first put up with small photos:
     # its adopted copies are the same size, since nothing here upscales.
-    small = images.below_ebay_minimum(
-        [src_dir / n for n in (data.get("images") or [])])
+    small = images.below_ebay_minimum([src_dir / n for n in names])
     if small:
-        total = len(data.get("images") or [])
+        total = len(names)
         which = ("Its photo is" if total == 1 else
                  "Its photos are" if len(small) == total else
                  f"{len(small)} of its {total} photos are")
@@ -14169,7 +14453,13 @@ def sync_listings(request: Request, payload: Optional[dict] = None) -> dict:
     # calls — and the next sync, the one with real work, was refused. The
     # cooldown exists to ration eBay's daily quota, so it should only ever be
     # consumed by a run that spends some of it.
-    if live and not sync_guard.sweep_due(user["id"], force):
+    if live and not creds:
+        # Nothing can be swept without a connection, and asking sweep_due()
+        # would start the six-hour cooldown anyway -- so a seller who
+        # reconnected eBay found the item-by-item checks refused until it ran
+        # out.
+        live = []
+    elif live and not sync_guard.sweep_due(user["id"], force):
         # Cooled down: the finished-list reconcile above already ran (and is
         # what actually moves ended/sold records), so skip the per-item sweeps
         # rather than spending the account's daily eBay quota on a background
@@ -14801,6 +15091,7 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
                    "title": (records[str(i["id"])].get("listing") or {}).get("title") or "",
                    "status": "queued"} for i in queued],
         "_ids": [str(i["id"]) for i in queued], "_mode": mode,
+        "_queue": [_crosspost_queue_item(i) for i in queued],
         "_done": [], "_inflight": [],
     }, uid=uid)
     threading.Thread(target=_run_crosspost_job,
@@ -14809,6 +15100,14 @@ def crosspost_etsy_start(request: Request, payload: dict) -> dict:
     log.info("crosspost %s: started for user=%s listings=%d mode=%s",
              job_id, uid, len(queued), mode)
     return {"job_id": job_id, "running": True, "total": len(queued)}
+
+
+def _crosspost_queue_item(item: dict) -> dict:
+    """What a crosspost needs to send one listing, small enough to mirror:
+    its id and what the seller reviewed for it in the wizard."""
+    return {"id": str(item.get("id") or ""),
+            "etsy": dict(item.get("etsy") or {}),
+            "title_override": str(item.get("title_override") or "")}
 
 
 def _crosspost_one(job_id: str, uid: str, item: dict, mode: str,
@@ -14952,15 +15251,21 @@ def _resume_interrupted_crossposts(records: list[dict]) -> set[str]:
                     "The server restarted while this one was being sent, so we "
                     "can't tell whether Etsy created it. Check your Etsy shop's "
                     "drafts before running it again."))
+        # Each listing as the seller reviewed it: its Etsy category and
+        # attestations, and any title of its own. A bare id sent the rest of
+        # the run to Etsy with none of them.
+        reviewed = {str(q.get("id")): q for q in (record.get("_queue") or [])
+                    if isinstance(q, dict)}
+        queue = [reviewed.get(i) or {"id": i} for i in ids if i in owned]
         jobstore.register(job_id, {
             "id": job_id, "kind": "crosspost-etsy", "phase": "publishing",
             "done": False, "error": None, "current": len(done) + len(inflight),
             "total_items": len(items), "items": items,
             "_ids": ids, "_mode": mode, "_done": done + inflight, "_inflight": [],
+            "_queue": [_crosspost_queue_item(q) for q in queue],
         }, uid=uid)
         with _CROSSPOST_JOBS.lock:
             _CROSSPOST_JOBS[uid] = job_id
-        queue = [{"id": i} for i in ids if i in owned]
         threading.Thread(
             target=_run_crosspost_job,
             args=(job_id, uid, queue, mode, "", done + inflight),

@@ -43,11 +43,16 @@ def seller(dbmod, monkeypatch):
 @pytest.fixture()
 def chains(monkeypatch):
     """The identify chains started, as (session, uid, charge); the AI itself
-    never runs here."""
-    started = []
+    never runs here. What each was asked to carry is kept in `carried`."""
+    class Started(list):
+        carried: dict
 
-    def start(session_id, uid, spent):
+    started = Started()
+    started.carried = {}
+
+    def start(session_id, uid, spent, carry=None):
         started.append((session_id, uid, spent))
+        started.carried[session_id] = dict(carry or {})
         return f"job-{len(started)}"
 
     monkeypatch.setattr(main, "_start_identify_job", start)
@@ -116,6 +121,11 @@ def test_the_other_items_photos_move_to_a_new_draft_the_ai_writes(seller, chains
     # keeps -- and the client is told which job is which.
     assert [(s, u) for s, u, _ in chains] == [(new_id, uid), (rid, uid)]
     assert body["jobs"] == {"new": "job-1", "original": "job-2"}
+    # ...and the chain is told to keep those settings: it saves a fresh draft
+    # over the stub, which used to drop the shipping and the store shelf.
+    assert chains.carried[new_id]["fulfillment_policy_id"] == "fp-1"
+    assert chains.carried[new_id]["store_category_id"] == "sc-9"
+    assert chains.carried[rid]["fulfillment_policy_id"] == "fp-1"
     # What the seller told the AI about the pile goes with the photos, and
     # what they said about each item is written where its chain reads it.
     assert storage.load_notes(new_id) == "estate sale pile"
@@ -215,3 +225,43 @@ def test_a_broke_seller_is_refused_before_a_photo_moves(seller, chains,
     assert dbmod.get_listing(rid)["listing"]["images"] == ["a.jpg", "b.jpg", "c.jpg"]
     assert (storage.optimized_dir(rid) / "c.jpg").is_file()
     assert chains == []
+
+
+def test_the_identify_job_keeps_what_it_was_told_to_carry(monkeypatch):
+    """The other half of the plumbing: the job writes a fresh draft and
+    applies the account's defaults, and the carried settings win over both."""
+    from backend.models import IdentifyResult, Listing
+
+    sid = "carry-1"
+    d = storage.optimized_dir(sid)
+    (d / "img_000.jpg").write_bytes(b"jpeg")
+
+    def identify(paths, names, **k):
+        return IdentifyResult(listing=Listing(title="A polo", images=list(names)),
+                              confidence="high", raw_observations="")
+
+    def defaults(listing, uid, prefs=None):
+        listing.fulfillment_policy_id = "account-default"
+        listing.store_category_id = "account-shelf"
+
+    saved = {}
+    monkeypatch.setattr(main.claude_ai, "identify", identify)
+    monkeypatch.setattr(main, "_apply_listing_defaults", defaults)
+    for name in ("_google_for_draft", "_resolve_category", "_assign_store_category",
+                 "_enrich_listing", "_lookup_artwork", "_research_draft",
+                 "_resolve_category_after_research", "_fill_what_is_left",
+                 "_price_draft"):
+        monkeypatch.setattr(main, name, lambda *a, **k: None)
+    monkeypatch.setattr(main.db, "upsert_listing",
+                        lambda rid, data, **k: saved.update(data) or True)
+    job_id = storage.new_session_id()
+    main._register_bulk_job(job_id, {"id": job_id, "kind": "identify",
+                                     "done": False, "error": None})
+
+    main._run_identify_job(job_id, sid, None, None,
+                           carry={"fulfillment_policy_id": "fp-1",
+                                  "store_category_id": "sc-9"})
+
+    assert saved["title"] == "A polo"
+    assert saved["fulfillment_policy_id"] == "fp-1"
+    assert saved["store_category_id"] == "sc-9"

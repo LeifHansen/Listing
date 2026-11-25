@@ -62,10 +62,20 @@ def _session_ids() -> list[str]:
     Listing ids ARE session ids in this app — the record id is the session
     the photos live under. Reading them from the database rather than from
     the filesystem is what keeps the migration from being steerable.
+
+    EVERY row, Shop Mode scans included: `_unclaimable` is only safe if it
+    sees every live id, and `list_listings` leaves scans out by default. Ids
+    only, too -- not every listing's JSON blob in one read.
     """
+    if not db.enabled():
+        return []
+    known = db.all_listing_ids()
+    if known is None:
+        # all_listing_ids answers None for a failed read. Not [] -- that
+        # would report "nothing to migrate" having read nothing.
+        raise errors.StorageUnavailable("couldn't read the listing ids")
     ids = []
-    for rec in db.list_listings(limit=1_000_000):
-        sid = (rec or {}).get("id") or ""
+    for sid in sorted(known):
         try:
             storage.safe_session_name(sid)
         except ValueError:
