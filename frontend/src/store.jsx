@@ -7,6 +7,8 @@ import {
   normalizeSavedViews, removeSavedView,
 } from "@/lib/listingFilters";
 import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
+import { DEFAULT_SORT, normalizeSort } from "@/lib/listingSort";
+import { DEFAULT_LIMITS, saleIndex } from "@/lib/saleEvents";
 import { isDraft } from "@/lib/listingsView";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
@@ -94,6 +96,17 @@ const NO_LISTINGS = {
 // identical in an empty array, and only one of them is a reason to tell a
 // seller they have no saved views.
 const NO_SAVED_VIEWS = { items: [], loaded: false, saving: false };
+// The seller's eBay sale events (lib/saleEvents). `checked` false means the
+// last pull could not reach eBay and `items` is what was last known — never
+// "no sales". `needsReconnect`: the token predates the sell.marketing scope.
+const NO_SALE_EVENTS = Object.freeze({
+  items: [], loaded: false, loading: false, checked: true, needsReconnect: false,
+  connected: false, syncedAt: "", limits: DEFAULT_LIMITS,
+});
+// How long a pull of the seller's sales is good for on this screen. The
+// server keeps its own, longer window (sale_events.REFRESH_MAX_AGE); this
+// only stops the Manage tab asking again every time it is opened.
+const SALE_EVENTS_FRESH_MS = 10 * 60 * 1000;
 
 // How long a mirror rebuild stays good enough to skip.
 //
@@ -255,11 +268,26 @@ export function AppProvider({ children }) {
     setMarket(id);
     try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
   }, []);
+  // The order of the Manage grid (lib/listingSort). Remembered per device
+  // like the layout, and for the same reason the filters below are NOT: a
+  // sort hides nothing, and the Sort button always names the one that is on,
+  // so a remembered order can never look like missing listings.
+  const [listingsSort, setSort] = useState(() => {
+    try { return normalizeSort(readLocal("listings-sort")); } catch (e) { return DEFAULT_SORT; }
+  });
+  const setListingsSort = useCallback((next) => {
+    const id = normalizeSort(next);
+    setSort(id);
+    try { writeLocal("listings-sort", id); } catch (e) { /* a preference */ }
+  }, []);
   // The ticks on the LIVE listings (the drafts have draftSelection below):
   // an id -> true map of what the seller picked for a bulk action on the
   // Manage tab (End & relist, or a crosspost). Memory-only, and held here so
   // opening a listing to fix it keeps the other ticks.
   const [liveSelection, setLiveSelection] = useState({});
+  // Which half of the Manage tab is showing: the listings grid or the Sales
+  // list. Memory-only, like the tab: Manage opens on the listings.
+  const [manageSection, setManageSection] = useState("listings");
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     const t = tab || "active";
@@ -331,8 +359,11 @@ export function AppProvider({ children }) {
   }, []);
 
   const saveListingView = useCallback(async (name) => {
+    // The order rides along only when it is not the default: a view saved
+    // in "Recommended" is a list, not an instruction to re-sort.
     const result = addSavedView(savedViews.items, {
       name, tab: listingsTab, filters: listingFilters,
+      sort: listingsSort === DEFAULT_SORT ? "" : listingsSort,
     });
     if (!result.ok) {
       toast(result.error, { kind: "warning" });
@@ -348,7 +379,7 @@ export function AppProvider({ children }) {
       : `Saved “${result.view.name}” — it's on every device you sign in from.`,
     { kind: "success" });
     return result;
-  }, [savedViews.items, listingsTab, listingFilters, writeSavedViews, toast]);
+  }, [savedViews.items, listingsTab, listingFilters, listingsSort, writeSavedViews, toast]);
 
   const deleteListingView = useCallback(async (id) => {
     const gone = savedViews.items.find((v) => v.id === id);
@@ -370,7 +401,51 @@ export function AppProvider({ children }) {
     if (!v) return;
     setListingsTab(v.tab);
     setFilters(v.filters);
+    if (v.sort) setListingsSort(v.sort);
+  }, [setListingsSort]);
+
+  // ---------- sale events (eBay markdown sales) ----------
+  // The list is the SERVER's: every sale route answers with the whole of it,
+  // and `adoptSaleEvents` takes that answer as it is — the same arrangement
+  // as the saved views, so what is on screen is what is recorded.
+  const [saleEvents, setSaleEvents] = useState(NO_SALE_EVENTS);
+  const saleEventsFreshUntil = useRef(0);
+  const saleEventsRequest = useRef(0);
+  const adoptSaleEvents = useCallback((res) => {
+    if (!res || !Array.isArray(res.events)) return;
+    setSaleEvents((cur) => ({
+      ...cur,
+      items: res.events,
+      loaded: true,
+      loading: false,
+      connected: res.connected !== false,
+      checked: res.checked ?? cur.checked,
+      needsReconnect: res.needs_reconnect ?? cur.needsReconnect,
+      syncedAt: res.synced_at ?? cur.syncedAt,
+      limits: { ...DEFAULT_LIMITS, ...(res.limits || {}) },
+    }));
   }, []);
+  /* Read the seller's sales — pulled from eBay first when the server's copy
+     is old (`force` always pulls). Only the newest request's answer lands,
+     the same guard the metrics use. */
+  const loadSaleEvents = useCallback(async ({ force = false, quiet = false } = {}) => {
+    if (!force && Date.now() < saleEventsFreshUntil.current) return;
+    const seq = ++saleEventsRequest.current;
+    saleEventsFreshUntil.current = Date.now() + SALE_EVENTS_FRESH_MS;
+    if (!quiet) setSaleEvents((cur) => ({ ...cur, loading: true }));
+    try {
+      const res = force
+        ? await postJson("/api/sale-events/refresh", { force: true })
+        : await api("/api/sale-events");
+      if (seq !== saleEventsRequest.current) return;
+      adoptSaleEvents(res);
+    } catch (e) {
+      if (seq !== saleEventsRequest.current) return;
+      // Keep what we had, marked as unchecked — and give the window back.
+      saleEventsFreshUntil.current = 0;
+      setSaleEvents((cur) => ({ ...cur, loading: false, checked: false }));
+    }
+  }, [adoptSaleEvents]);
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
@@ -1132,6 +1207,9 @@ export function AppProvider({ children }) {
       // past the cache: this press is the seller saying what they hold is out
       // of date, which is exactly what a cached answer would hand back.
       loadMetrics({ fresh: force });
+      // And the sales: one made in Seller Hub since the last pull is part of
+      // the store the seller just asked to see.
+      loadSaleEvents({ force, quiet: true });
       // A pass eBay cut short has NOT rebuilt the mirror, so it must not
       // latch "synced" for the next six hours — that would leave the rest of
       // the store missing until the window expired twice over.
@@ -1153,7 +1231,7 @@ export function AppProvider({ children }) {
       syncedOnce.current = false;
       return { error: e.message };
     }
-  }, [user, ebay.connected, loadListings, loadMetrics, watchImport]);
+  }, [user, ebay.connected, loadListings, loadMetrics, loadSaleEvents, watchImport]);
   // Offer the mirror an automatic rebuild as soon as we have a user and a
   // connected eBay account — syncStore decides whether one is actually DUE,
   // and bails out immediately in every other case (including no user, no
@@ -1713,6 +1791,9 @@ export function AppProvider({ children }) {
     // from the account that just signed out.
     setFilters(EMPTY_FILTERS);
     setSavedViews(NO_SAVED_VIEWS);
+    setSaleEvents(NO_SALE_EVENTS);
+    saleEventsFreshUntil.current = 0;
+    setManageSection("listings");
     listingsJumpRef.current = null;
 
     // ...and land where signing back in is the obvious next move. There is no
@@ -1919,12 +2000,20 @@ export function AppProvider({ children }) {
     };
   }, [metricsLive, loadMetrics]);
 
+  // Which card is in which sale — joined here once, so the grid, the bulk bar
+  // and the filters all read the same answer (lib/saleEvents.saleIndex).
+  const saleByListing = useMemo(
+    () => saleIndex(saleEvents.items, listingsState.items),
+    [saleEvents.items, listingsState.items]);
+
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     settingsSection, openSettings, clearSettingsSection,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
+    listingsSort, setListingsSort, manageSection, setManageSection,
+    saleEvents, loadSaleEvents, adoptSaleEvents, saleByListing,
     listingFilters, setListingFilters, clearListingFilters,
     savedViews, saveListingView, deleteListingView,
     applyListingView,
@@ -1960,6 +2049,8 @@ export function AppProvider({ children }) {
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,
+    listingsSort, setListingsSort, manageSection, setManageSection,
+    saleEvents, loadSaleEvents, adoptSaleEvents, saleByListing,
     listingFilters, setListingFilters, clearListingFilters,
     savedViews, saveListingView, deleteListingView,
     applyListingView,

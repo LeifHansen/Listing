@@ -174,6 +174,22 @@ def test_the_studio_is_refused_while_it_is_off(client):
     assert client.charged == []
 
 
+def test_the_studio_charges_nothing_for_a_photo_that_is_not_yours(
+        client, seller, dbmod):
+    """Loading the photo is where ownership is checked, and it used to come
+    AFTER the charge: someone else's session cost a token and a slot of the
+    month's allowance before the 404, and got them back only by refund."""
+    seller.activate(UID)
+    assert dbmod.upsert_listing("sess-theirs", {"title": "Not yours",
+                                                "images": ["img_000.jpg"]},
+                                user_id="someone-else")
+    res = client.post("/api/image/remove-bg",
+                      data={"session_id": "sess-theirs", "name": "img_000.jpg"})
+    assert res.status_code == 404
+    assert client.charged == []
+    assert seller.status(UID)["used"] == 0
+
+
 def test_an_upload_without_cutouts_never_asks(client):
     """Off is not a gate on uploading: a pile sent as shot goes through."""
     files = [("files", ("a.jpg", _jpeg(), "image/jpeg"))]

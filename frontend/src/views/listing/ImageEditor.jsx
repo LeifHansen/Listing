@@ -319,8 +319,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       // photo's file. Staying quiet is right: the seller moved on.
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
-      toast("Background removed — review and Save to keep it.",
-        { kind: "success" });
       loadBgRemovalStatus();
     } catch (e) {
       toast(`Remove background failed: ${e.message}`, { kind: "error" });
@@ -366,8 +364,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     next.height = canvas.height;
     next.getContext("2d").putImageData(px, 0, 0);
     commitOperation(next, { keepStrokes: true });
-    toast("Auto levels applied — Undo to take it back, Save to keep.",
-          { kind: "success" });
   }, [aiBusy, commitOperation, toast]);
 
   // Manual crop: toggle the tool, drag a rect, Apply.
@@ -402,8 +398,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     clearOverlay();
     setTool("brush");
     commitOperation(tmp);
-    toast("Cropped — Undo to take it back, Save to keep it.", { kind: "success" });
-  }, [cropRect, clearOverlay, commitOperation, toast]);
+  }, [cropRect, clearOverlay, commitOperation]);
 
   // Rotate 90° clockwise. On the canvas, not through /api/rotate-image: the
   // studio's contract is that nothing is written until Save, and a server
@@ -422,8 +417,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     cropStart.current = null;
     clearOverlay();
     commitOperation(rotateQuarter(canvas));
-    toast("Rotated — Undo to take it back, Save to keep it.", { kind: "success" });
-  }, [aiBusy, clearOverlay, commitOperation, toast]);
+  }, [aiBusy, clearOverlay, commitOperation]);
 
   // Crop applies the moment you release the drag — no separate Apply button.
   useEffect(() => {
@@ -581,7 +575,6 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       await studioCall("/api/image/restore-original", sessionId, name);
       await load();      // repaint from the file the server just rewrote
       onSaved();
-      toast("Put back the photo as you shot it.", { kind: "success" });
     } catch (e) {
       // The originals are pruned on a timer, so "there is nothing to restore"
       // is a real answer and the server's sentence says so.

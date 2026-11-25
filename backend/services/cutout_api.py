@@ -43,10 +43,17 @@ that merely reaches services/images depend on the HTTP stack.
 No key is ever logged, and no exception MESSAGE is either: httpx puts the
 request URL in its messages. The type name and the HTTP status are enough to
 debug with and safe to write down.
+
+THE OPERATOR READS THE REAL REASON. A seller reads UNAVAILABLE for a refused
+key and for an empty account alike, because neither is theirs to fix. The
+operator can fix both, and health() is where they read which one it was --
+see "what the operator reads" below.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
+import threading
 import time
 from io import BytesIO
 from typing import Callable, Optional
@@ -106,6 +113,73 @@ class NothingFound(PhotoroomError):
     where it would not for an outage."""
 
 
+# --- what the operator reads -------------------------------------------------
+#
+# The log used to be the only place that said whether a batch came back with
+# its backgrounds on because the key was refused, the account was out of
+# images, or Photoroom was down -- and Fly's log is a stream that has rolled
+# past the batch by the time anyone asks. So the engine keeps the last thing
+# that went wrong with the SERVICE, for /api/admin/diagnostics.
+#
+# The service, not the photo. A photo Photoroom answered for and found nothing
+# in (NothingFound) proves the key, the account and the network all work, so
+# it counts as a success here. A 400 is about one photo too, but it is kept:
+# a 400 on every photo is a request format that changed under us.
+#
+# In memory, like objstore's latch: the diagnostics endpoint has to answer
+# with the database down, production is one process, and a restart clearing
+# the record is honest -- the next cutout that fails writes it again.
+
+_health_lock = threading.Lock()
+_last_failure: Optional[dict] = None
+_last_success_at: Optional[str] = None
+_failures_since_success = 0
+
+
+def _stamp() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _failed(kind: str, reason: str, status: Optional[int] = None,
+            detail: str = "") -> None:
+    """Remember why the engine just failed. `reason` is the operator's
+    sentence; `detail` is Photoroom's own words, from _short_reason or an
+    exception's type name, so never a key or a URL."""
+    global _last_failure, _failures_since_success
+    with _health_lock:
+        _last_failure = {"kind": kind, "reason": reason, "status": status,
+                         "detail": detail, "at": _stamp()}
+        _failures_since_success += 1
+
+
+def _succeeded() -> None:
+    global _last_success_at, _failures_since_success
+    with _health_lock:
+        _last_success_at = _stamp()
+        _failures_since_success = 0
+
+
+def health() -> dict:
+    """Whether Photoroom is working, and if not, why -- for the operator.
+
+    `failing` is whether the most recent call failed. `last_failure` is kept
+    after a success, so a fault that has since cleared can still be read;
+    compare its `at` with `last_success_at`. Since the last restart only.
+
+    Never on /api/ready, which anyone can read: `detail` is Photoroom's own
+    words about the app's account.
+    """
+    with _health_lock:
+        failure = dict(_last_failure) if _last_failure else None
+        success, streak = _last_success_at, _failures_since_success
+    return {"configured": config.photoroom_ready(),
+            "sandbox": config.PHOTOROOM_SANDBOX,
+            "failing": streak > 0,
+            "failures_since_success": streak,
+            "last_failure": failure,
+            "last_success_at": success}
+
+
 # --- HTTP plumbing ----------------------------------------------------------
 
 def _backoff(resp, attempt: int) -> float:
@@ -139,6 +213,11 @@ def _send_with_retries(send: Callable):
             if attempt == _TRIES:
                 # The TYPE only, never str(exc): httpx puts the request URL in
                 # its messages.
+                _failed("unreachable",
+                        f"Couldn't reach Photoroom through {_TRIES} attempt(s) "
+                        "— an outage at Photoroom or a network problem "
+                        "between this server and it.",
+                        detail=type(exc).__name__)
                 raise PhotoroomError(
                     f"Couldn't reach Photoroom ({type(exc).__name__}) — "
                     "it may be down; the photo was kept as shot.") from exc
@@ -248,28 +327,56 @@ def photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
     sent = Image.open(BytesIO(payload))
     resp = _send_with_retries(lambda: _segment(payload))
     status = resp.status_code
+    said = _short_reason(resp) if status != 200 else ""
     if status in (401, 403):
         log.error("photoroom: HTTP %d — the PHOTOROOM_API_KEY was refused "
-                  "(missing, mistyped or revoked): %s",
-                  status, _short_reason(resp))
+                  "(missing, mistyped or revoked): %s", status, said)
+        _failed("key_refused",
+                "Photoroom refused the API key. PHOTOROOM_API_KEY is "
+                "missing, mistyped or revoked — compare it with the key in "
+                "the Photoroom API dashboard.", status, said)
         raise PhotoroomError(UNAVAILABLE)
     if status == 402:
         log.error("photoroom: HTTP 402 — the Photoroom account has no API "
-                  "plan or has used its images: %s", _short_reason(resp))
+                  "plan or has used its images: %s", said)
+        _failed("out_of_credits",
+                "The Photoroom account has no API plan, or has used all of "
+                "its images — renew or top up the plan in the Photoroom API "
+                "dashboard.", status, said)
         raise PhotoroomError(UNAVAILABLE)
     if status == 429:
+        _failed("rate_limited",
+                f"Photoroom kept rate-limiting through {_TRIES} attempt(s).",
+                status, said)
         raise PhotoroomError(
             "Background removal is busy — Photoroom kept rate-limiting us "
             "even after several retries. Try again in a minute.")
     if status == 400:
-        log.info("photoroom: HTTP 400: %s", _short_reason(resp))
+        log.info("photoroom: HTTP 400: %s", said)
+        _failed("photo_refused",
+                "Photoroom refused the photo. On one photo that is the photo; "
+                "on every photo the request format no longer matches its "
+                "API.", status, said)
         raise PhotoroomError(
             "Photoroom couldn't process this photo — it was kept as shot.")
     if status != 200:
-        log.warning("photoroom: HTTP %d: %s", status, _short_reason(resp))
+        log.warning("photoroom: HTTP %d: %s", status, said)
+        _failed("service_error", f"Photoroom answered HTTP {status}.",
+                status, said)
         raise PhotoroomError(
             f"Photoroom error {status} — the photo was kept as shot.")
-    return _decode(resp.content, sent)
+    try:
+        cut = _decode(resp.content, sent)
+    except NothingFound:
+        # Photoroom answered properly about this photo: the service works.
+        _succeeded()
+        raise
+    except PhotoroomError as exc:
+        # A 200 that wasn't a usable cutout: unreadable, or a preview.
+        _failed("bad_answer", str(exc), status)
+        raise
+    _succeeded()
+    return cut
 
 
 def engine_state() -> dict:

@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, RefreshCw, Tags } from "lucide-react";
 import { motion } from "framer-motion";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
+import { Segmented } from "@/components/ui/Segmented";
 import { exportListingsCsv } from "@/lib/listingExport";
+import { openSaleEvents } from "@/lib/saleEvents";
 import { ListingsView } from "./ListingsView";
+import { SalesView } from "./sales/SalesView";
 import { Workflow } from "./NewListing";
 
 /* The Manage screen: everything the seller already has, and nothing about
@@ -22,11 +25,22 @@ import { Workflow } from "./NewListing";
    being dropped onto the photo uploader would be a worse answer than the
    merged screen ever gave. */
 export function ManageView({ search = "" }) {
-  const { session } = useApp();
+  const {
+    session, user, ebay, manageSection, setManageSection, saleEvents, loadSaleEvents,
+  } = useApp();
+  // The sales are read when Manage opens, not only when Sales does: the
+  // listing cards show which of them are on sale, and the bulk bar offers
+  // "Add to sale…" from the Listings side.
+  useEffect(() => {
+    if (user && ebay.connected) loadSaleEvents({ quiet: true });
+  }, [user, ebay.connected, loadSaleEvents]);
 
   // Same gate NewListing uses, for the same reason: a session IS the editor.
   // Both tabs render it so a listing opens, and closes, where you already are.
   if (session) return <Workflow />;
+
+  const active = openSaleEvents(saleEvents.items).length;
+  const section = user ? manageSection : "listings";
 
   return (
     <motion.div
@@ -36,7 +50,19 @@ export function ManageView({ search = "" }) {
       className="flex flex-col gap-4"
     >
       <PageHeader icon={Tags} title="Manage" action={<ManageActions />} />
-      <ListingsView search={search} />
+      {/* Listings, or the seller's eBay sales (discounts). One screen, two
+          halves, rather than a seventh nav item: a sale is something done TO
+          listings, and the two are a tap apart. */}
+      {user && (
+        <Segmented size="md" label="Manage" value={section} onChange={setManageSection}
+          className="self-start"
+          options={[
+            { id: "listings", label: "Listings" },
+            { id: "sales", label: "Sales", count: active,
+              title: "Your eBay sales — a percentage off, for a few days" },
+          ]} />
+      )}
+      {section === "sales" ? <SalesView /> : <ListingsView search={search} />}
     </motion.div>
   );
 }

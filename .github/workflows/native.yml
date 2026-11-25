@@ -13,8 +13,8 @@ name: Native builds
 # nobody needs Android Studio to ship it.
 #
 # iOS: a simulator build with signing off. It proves the project compiles;
-# the store archive is still made in Xcode on a Mac (MOBILE.md), because it
-# needs the Apple signing identity.
+# the signed store build is the iOS → TestFlight workflow (testflight.yml),
+# run on demand, or an archive made in Xcode on a Mac (MOBILE.md).
 #
 # macOS minutes are billed at ten times Linux ones on private repositories,
 # which is why this is path-filtered rather than run on every pull request.
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
@@ -78,7 +78,7 @@ jobs:
           THRYFT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
           THRYFT_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
           THRYFT_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-app-bundle
           path: frontend/android/app/build/outputs/bundle/release/app-release.aab
@@ -91,7 +91,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
@@ -100,7 +100,7 @@ jobs:
       # uploads made with a current SDK, so that is the one worth proving.
       - name: Newest Xcode
         run: |
-          xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          xcode=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
           sudo xcode-select -s "$xcode"
           xcodebuild -version
       - name: Install

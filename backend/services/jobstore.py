@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import config, storage
 from ..config import log
@@ -73,6 +73,12 @@ MIRROR_FIELDS = (
     # the mirror is the only place they live between the pause and the answer
     # — and a deploy in that window is the ordinary case, not the rare one.
     "_session_id", "_item_notes",
+    # What Google image search said about each item at the guidance step,
+    # keyed by the item's `key`. Mirrored because each answer was a paid
+    # search the seller may already have read and approved: a deploy during
+    # the pause must put the same answers back on the cards, and a deploy
+    # during drafting must still draft from them. See main._start_google_lookups.
+    "google", "google_enabled",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",
@@ -335,6 +341,44 @@ def revise(job_id: str, expect_phase: str, uid: Optional[str] = None,
     return now
 
 
+def annotate(job_id: str, field: str, key: str, value,
+             expect_phase: Optional[str] = None,
+             when: Optional[Callable[[Optional[dict]], bool]] = None) -> bool:
+    """Set one entry of a dict-valued field, WITHOUT moving the job's revision.
+
+    For results that arrive on their own clock while a job is paused — a
+    Google lookup finishing for one item of the guidance step — and that
+    nothing derives anything from. `revise` callers write against `_rev`
+    (main.delete_pending_photo and the merge both do), so a lookup that
+    bumped it would turn the seller's delete, landing a moment later, into a
+    "this batch moved on" refusal over nothing they did. The served status is
+    still refreshed: its caches are dropped here rather than keyed off a
+    revision that did not move.
+
+    `when`, if given, is asked about the entry as it stands, under the lock,
+    and nothing is written unless it says yes — how a lookup started for a
+    photo the seller has since removed is kept from landing over the one
+    started for the photo that replaced it. False when nothing was written:
+    no such job, finished, not in `expect_phase`, or `when` said no.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None or job.get("done"):
+            return False
+        if expect_phase and job.get("phase") != expect_phase:
+            return False
+        current = dict(job.get(field) or {})
+        if when is not None and not when(current.get(key)):
+            return False
+        current[key] = value
+        job[field] = current
+        _SNAPSHOTS.pop(job_id, None)
+        _BRIEFS.pop(job_id, None)
+        record = _record(job)
+    _write_mirror(job_id, record)
+    return True
+
+
 def snapshot_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
     """`snapshot` as a ready-to-serve JSON body, cached until the job changes.
     Same None semantics (unknown job or not yours)."""
@@ -433,6 +477,25 @@ def interrupted_message(record: dict) -> str:
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "lowered on eBay — tick the rest and run it again for those.")
+    if record.get("kind") == "end-and-relist":
+        # Each listing is ended and its copy published before the next is
+        # started, so a stop leaves at most one between the two: ended, with
+        # its fresh copy saved as a draft one Publish away.
+        where = _progress(record, "done")
+        return ("The server restarted while ending and relisting"
+                f"{where}, so the run stopped early. The ones it relisted are "
+                "live — check Active for those and Inactive for the rest, and "
+                "look in Drafts for one that was ended but not yet put back.")
+    if record.get("kind") == "end-listings":
+        where = _progress(record, "done")
+        return ("The server restarted while ending your listings"
+                f"{where}, so the run stopped early. The ones it ended are off "
+                "eBay — tick the rest on Active and run it again for those.")
+    if record.get("kind") == "store-category":
+        where = _progress(record, "done")
+        return ("The server restarted while moving your listings"
+                f"{where}, so the run stopped early. The ones it moved are on "
+                "their new shelf on eBay — tick the rest and run it again.")
     if record.get("kind") == "offers":
         # "Send offers…". Each offer is stamped on its listing as it goes out,
         # which takes it out of the group — so running it again reaches only

@@ -72,7 +72,13 @@ def test_identify_goes_to_google_and_never_to_claude(monkeypatch, fresh_config):
                              item_notes="i")
     assert out == "drafted"
     assert seen["args"] == ([], ["a.jpg"])
-    assert seen["kw"] == {"strategy": "median", "notes": "n", "item_notes": "i"}
+    assert seen["kw"] == {"strategy": "median", "notes": "n", "item_notes": "i",
+                          "lookup": None}
+    # ...and what Google image search said the item is rides along with them,
+    # so the Gemini draft is written about the item Google named.
+    found = {"status": "done", "identified": "Pyrex 403"}
+    claude_ai.identify([], ["a.jpg"], lookup=found)
+    assert seen["kw"]["lookup"] is found
 
 
 def test_the_pricing_lookup_goes_to_google_too(monkeypatch, fresh_config):

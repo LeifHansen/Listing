@@ -190,11 +190,15 @@ const COMPACT = "h-9 text-[13px] px-3";
  *                Cancel / Escape, which discard what was typed.
  */
 export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
-  const { patchListing, invalidateListings } = useApp();
+  const { patchListing, invalidateListings, saleByListing, loadSaleEvents } = useApp();
   const { toast } = useToast();
   const { connected: shipsFromEbay, policies } = useFulfillmentPolicies();
   const l = item.listing || {};
   const live = isLive(item);
+  // The eBay sale this listing is in, if any. eBay takes a listing out of its
+  // sale when its price is revised, so a price typed here is warned about
+  // before it is sent — the seller may mean it, but should know.
+  const sale = live ? saleByListing?.get?.(item.id) : undefined;
   const list = layout === "list";
   const current = valuesOf(l);
   const conditions = useConditions(l.category_id);
@@ -268,6 +272,9 @@ export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
                                 ...(res.status ? { status: res.status } : {}) });
       }
       invalidateListings();
+      // A price sent on a listing in a sale took it out of the sale on eBay;
+      // read the sales again so the card stops showing a discount it lost.
+      if (sale && "price" in body) loadSaleEvents?.({ force: true, quiet: true });
       if (res.ok) {
         setRetry(null);
         toast(res.message || "Saved.", { kind: "success" });
@@ -388,6 +395,12 @@ export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
             onChange={(e) => set({ price: e.target.value })}
           />
           {hint("price")}
+          {sale && "price" in patch && (
+            <span className="text-[12px] font-medium text-warning">
+              It’s in “{sale.name}”{sale.percent_off != null ? ` (−${Math.round(sale.percent_off)}%)` : ""}.
+              Changing the price takes it out of the sale on eBay.
+            </span>
+          )}
         </Field>
       )}
       {fields.includes("quantity") && (

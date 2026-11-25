@@ -146,9 +146,9 @@ afterEach(() => {
 });
 
 describe("sorting a single upload into items at the question", () => {
-  it("offers the way back from the bulk toggle, beside Write my listing", async () => {
+  it("offers the way back from the bulk toggle, beside Approve", async () => {
     await reachTheQuestion({ after: { pending_items: TWO } });
-    expect(button("Write my listing")).toBeTruthy();
+    expect(button("Approve")).toBeTruthy();
     expect(button("It's more than one item")).toBeTruthy();
   });
 
@@ -177,7 +177,8 @@ describe("sorting a single upload into items at the question", () => {
     await type(host.querySelector("textarea"), "a polo");
 
     await act(async () => { button("It's more than one item").click(); });
-    await until(() => !!button("Write my listing"));
+    // Back with the line still in the box, so its button is Submit Changes.
+    await until(() => !!button("Submit Changes"));
 
     expect(splits).toHaveLength(1);
     // Said as a toast, which the provider draws outside the uploader.

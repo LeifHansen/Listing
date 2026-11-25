@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, ServerCog, AlertTriangle, Database } from "lucide-react";
+import { CheckCircle2, XCircle, ServerCog, AlertTriangle, Database, Scissors } from "lucide-react";
 import { Card, SectionHeader } from "@/components/ui/Card";
 import { TagPill } from "@/components/ui/badges";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -22,6 +22,62 @@ function Ready({ label, ok, missing }) {
         </span>
       )}
     </li>
+  );
+}
+
+// A server timestamp in the operator's own clock, or "" when there is none.
+function when(at) {
+  if (!at) return "";
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? at : d.toLocaleString();
+}
+
+// Photoroom, the one background-removal engine. A seller reads only that the
+// feature is "unavailable" whether the key was refused or the account ran out
+// of images — neither is theirs to fix — so this is where the operator reads
+// which it was, in Photoroom's own words. Kept in the server's memory, so it
+// covers the time since the last restart.
+function BackgroundRemoval({ pr }) {
+  if (!pr) return null;
+  const f = pr.last_failure;
+  let tone = "neutral";
+  let state = "no cutouts since the last restart";
+  if (!pr.configured) {
+    tone = "red";
+    state = "not configured";
+  } else if (pr.failing) {
+    tone = "red";
+    state = `failing · ${pr.failures_since_success} in a row`;
+  } else if (pr.last_success_at) {
+    tone = "green";
+    state = "working";
+  }
+  return (
+    <Card>
+      <SectionHeader icon={Scissors} title="Background removal (Photoroom)"
+        hint="Since the last restart. Sellers only see “unavailable”; the real reason is here." />
+      <div className="flex flex-wrap gap-2">
+        <TagPill tone={tone}>{state}</TagPill>
+        {pr.sandbox && <TagPill tone="yellow">sandbox key · watermarked</TagPill>}
+      </div>
+      {f && (
+        <div className="mt-3 flex flex-col gap-1">
+          <p className={`text-sm ${pr.failing ? "text-error" : "text-ink-secondary"}`}>
+            {pr.failing ? "Failing" : "Last failure"}
+            {f.status ? ` (HTTP ${f.status})` : ""}: {f.reason}
+          </p>
+          {f.detail && (
+            <p className="text-xs text-ink-faint">Photoroom said: “{f.detail}”</p>
+          )}
+          <p className="text-xs text-ink-faint">{when(f.at)}</p>
+        </div>
+      )}
+      {pr.last_success_at && (
+        <p className="mt-2 text-xs text-ink-faint">
+          Last cutout that worked: {when(pr.last_success_at)}
+        </p>
+      )}
+    </Card>
   );
 }
 
@@ -115,6 +171,8 @@ export function AdminSystem() {
           <Ready label="Billing (Stripe)" ok={d.tokens_enabled} missing={d.tokens_missing} />
         </ul>
       </Card>
+
+      <BackgroundRemoval pr={d.photoroom} />
     </div>
   );
 }

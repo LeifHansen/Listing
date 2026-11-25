@@ -16,6 +16,11 @@ and what does not. A 429 or a 5xx is a blip and retries with backoff. A 401,
 logged for the operator while the seller reads only that the feature is
 unavailable -- the key is the operator's to fix, not theirs.
 
+And the other half of that: the operator, who CAN fix the key or the
+account, reads which it was in cutout_api.health() -- the status, Photoroom's
+own words and when -- on /api/admin/diagnostics, rather than having to catch
+it in a log stream before it rolls away.
+
 This file needs httpx (httpx.post is monkeypatched on httpx itself, which is
 what conftest's network ban asks for and what lets the engine import httpx
 inside the call).
@@ -108,6 +113,14 @@ def photoroom(monkeypatch):
 def _no_sleep(monkeypatch):
     """Retries are real; their waiting is not, or this file takes minutes."""
     monkeypatch.setattr(cutout_api.time, "sleep", lambda _s: None)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_health(monkeypatch):
+    """Each test starts from a server that has made no calls yet."""
+    monkeypatch.setattr(cutout_api, "_last_failure", None)
+    monkeypatch.setattr(cutout_api, "_last_success_at", None)
+    monkeypatch.setattr(cutout_api, "_failures_since_success", 0)
 
 
 # --- no key means no opinion ------------------------------------------------
@@ -260,6 +273,116 @@ def test_a_downscaled_answer_is_refused_rather_than_upscaled(photoroom):
 def test_every_engine_error_is_a_valueerror():
     assert issubclass(cutout_api.PhotoroomError, cutout_api.CutoutApiError)
     assert issubclass(cutout_api.CutoutApiError, ValueError)
+
+
+# --- what the operator reads -----------------------------------------------
+#
+# The seller reads UNAVAILABLE for a refused key and an empty account alike.
+# The operator reads which one it was.
+
+def test_an_account_out_of_images_is_named_to_the_operator(photoroom):
+    photoroom.script(_Resp(402, payload={"detail": "No credits remaining"}))
+    with pytest.raises(cutout_api.PhotoroomError):
+        cutout_api.photoroom_cutout(_photo())
+
+    got = cutout_api.health()
+    assert got["failing"] is True
+    assert got["failures_since_success"] == 1
+    failure = got["last_failure"]
+    assert failure["kind"] == "out_of_credits"
+    assert failure["status"] == 402
+    assert failure["detail"] == "No credits remaining"
+    assert "plan" in failure["reason"]
+    assert failure["at"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_is_told_apart_from_an_empty_account(photoroom, status):
+    photoroom.script(_Resp(status, payload={"detail": "Invalid API key"}))
+    with pytest.raises(cutout_api.PhotoroomError):
+        cutout_api.photoroom_cutout(_photo())
+
+    failure = cutout_api.health()["last_failure"]
+    assert failure["kind"] == "key_refused"
+    assert failure["status"] == status
+    assert "PHOTOROOM_API_KEY" in failure["reason"]
+    assert KEY not in str(cutout_api.health())
+
+
+def test_an_unreachable_service_is_named_without_the_key_or_the_url(photoroom):
+    class ConnectTimeout(Exception):
+        pass
+
+    photoroom.script(ConnectTimeout(f"timed out: https://x?key={KEY}"))
+    with pytest.raises(cutout_api.PhotoroomError):
+        cutout_api.photoroom_cutout(_photo())
+
+    got = cutout_api.health()
+    assert got["last_failure"]["kind"] == "unreachable"
+    assert got["last_failure"]["detail"] == "ConnectTimeout"
+    assert got["last_failure"]["status"] is None
+    assert KEY not in str(got) and "https://" not in str(got)
+
+
+def test_a_rate_limit_that_outlasts_the_retries_is_recorded_once(photoroom):
+    photoroom.script(_Resp(429))
+    with pytest.raises(cutout_api.PhotoroomError):
+        cutout_api.photoroom_cutout(_photo())
+
+    got = cutout_api.health()
+    assert got["last_failure"]["kind"] == "rate_limited"
+    # One photo, one failure -- not one per retry.
+    assert got["failures_since_success"] == 1
+
+
+def test_a_preview_answer_is_recorded_as_a_bad_answer(photoroom):
+    photoroom.script(_Resp(200, content=_png((200, 150), (50, 40, 150, 110))))
+    with pytest.raises(cutout_api.PhotoroomError):
+        cutout_api.photoroom_cutout(_photo())
+
+    failure = cutout_api.health()["last_failure"]
+    assert failure["kind"] == "bad_answer"
+    assert "preview" in failure["reason"]
+
+
+def test_a_streak_of_failures_is_counted_and_a_success_ends_it(photoroom):
+    photoroom.script(_Resp(402, payload={"detail": "No credits remaining"}))
+    for _ in range(3):
+        with pytest.raises(cutout_api.PhotoroomError):
+            cutout_api.photoroom_cutout(_photo())
+    assert cutout_api.health()["failures_since_success"] == 3
+
+    photoroom.script(_Resp(200, content=_png()))
+    cutout_api.photoroom_cutout(_photo())
+
+    got = cutout_api.health()
+    assert got["failing"] is False
+    assert got["failures_since_success"] == 0
+    assert got["last_success_at"]
+    # The fault that cleared is still there to read.
+    assert got["last_failure"]["kind"] == "out_of_credits"
+
+
+def test_a_photo_with_nothing_in_it_is_not_a_fault_in_the_service(photoroom):
+    """Photoroom answered, properly, about one photo: the key, the account
+    and the network all work. Recording it as a failure would send the
+    operator to the dashboard over a photo of an empty table."""
+    photoroom.script(_Resp(200, content=_png(box=None)))
+    with pytest.raises(cutout_api.NothingFound):
+        cutout_api.photoroom_cutout(_photo())
+
+    got = cutout_api.health()
+    assert got["failing"] is False
+    assert got["last_failure"] is None
+    assert got["last_success_at"]
+
+
+def test_a_server_that_has_made_no_calls_says_so(monkeypatch):
+    monkeypatch.setattr(config, "PHOTOROOM_API_KEY", KEY)
+    assert cutout_api.health() == {
+        "configured": True, "sandbox": config.PHOTOROOM_SANDBOX,
+        "failing": False, "failures_since_success": 0,
+        "last_failure": None, "last_success_at": None}
 
 
 # --- what /api/ready says --------------------------------------------------
