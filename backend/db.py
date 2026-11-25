@@ -32,6 +32,15 @@ from .config import log
 from .errors import StorageUnavailable  # noqa: F401
 
 _engine = None
+# The engine whose tables _get_engine() has built: the engine ITSELF, not True.
+# A bare flag said "built" without saying for which engine, and the test suite
+# swaps engines -- a fixture points this module at a fresh SQLite file by
+# clearing _engine and this. A thread left over from an earlier test, midway
+# through building the old engine's schema, finished after that reset and put
+# the flag back; the next caller then made an engine for the new file, read
+# "built" and skipped create_all, and every query on it said "no such table".
+# Nothing in production swaps engines, but the check costs one `is`.
+# (test_a_schema_built_for_another_database_does_not_count.py)
 _initialized = False
 # _get_engine() assigns _engine BEFORE create_all() has finished, so an
 # unguarded second caller saw a non-None engine, found _initialized still
@@ -772,8 +781,9 @@ def _get_engine():
     global _engine, _initialized
     if not enabled():
         return None
-    if _engine is not None and _initialized:
-        return _engine          # warm: no lock on the common path
+    engine = _engine
+    if engine is not None and _initialized is engine:
+        return engine           # warm: no lock on the common path
     with _engine_lock:
         if _engine is None:
             # Pool sized against the concurrency that can actually reach it,
@@ -822,11 +832,14 @@ def _get_engine():
                 # next `except` block inherits without having to know.
                 hide_parameters=True,
             )
-        if not _initialized:
-            Base.metadata.create_all(_engine)  # may raise if DB unreachable
+        # Held locally from here: _engine is a global that can be cleared
+        # while this boot is still running (see _initialized).
+        engine = _engine
+        if _initialized is not engine:
+            Base.metadata.create_all(engine)  # may raise if DB unreachable
             for stmt in _MIGRATIONS:
                 try:
-                    with _engine.begin() as conn:
+                    with engine.begin() as conn:
                         conn.execute(text(stmt))
                 except Exception as exc:  # noqa: BLE001 - see below
                     if _migration_already_applied(stmt, exc):
@@ -841,8 +854,8 @@ def _get_engine():
                     # answers the reads, and the next boot tries again.
                     log.warning("db: migration failed (will retry next boot): "
                                 "%s -- %s", stmt, exc)
-            _initialized = True
-    return _engine
+            _initialized = engine
+    return engine
 
 
 def _migration_already_applied(stmt: str, exc: Exception) -> bool:
