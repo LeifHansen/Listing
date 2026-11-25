@@ -10,6 +10,7 @@ import { ProfileCard } from "./ProfileCard";
 import { BackgroundRemovalCard } from "./BackgroundRemovalCard";
 import { MarketplaceConnections } from "./MarketplaceConnections";
 import { ExpertKnowledge } from "./ExpertKnowledge";
+import { useLocalCutout } from "@/lib/bgRemoval/useLocalCutout";
 
 // The rows of the "More" section, by id, so a deep link can open one.
 export const MORE_ROWS = ["profile", "bg-removal", "marketplaces", "teach-ai",
@@ -23,6 +24,9 @@ export const MORE_ROWS = ["profile", "bg-removal", "marketplaces", "teach-ai",
  */
 export function MoreSection({ openRow }) {
   const { bgRemoval, marketplaces, user } = useApp();
+  // This device can take backgrounds off by itself (free, no switch).
+  const local = useLocalCutout();
+  const onDevice = local.status !== "off" && local.status !== "unknown";
   const others = (marketplaces || []).filter((m) => m.key !== "ebay");
   const connected = others.filter((m) => m.connected).map((m) => m.label);
   return (
@@ -34,12 +38,14 @@ export function MoreSection({ openRow }) {
       >
         <ProfileCard />
       </Disclosure>
-      {bgRemoval?.available && (
+      {(bgRemoval?.available || onDevice) && (
         <Disclosure
           id="bg-removal" icon={Eraser} title="Background removal"
-          summary={bgRemoval.active
-            ? "On — tick “Remove background” when you upload"
-            : "Off — turn it on to cut photos out onto white"}
+          summary={local.ready
+            ? "On this device — free; tick “Remove background” when you upload"
+            : bgRemoval.active
+              ? "On — tick “Remove background” when you upload"
+              : "Off — turn it on to cut photos out onto white"}
           defaultOpen={openRow === "bg-removal"} expand={openRow === "bg-removal"}
         >
           <BackgroundRemovalCard />

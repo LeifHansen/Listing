@@ -522,7 +522,12 @@ def prune_originals(max_age_seconds: int) -> int:
     rebuilt from the photo whenever it is missing or older than it. Nothing
     reclaimed it at all -- not this, not prune_history, not the R2 offload,
     which moves optimized/ only -- so every photo the AI had ever read kept a
-    copy on the volume for the life of its listing, offloaded or not."""
+    copy on the volume for the life of its listing, offloaded or not.
+
+    mask/ goes with as_shot/, because neither means anything without the
+    other: a matte is only useful to put the photo AS SHOT on another colour
+    or to hand it over transparent (services/cutouts), and both are caches
+    whose loss costs a re-cut that is free on the seller's own device."""
     freed = 0
     try:
         base = config.SESSIONS_DIR
@@ -530,7 +535,7 @@ def prune_originals(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            for sub in ("original", "as_shot", "vision"):
+            for sub in ("original", "as_shot", "vision", "mask"):
                 try:
                     for size in _prune_older(d / sub, cutoff):
                         freed += size

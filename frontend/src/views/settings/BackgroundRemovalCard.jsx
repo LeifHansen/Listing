@@ -5,28 +5,36 @@ import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
 import { TagPill } from "@/components/ui/badges";
 import { useToast } from "@/components/ui/Toaster";
+import { useLocalCutout } from "@/lib/bgRemoval/useLocalCutout";
+import { OnDeviceCutout } from "./OnDeviceCutout";
 
 const PHOTOROOM_URL = "https://www.photoroom.com/api";
 
-// Background removal — Photoroom, on the app's own account. Photoroom has no
-// way for an app to create an account for each seller, so instead there is
-// nothing to sign up for: a seller switches the feature on here, once, and
-// switching it on is where they agree to the photos they choose being sent
-// to Photoroom. Until then the uploader does not offer the toggle and the
-// server refuses every cutout for them.
+// Background removal. First what THIS DEVICE can do by itself (free, nothing
+// sent anywhere -- OnDeviceCutout), then the cloud: Photoroom, on the app's
+// own account. Photoroom has no way for an app to create an account for each
+// seller, so instead there is nothing to sign up for: a seller switches the
+// cloud on here, once, and switching it on is where they agree to the photos
+// they choose being sent to Photoroom. Until then nothing of theirs is ever
+// sent there; the device still cuts for them.
 export function BackgroundRemovalCard() {
   const { user, bgRemoval, loadBgRemovalStatus, tokens } = useApp();
+  const local = useLocalCutout();
   const { toast, confirm } = useToast();
   const [busy, setBusy] = useState(false);
-  if (!user && bgRemoval.needs_activation) return null;
+  const onDevice = local.status !== "off" && local.status !== "unknown";
+  if (!user && bgRemoval.needs_activation && !onDevice) return null;
 
   if (!bgRemoval.available) {
-    return (
+    return onDevice ? <OnDeviceCutout /> : (
       <p className="text-sm text-ink-secondary">
         Background removal isn’t available on this server right now.
       </p>
     );
   }
+  // Signed out with an engine on the device: what the device does needs no
+  // account, the cloud switch does.
+  if (!user && bgRemoval.needs_activation) return <OnDeviceCutout />;
 
   const cost = tokens?.costs?.image_ai;
   const costLine = tokens?.enabled && cost
@@ -87,6 +95,8 @@ export function BackgroundRemovalCard() {
   if (bgRemoval.active) {
     return (
       <div className="flex flex-col gap-3">
+        <OnDeviceCutout />
+        {onDevice && <p className="font-semibold text-ink">In the cloud</p>}
         <div className="flex flex-wrap items-center gap-3">
           <div className="min-w-0 flex-1">
             <p className="font-semibold text-ink flex items-center gap-2">
@@ -117,6 +127,10 @@ export function BackgroundRemovalCard() {
 
   return (
     <div className="flex flex-col gap-4">
+      <OnDeviceCutout />
+      {onDevice && (
+        <p className="font-semibold text-ink -mb-2">In the cloud</p>
+      )}
       <p className="text-sm text-ink-secondary">
         Cut the background out of your photos and put the item on clean white —
         the look eBay recommends. Turn it on once here; then tick “Remove

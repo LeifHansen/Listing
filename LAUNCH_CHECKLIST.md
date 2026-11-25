@@ -298,6 +298,40 @@ Ordered by what it costs a seller.
          Settings card already carries).
       7. After the first deploy at the new 2 GB VM size (fly.toml), watch the
          memory graph through a bulk batch.
+      8. Cap the bill: `PHOTOROOM_MONTHLY_BUDGET_USD` (with
+         `PHOTOROOM_COST_PER_IMAGE` matching the plan). Admin → System shows
+         the month's spend against it.
+- [ ] **Background removal on the device.** An engine runs only while it is
+      listed in `BG_LOCAL_PROVIDERS` (read by the apps on every start; no
+      release needed to switch one on or off).
+      1. **iOS and Android are ON** (`BG_LOCAL_PROVIDERS = 'ios,android'` in
+         fly.toml). Older app builds ignore it and keep using Photoroom; the
+         first build that carries the `thryft-cutout` plugin cuts on the
+         device from day one. **Before promoting that build** out of
+         TestFlight / Play internal testing, run the device checklist in
+         MOBILE.md on a real iPhone (iOS 17+) and an Android phone with Play
+         services. If an engine misbehaves in the field, take its platform
+         out of the list and deploy -- no app release.
+      2. **The web engine (`web`) waits for legal.** BiRefNet Lite's code and
+         weights are MIT, but one of its training sets, DIS5K, is licensed
+         for non-commercial research only, and the author has not said
+         whether that reaches the weights. Get sign-off before listing `web`.
+      3. Then, for `web`: put an fp16 BiRefNet Lite ONNX export that runs on
+         WebGPU (stock exports are reported to run out of memory in Chrome;
+         use an opset-22 or patched re-export) on the R2 bucket, with a CORS
+         rule allowing GET from `https://app.thryftshop.com` (and
+         `capacitor://localhost`, `https://localhost`), and set
+         `BG_WEB_MODEL_URL`, `BG_WEB_MODEL_SHA256` (`sha256sum` of the file)
+         and `BG_WEB_MODEL_BYTES`. The CSP gains `'wasm-unsafe-eval'` only
+         while `web` is on.
+      4. Update the store privacy answers if they change (docs/APP_STORE.md
+         already describes the on-device path).
+      5. **The marketing site's privacy page** (marketing/src/content/legal/
+         privacy.md) needs the same two background-removal paragraphs the
+         app's own copy (frontend/public/privacy-policy.html) now has: on the
+         device first, Photoroom only for cloud removal. It ships in a
+         marketing-only pull request -- the marketing gate refuses one that
+         touches the app too.
 - [ ] **Unset the dead credentials** while there:
       `LIGHTROOM_API_KEY`, `OPENAI_API_KEY`, `SENDGRID_API_KEY`,
       `Ebay_Sandbox_App_Id` / `Ebay_Sandbox_Cert_Id` / `Ebay_Sandbox_Dev_Id`,

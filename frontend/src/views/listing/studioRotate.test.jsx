@@ -93,7 +93,9 @@ describe("the studio's Rotate", () => {
     click(tool("Rotate"));
     expect(frame()).toEqual([80, 100]);
     // Nothing went to the server: the studio writes on Save and not before.
-    expect(fetches.filter((f) => f.url.includes("/api/"))).toHaveLength(0);
+    // (Reading the photo's own bytes to draw it is a GET, and writes nothing.)
+    expect(fetches.filter((f) => f.url.includes("/api/")
+      && (f.opts.method || "GET") !== "GET")).toHaveLength(0);
   });
 
   it("is one undoable step, like crop", async () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   RotateCcw, RotateCw, Crop, Eraser, Wand2, Paintbrush, Undo2, Redo2, Brush,
-  Eye, History,
+  Eye, History, Cloud, Download, Palette,
 } from "lucide-react";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
@@ -9,7 +9,13 @@ import { AIStatusInline } from "@/components/ui/AIStatus";
 import { useToast } from "@/components/ui/Toaster";
 import { api, MODEL_TIMEOUT_MS } from "@/lib/api";
 import { useApp } from "@/store";
-import { cn, mediaUrl } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { loadImage, loadPhoto } from "@/lib/photoFile";
+import {
+  LocalCutoutError, applyMask, composeMask, previewCut,
+} from "@/lib/bgRemoval/service";
+import { PhotoroomProvider } from "@/lib/bgRemoval/providers/photoroom";
+import { useLocalCutout } from "@/lib/bgRemoval/useLocalCutout";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
   layersFrom, pushOperation, pushStroke, releaseLayers, replay, rotateQuarter,
@@ -18,8 +24,11 @@ import {
 
 /* Photo studio — a small toolbar of one-tap tools, all previewed on the canvas
    (nothing is stored until Save):
-   - Remove background: Photoroom's cutout onto pure white (once the seller
-     has switched background removal on in Settings)
+   - Remove background: on THIS device wherever it can (Apple Vision, ML Kit,
+     the browser model -- free, nothing sent anywhere), onto the seller's
+     colour; Photoroom's cutout for a seller who switched cloud removal on,
+     as the fallback or on "Enhance with cloud". A picture is cut by its edge
+     and a close-up of a detail is asked about first, as in the batch.
    - Auto levels: stretch brightness/contrast to make the shot pop (client-side)
    - Crop: drag a rectangle; it applies the moment you release
    - Rotate: a quarter turn clockwise per tap, on the canvas (client-side)
@@ -77,14 +86,6 @@ async function studioCall(path, sessionId, name, blob, timeoutMs) {
                      ...(timeoutMs ? { timeoutMs } : {}) });
 }
 
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Couldn't load the image."));
-    img.src = src;
-  });
-}
 
 export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   // Which photo is open RIGHT NOW. This dialog is one long-lived instance
@@ -118,8 +119,31 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   const liveRect = useRef(null);
   const [cropRect, setCropRect] = useState(null); // {x,y,w,h} in canvas px
   const { toast, confirm } = useToast();
-  const { bgRemoval, loadBgRemovalStatus, openSettings } = useApp();
-  const canCut = !!(bgRemoval?.available && bgRemoval?.active);
+  const { bgRemoval, loadBgRemovalStatus, openSettings, cutoutQueue } = useApp();
+  const local = useLocalCutout();
+  // The cloud: a seller who switched it on, while the app's month of it is
+  // not spent. The device needs neither.
+  const canCloud = !!(bgRemoval?.available && bgRemoval?.active
+                      && !bgRemoval?.budget_exhausted);
+  const canCut = local.usable || !!(bgRemoval?.available && bgRemoval?.active);
+  const offerCut = local.usable || !!bgRemoval?.available;
+  // What the photo pass's screen said about the open photo ("art", "detail").
+  const kindRef = useRef("");
+  // The last cut made ON THIS DEVICE, while it is still what the canvas
+  // shows: its matte (to re-colour it, hand it over transparent, or save it
+  // without cutting again), the bytes it was made from, and the history
+  // entry it landed as -- Save compares that to the top of the history to
+  // know nothing was changed after it.
+  const cutRef = useRef(null);
+  const [lastCut, setLastCut] = useState(null);  // {provider, background, cloud}
+
+  // The device queue leaves the open photo alone: cutting it in the
+  // background would be saved over by this studio's own Save.
+  useEffect(() => {
+    if (!name) return undefined;
+    cutoutQueue?.setEditing?.(sessionId, name);
+    return () => cutoutQueue?.setEditing?.(null, null);
+  }, [cutoutQueue, sessionId, name]);
 
   // Opening a different photo starts from a clean slate: the brush tool, no
   // half-dragged crop carried over from the last one. This is derived DURING
@@ -146,6 +170,13 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   const clearOverlay = useCallback(() => {
     const o = overlayRef.current;
     if (o) o.getContext("2d").clearRect(0, 0, o.width, o.height);
+  }, []);
+
+  // Revert and Restore original put back a canvas with no cut of this
+  // studio's on it.
+  const forgetCut = useCallback(() => {
+    cutRef.current = null;
+    setLastCut(null);
   }, []);
 
   const syncHistory = useCallback(() => {
@@ -268,9 +299,17 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     if (!canvas || !name) return false;
     const startedOn = name;
     try {
-      // Same-origin so the canvas isn't tainted and toBlob() works.
-      const img = await loadImage(`${mediaUrl(sessionId, name)}?v=${Date.now()}`);
+      // Through the bytes route, not /media: a redirect to the bucket (an
+      // offloaded photo) or the native shell's cross-origin <img> taints the
+      // canvas, and then every tool that reads pixels -- Save included --
+      // throws. See lib/photoFile.
+      const { img, kind } = await loadPhoto(sessionId, name);
       if (nameRef.current !== startedOn) return false;
+      kindRef.current = kind || "";
+      // The cut this studio made is gone with the canvas it was on. (Its
+      // controls hide themselves for another photo -- lastCut carries the
+      // name -- and Revert/Restore say forgetCut themselves.)
+      cutRef.current = null;
       // Revert and Restore original load over a stack that is still here.
       releaseLayers(layersRef.current, historyRef.current);
       layersRef.current = layersFrom(img);
@@ -293,11 +332,18 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     clearOverlay();
   }, [commitOperation, clearOverlay]);
 
+  // Where the history's top entry is now: Save reads this against the cut.
+  const topEntry = () => {
+    const undo = historyRef.current.undo;
+    return undo[undo.length - 1] || null;
+  };
+
   const removeBg = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || aiBusy) return;
-    // Not switched on: the server would refuse it (409), so send the seller
-    // to the one place that can switch it on instead of to an error.
+    // Neither this device nor the cloud can do it for this seller: the
+    // server would refuse it (409), so send the seller to the one place that
+    // can switch it on instead of to an error.
     if (!canCut) {
       toast("Background removal is off — turn it on in Settings first.",
         { kind: "info" });
@@ -308,25 +354,146 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     // Not before the photo has landed: the blank canvas would be sent off to
     // be cut out, and charged for.
     if (!layersRef.current) return;
-    setAiBusy("Removing the background…");
+    // A close-up of a tag or a stitch has no background: every pixel is the
+    // item, and a cutout keeps the label and deletes the garment behind it.
+    if (kindRef.current === "detail" && !(await confirm({
+      title: "This looks like a close-up",
+      message: "There's no background to take off a close-up of a detail — "
+        + "removing it usually cuts into the item. Remove it anyway?",
+      confirmLabel: "Remove it anyway",
+    }))) return;
+    const startedOn = name;
+    setAiBusy(local.usable ? "Removing the background on this device…"
+                           : "Removing the background…");
     try {
+      if (local.usable) {
+        // Unedited: cut the STORED photo, whose source is the photo as shot
+        // -- never a composite on white from an earlier cut. Edited (a crop,
+        // strokes): cut what the seller is looking at.
+        const unedited = historyRef.current.undo.length === 0;
+        const blob = unedited ? null : await canvasBlob(canvas);
+        const res = await previewCut({ sessionId, name, blob,
+                                       allowCloud: canCloud });
+        // Committing this now would paint one photo's cutout onto another's
+        // canvas -- and Save would then write those pixels into the other
+        // photo's file. Staying quiet is right: the seller moved on.
+        if (nameRef.current !== startedOn) return;
+        await applyPreview(res.image);
+        cutRef.current = res.mask ? {
+          mask: res.mask, sourceSha: res.sourceSha, provider: res.provider,
+          platform: res.platform, fromSource: res.fromSource, blob,
+          entry: topEntry(), background: "",
+        } : null;
+        setLastCut({ name, provider: res.provider, cloud: !!res.cloud, background: "" });
+        // No success toast: the canvas already shows the cut-out, as with
+        // rotate, crop and auto levels. What the canvas cannot show is said:
+        // that the cloud did it (and charged for it), or that a picture was
+        // cut to its edge rather than around its subject.
+        if (res.cloud) {
+          toast("This device couldn't cut it, so the cloud did.", { kind: "info" });
+        } else if (res.art) {
+          toast("Cut to the picture's edge, so nothing inside it was removed.",
+            { kind: "info" });
+        }
+        if (res.cloud) loadBgRemovalStatus();
+        return;
+      }
       const blob = await canvasBlob(canvas);
-      const startedOn = name;
       const res = await studioCall("/api/image/remove-bg", sessionId, name, blob,
                                    MODEL_TIMEOUT_MS);
-      // Committing this now would paint one photo's cutout onto another's
-      // canvas -- and Save would then write those pixels into the other
-      // photo's file. Staying quiet is right: the seller moved on.
       if (nameRef.current !== startedOn) return;
       await applyPreview(res.image);
+      cutRef.current = null;
+      setLastCut({ name, provider: "photoroom", cloud: true, background: "" });
       loadBgRemovalStatus();
     } catch (e) {
-      toast(`Remove background failed: ${e.message}`, { kind: "error" });
+      if (e instanceof LocalCutoutError) {
+        const offer = bgRemoval?.available && !canCloud
+          ? " You can turn on cloud background removal in Settings to use it instead."
+          : "";
+        toast(`${e.message}${offer}`, { kind: "error" });
+      } else {
+        toast(`Remove background failed: ${e.message}`, { kind: "error" });
+      }
     } finally {
       setAiBusy(null);
     }
-  }, [aiBusy, canCut, sessionId, name, applyPreview, toast, onClose,
+  }, [aiBusy, canCut, canCloud, local.usable, sessionId, name, applyPreview,
+      toast, confirm, onClose, openSettings, loadBgRemovalStatus,
+      bgRemoval?.available]);
+
+  // "Enhance with cloud": Photoroom's cutout of the photo, for a seller who
+  // switched cloud removal on -- an explicit, paid step, never automatic here.
+  const enhanceWithCloud = useCallback(async () => {
+    if (aiBusy || !layersRef.current) return;
+    if (!canCloud) {
+      onClose?.();
+      openSettings("bg-removal");
+      return;
+    }
+    const startedOn = name;
+    setAiBusy("Removing the background in the cloud…");
+    try {
+      const fromStored = cutRef.current?.fromSource;
+      const blob = fromStored ? null : cutRef.current?.blob || null;
+      const res = await PhotoroomProvider.removeBackground(blob, {
+        sessionId, name, intent: "preview" });
+      if (nameRef.current !== startedOn) return;
+      await applyPreview(res.image);
+      cutRef.current = null;
+      setLastCut({ name, provider: "photoroom", cloud: true, background: "" });
+      loadBgRemovalStatus();
+    } catch (e) {
+      toast(`Cloud background removal failed: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }, [aiBusy, canCloud, sessionId, name, applyPreview, toast, onClose,
       openSettings, loadBgRemovalStatus]);
+
+  // The same device cut on another colour: the matte is reused, nothing is
+  // cut again.
+  const recolour = useCallback(async (background) => {
+    const c = cutRef.current;
+    if (!c || aiBusy) return;
+    const startedOn = name;
+    setAiBusy("Changing the background…");
+    try {
+      const out = await composeMask({ sessionId, name, blob: c.blob, mask: c.mask,
+                                      background, provider: c.provider,
+                                      platform: c.platform });
+      if (nameRef.current !== startedOn) return;
+      await applyPreview(out.image);
+      cutRef.current = { ...c, entry: topEntry(), background };
+      setLastCut((l) => ({ ...(l || {}), background }));
+    } catch (e) {
+      toast(`Couldn't change the background: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }, [aiBusy, sessionId, name, applyPreview, toast]);
+
+  // The item on nothing, as a PNG, for the seller to use anywhere.
+  const downloadPng = useCallback(async () => {
+    const c = cutRef.current;
+    if (!c || aiBusy) return;
+    setAiBusy("Preparing the PNG…");
+    try {
+      const out = await composeMask({ sessionId, name, blob: c.blob, mask: c.mask,
+                                      background: "transparent",
+                                      provider: c.provider, platform: c.platform });
+      const a = document.createElement("a");
+      a.href = out.image;
+      a.download = `${String(name).replace(/\.[^.]+$/, "")}-cutout.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      toast(`Couldn't make the PNG: ${e.message}`, { kind: "error" });
+    } finally {
+      setAiBusy(null);
+    }
+  }, [aiBusy, sessionId, name, toast]);
 
   // Auto levels — a percentile contrast/brightness stretch, done right on the
   // canvas so it's instant (no round-trip). Ignores the darkest/lightest 0.5%
@@ -573,6 +740,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     setRestoring(true);
     try {
       await studioCall("/api/image/restore-original", sessionId, name);
+      forgetCut();
       await load();      // repaint from the file the server just rewrote
       onSaved();
     } catch (e) {
@@ -593,6 +761,29 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     // paints the original onto this canvas, and a save mid-hold would
     // otherwise write the un-edited photo.
     compose(layersRef.current, canvas);
+    // A device cut of the stored photo that nothing has touched since, on
+    // the seller's own colour: saved as a CUT (the matte goes up, the server
+    // composites it and keeps the photo as shot and the matte beside it), so
+    // it can later be re-coloured, exported transparent, or cut again from
+    // the shot. Anything else -- a crop or a stroke after the cut, a colour
+    // picked here -- is the seller's own picture, saved as one.
+    const c = cutRef.current;
+    if (c && c.fromSource && !c.background && topEntry() === c.entry) {
+      setSaving(true);
+      try {
+        await applyMask({ sessionId, name, mask: c.mask, sourceSha: c.sourceSha,
+                          provider: c.provider, platform: c.platform,
+                          origin: "studio" });
+        onSaved();
+        onClose();
+        return;
+      } catch (e) {
+        // The photo changed under the cut, or the server would not take the
+        // matte: the canvas is still what the seller meant to save.
+      } finally {
+        setSaving(false);
+      }
+    }
     const blob = await canvasBlob(canvas);
     if (!blob) { toast("Couldn't export the edited image.", { kind: "error" }); return; }
     setSaving(true);
@@ -610,8 +801,32 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   return (
     <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
       <div className="flex items-center gap-1 p-1.5 mb-2 rounded-[14px] bg-bg-sunken border border-line overflow-x-auto">
-        {bgRemoval?.available && (
+        {offerCut && (
           <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />
+        )}
+        {/* After a cut made on this device: the same cut on another colour,
+            handed over transparent, or done again by the cloud. */}
+        {lastCut && lastCut.name === name && !lastCut.cloud && (
+          <>
+            <label className={cn(
+              "inline-flex items-center gap-1.5 h-9 px-3 rounded-[10px] text-[13px] font-semibold",
+              "text-ink-secondary hover:bg-card hover:text-ink cursor-pointer shrink-0",
+              aiBusy && "opacity-40 pointer-events-none")}
+              title="Put the cutout on another colour">
+              <Palette size={16} aria-hidden /> Colour
+              <input type="color" className="sr-only" aria-label="Background colour"
+                value={lastCut.background || "#ffffff"}
+                onChange={(e) => recolour(e.target.value)} disabled={!!aiBusy} />
+            </label>
+            <Tool icon={Download} label="PNG" onClick={downloadPng} disabled={!!aiBusy}
+              title="Download the item on a transparent background" />
+            {bgRemoval?.available && (
+              <Tool icon={Cloud} label="Enhance" onClick={enhanceWithCloud}
+                disabled={!!aiBusy}
+                title={canCloud ? "Remove the background again in the cloud (Photoroom)"
+                                : "Turn on cloud background removal in Settings"} />
+            )}
+          </>
         )}
         <Tool icon={Wand2} label="Auto levels" onClick={autoLevels} disabled={!!aiBusy} />
         <span className="w-px self-stretch bg-line mx-1 shrink-0" aria-hidden />
@@ -682,7 +897,8 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
             title="Put back the photo exactly as you uploaded it, before background removal and any edits">
             <History aria-hidden /> Restore original
           </Button>
-          <Button variant="ghost" onClick={load} disabled={!!aiBusy || restoring}
+          <Button variant="ghost" onClick={() => { forgetCut(); load(); }}
+            disabled={!!aiBusy || restoring}
             title="Discard every edit and reload the saved photo">
             <RotateCcw aria-hidden /> Revert
           </Button>

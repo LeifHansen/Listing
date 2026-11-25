@@ -12,6 +12,9 @@ import { DEFAULT_LIMITS, saleIndex } from "@/lib/saleEvents";
 import { isDraft } from "@/lib/listingsView";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
+import { configureLocal } from "@/lib/bgRemoval/service";
+import { createCutoutQueue } from "@/lib/bgRemoval/queue";
+import { useLocalCutout } from "@/lib/bgRemoval/useLocalCutout";
 
 /* Central app state, ported from the original app.js:
    auth session, eBay connection, server health, theme, navigation, the
@@ -65,12 +68,15 @@ const NO_EBAY = {
   foreign_listings: 0,
   unowned_listings: 0,
 };
-// Background removal (Photoroom, on the app's account): `available` is the
-// server having a key at all, `active` is this seller having switched it on in
-// Settings. The uploader offers its toggle only when both are true.
+// Background removal in the CLOUD (Photoroom, on the app's account):
+// `available` is the server having a key at all, `active` is this seller
+// having switched it on in Settings, `budget_exhausted` the app's month of
+// Photoroom being spent. Removal ON THE DEVICE needs none of these -- it is
+// free and nothing leaves the phone -- and lives in lib/bgRemoval, configured
+// from the same status read (its `local` block).
 const NO_BG_REMOVAL = {
   available: false, active: false, needs_activation: true, used: 0, limit: 0,
-  resets_on: "", sandbox: false, loaded: false,
+  resets_on: "", sandbox: false, budget_exhausted: false, loaded: false,
 };
 const NO_NOTIFICATIONS = { items: [], unread: 0, checked: true };
 const NO_MESSAGES = {
@@ -512,6 +518,23 @@ export function AppProvider({ children }) {
   // keep-previous rule: a failed read is not "switched off", and the uploader
   // decides from this whether to offer the toggle.
   const [bgRemoval, setBgRemoval] = useState(NO_BG_REMOVAL);
+  // The device queue (lib/bgRemoval/queue): photos whose backgrounds this
+  // device is to take off, worked through one at a time. One per app, made
+  // once. It asks whether the cloud may step in for a photo the device
+  // cannot cut through a ref, so it always reads the seller's CURRENT
+  // switch rather than the one it was made with.
+  const bgRemovalRef = useRef(NO_BG_REMOVAL);
+  useEffect(() => { bgRemovalRef.current = bgRemoval; }, [bgRemoval]);
+  const cutoutHooks = useRef({});
+  const [cutoutQueue] = useState(() => createCutoutQueue({
+    cloudAllowed: () => {
+      const b = bgRemovalRef.current;
+      return !!(b.available && b.active && !b.budget_exhausted);
+    },
+    onPhotoDone: (photo, saved) => cutoutHooks.current.onPhotoDone?.(photo, saved),
+    onFinished: (state) => cutoutHooks.current.onFinished?.(state),
+  }));
+  const localCutout = useLocalCutout();
   const loadBgRemovalStatus = useCallback(async () => {
     try {
       const s = await api("/api/bg-removal/status");
@@ -523,9 +546,13 @@ export function AppProvider({ children }) {
         limit: Number(s.limit) || 0,
         resets_on: s.resets_on || "",
         sandbox: !!s.sandbox,
+        budget_exhausted: !!s.budget_exhausted,
         loaded: true,
       };
       setBgRemoval(next);
+      // Which engines this device may run is the server's call, read here on
+      // every start so one can be switched off without an app release.
+      configureLocal(s.local || null);
       return next;
     } catch (e) { /* keep previous */ }
     return null;
@@ -1054,6 +1081,38 @@ export function AppProvider({ children }) {
       loadListings({ quiet: true });
     }, INVALIDATE_DEBOUNCE_MS);
   }, [loadListings]);
+
+  // What the device queue does to the screen as each photo is cut: the
+  // card's thumbnail version moves at once (patchListing), an open editor
+  // hears about its own photo (the "cutout:done" event useListingForm
+  // listens for), and the list is re-read once, when the run ends -- not
+  // once per photo of a 250-photo pile.
+  useEffect(() => {
+    cutoutHooks.current = {
+      onPhotoDone: (photo, saved) => {
+        if (saved?.updated_at) patchListing(photo.session_id, { updated_at: saved.updated_at });
+        try {
+          window.dispatchEvent(new CustomEvent("cutout:done", { detail: {
+            sessionId: photo.session_id, name: photo.name, version: saved?.version } }));
+        } catch (e) { /* display only */ }
+      },
+      onFinished: () => invalidateListings(),
+    };
+  }, [patchListing, invalidateListings]);
+
+  // Start on whatever waits for this device once there is a seller and an
+  // engine that can run -- on every open, which is what makes a pile the app
+  // was closed in the middle of carry on by itself.
+  useEffect(() => {
+    if (user && localCutout.usable) cutoutQueue.refresh();
+  }, [user, localCutout.usable, cutoutQueue]);
+  // In the background the OS freezes the page anyway; pausing says so, and
+  // means the photo in hand is not abandoned half way.
+  useEffect(() => {
+    const onVisibility = () => cutoutQueue.setPaused(document.hidden);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [cutoutQueue]);
   useEffect(() => () => {
     if (invalidateTimer.current) clearTimeout(invalidateTimer.current);
   }, []);
@@ -1655,6 +1714,9 @@ export function AppProvider({ children }) {
           if (stopped) return;
           bulkSettled(ids);
           loadListings({ quiet: true });
+          // A pile uploaded for the device has its photos waiting now, in
+          // each item's own session.
+          cutoutQueue.refresh();
           return;  // settled — the effect tears itself down on the state change
         }
       } catch (e) {
@@ -1680,7 +1742,7 @@ export function AppProvider({ children }) {
     };
     timer = setTimeout(tick, 5000);
     return () => { stopped = true; clearTimeout(timer); };
-  }, [activeBulk, bulkSettled, loadListings]);
+  }, [activeBulk, bulkSettled, loadListings, cutoutQueue]);
 
   // The finished banner retires itself once there is nothing left to review:
   // every item the batch drafted has been listed (or sold, ended, put in
@@ -1700,13 +1762,19 @@ export function AppProvider({ children }) {
   // The whole bulk upload — screen flip first, then the slow part. It lives
   // here rather than in the uploader because that flip unmounts the uploader
   // while the downscale + POST are still running.
-  const runBulkUpload = useCallback(async (files, removeBg, notes = "") => {
+  // `cutMode` is how the backgrounds come off, when they do: "device" (on
+  // this phone or browser, free -- asked for as remove_bg=false plus
+  // cutout=device, so none of the cloud's gates apply) or "cloud"/"" for
+  // Photoroom as before.
+  const runBulkUpload = useCallback(async (files, removeBg, notes = "", cutMode = "") => {
     beginBulk();
     try {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
       prepped.forEach((f) => fd.append("files", f));
-      fd.append("remove_bg", removeBg ? "true" : "false");
+      const device = removeBg && cutMode === "device";
+      fd.append("remove_bg", removeBg && !device ? "true" : "false");
+      if (device) fd.append("cutout", "device");
       // The seller's hints about what is in the pile — what to expect and how
       // many items. Sent even when empty so the field is always present.
       fd.append("notes", notes || "");
@@ -1718,7 +1786,7 @@ export function AppProvider({ children }) {
     } catch (e) {
       // Back to the uploader with the pile intact, so retrying is one click —
       // the notes with it, or the seller retypes every hint they just wrote.
-      setBulkRetry({ files, removeBg, notes });
+      setBulkRetry({ files, removeBg, notes, cutMode });
       clearBulk();
       toast(`Bulk upload failed: ${e.message}`, { kind: "error" });
     }
@@ -1769,6 +1837,8 @@ export function AppProvider({ children }) {
     setThreads({});
     setEbay(NO_EBAY);
     setBgRemoval(NO_BG_REMOVAL);
+    // A device queue working through the previous seller's photos stops.
+    cutoutQueue.reset();
     setPoliciesData(null);
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
@@ -1807,7 +1877,7 @@ export function AppProvider({ children }) {
 
     loadEbayStatus();
     loadBgRemovalStatus();
-  }, [loadEbayStatus, loadBgRemovalStatus]);
+  }, [loadEbayStatus, loadBgRemovalStatus, cutoutQueue]);
 
   const logout = useCallback(async () => {
     // Best effort, and first: the cookie is the server's to clear, and once
@@ -2022,7 +2092,7 @@ export function AppProvider({ children }) {
     clearSignedInState,
     isSuperadmin,
     ebay, loadEbayStatus, canPublishLive,
-    bgRemoval, loadBgRemovalStatus,
+    bgRemoval, loadBgRemovalStatus, cutoutQueue,
     marketplaces, loadMarketplaces, connectedMarketplaces,
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
@@ -2055,7 +2125,7 @@ export function AppProvider({ children }) {
     savedViews, saveListingView, deleteListingView,
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
-    bgRemoval, loadBgRemovalStatus,
+    bgRemoval, loadBgRemovalStatus, cutoutQueue,
     etsyOptions, loadEtsyOptions,
     storeCategoriesData, draftSelection,
     marketplaces, loadMarketplaces, connectedMarketplaces,

@@ -7,6 +7,7 @@ import { Sidebar, BottomNav } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { AuthDialog } from "@/components/AuthDialog";
 import { BulkBanner } from "@/components/BulkBanner";
+import { CutoutQueueBanner } from "@/components/CutoutQueueBanner";
 import { TokensDialog } from "@/components/TokensDialog";
 import { AiConsentDialog } from "@/components/AiConsentDialog";
 import { Dashboard } from "@/views/Dashboard";
@@ -109,6 +110,7 @@ function Main() {
       <div className="flex-1 min-w-0 px-4 sm:px-6 pb-28 md:pb-10 pt-[env(safe-area-inset-top)]">
         <TopBar onSearch={setSearch} onManageEbay={() => openSettings("ebay-account")} />
 
+        <CutoutQueueBanner />
         {activeBulk && view !== "new" && (
           <BulkBanner
             done={!!activeBulk.done}

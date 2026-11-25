@@ -55,9 +55,16 @@ const PHASE_MESSAGES = {
 // ones that never asked for it. job.remove_bg is what the batch was actually
 // started with (absent on batches started before this shipped — which reads
 // as "off", the safe way round: it never claims work that isn't happening).
-function phaseMessages(phase, removeBg) {
+// job.cutout "device" is a pile whose backgrounds come off on THIS device
+// once the server has straightened them -- so the server's pass says it is
+// straightening, and the device banner says the rest.
+function phaseMessages(phase, removeBg, cutout) {
   if (phase === "optimizing" && removeBg) {
     return ["Optimizing photos…", "Straightening & removing backgrounds…"];
+  }
+  if (phase === "optimizing" && cutout === "device") {
+    return ["Optimizing photos…",
+            "Straightening photos — backgrounds come off on this device next…"];
   }
   return PHASE_MESSAGES[phase] || ["Working…"];
 }
@@ -538,7 +545,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             // job id, so this view just carries on polling. Say so, or the
             // count appearing to jump reads as a glitch.
             ...(job?.resumed ? ["Picking your batch back up where it stopped…"] : []),
-            ...phaseMessages(phase, job?.remove_bg).map((m) => m + progressDetail),
+            ...phaseMessages(phase, job?.remove_bg, job?.cutout).map((m) => m + progressDetail),
           ]} />
           <BrandProgress
             className="px-1"

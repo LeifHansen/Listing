@@ -18,6 +18,9 @@ export default defineConfig({
       "/media": "http://localhost:8000",
     },
   },
+  // The browser's background remover runs in a module worker that imports
+  // onnxruntime-web; ES output lets that worker be code-split like the app.
+  worker: { format: "es" },
   build: {
     outDir: "dist",
     emptyOutDir: true,

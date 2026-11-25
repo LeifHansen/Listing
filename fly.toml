@@ -55,14 +55,27 @@ primary_region = 'sjc'
   # ETSY_OWNER_EMAILS. Set 'commercial' the day Etsy grants it. Inert while
   # Etsy is withheld above; left in place for the day it comes back.
   # ETSY_ACCESS_TIER = 'personal'
-  # Background removal is Photoroom's API (services/cutout_api), on the app's
-  # one Photoroom account. PHOTOROOM_API_KEY in `fly secrets` is the whole
-  # switch: without it the feature is unavailable and the uploader does not
-  # offer it. Each seller then turns it on for themselves in Settings. A key
-  # starting `sandbox_` watermarks every cutout -- never in production.
-  # /api/ready names the engine and whether it has a key. The per-seller
-  # monthly cap is BG_REMOVAL_MONTHLY_LIMIT (default 1000 photos):
+  # BACKGROUND REMOVAL ON THE SELLER'S DEVICE: Apple Vision in the iPhone app,
+  # ML Kit in the Android app -- free, and nothing but a mask of the item ever
+  # leaves the phone. The apps read this on every start
+  # (/api/bg-removal/status), so taking a platform out of the list switches
+  # its engine off without an app release. Only app builds that carry the
+  # thryft-cutout plugin use it; older builds keep using Photoroom.
+  #
+  # 'web' (BiRefNet in the browser) stays OFF until legal signs off on the
+  # model: its weights are MIT, but its DIS5K training data is non-commercial.
+  # It also needs BG_WEB_MODEL_URL and BG_WEB_MODEL_SHA256 (LAUNCH_CHECKLIST).
+  BG_LOCAL_PROVIDERS = 'ios,android'
+  # Photoroom is the cloud fallback (services/cutout_api), on the app's one
+  # Photoroom account: PHOTOROOM_API_KEY in `fly secrets`, used only for a
+  # seller who switched cloud removal on in Settings, for a photo their device
+  # could not cut or one they sent to the cloud. A key starting `sandbox_`
+  # watermarks every cutout -- never in production. Its caps: per seller,
+  # BG_REMOVAL_MONTHLY_LIMIT (default 1000 photos); for the whole app,
+  # PHOTOROOM_MONTHLY_BUDGET_USD at PHOTOROOM_COST_PER_IMAGE (default 0.02).
+  # PHOTOROOM_ENABLED = 'false' stops every Photoroom call and keeps the key.
   #   BG_REMOVAL_MONTHLY_LIMIT = '1000'
+  #   PHOTOROOM_MONTHLY_BUDGET_USD = '50'
   # How many items of one bulk batch are drafted at the same time. Each one is
   # five to nine Anthropic calls and a handful of eBay lookups, and the machine
   # spends nearly all of that waiting on somebody else's server -- so one at a

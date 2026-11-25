@@ -1,0 +1,62 @@
+ext {
+    junitVersion = project.hasProperty('junitVersion') ? rootProject.ext.junitVersion : '4.13.2'
+    androidxAppCompatVersion = project.hasProperty('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.7.1'
+    // Google ML Kit subject segmentation, delivered by Google Play services
+    // (the model itself is downloaded by Play services, not bundled here).
+    // Still published as a beta; pinned, and overridable from the app's
+    // variables.gradle without touching this file.
+    mlkitSubjectSegmentationVersion = project.hasProperty('mlkitSubjectSegmentationVersion') ? rootProject.ext.mlkitSubjectSegmentationVersion : '16.0.0-beta1'
+    // GoogleApiAvailability and ModuleInstallClient (checking for and
+    // downloading the segmentation module).
+    playServicesBaseVersion = project.hasProperty('playServicesBaseVersion') ? rootProject.ext.playServicesBaseVersion : '18.5.0'
+}
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace = "com.thryftshop.cutout"
+    compileSdk = project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 36
+    defaultConfig {
+        // ML Kit subject segmentation's own floor; Capacitor 8's too.
+        minSdkVersion project.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24
+        targetSdkVersion project.hasProperty('targetSdkVersion') ? rootProject.ext.targetSdkVersion : 36
+        versionCode 1
+        versionName "1.0"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    lint {
+        abortOnError = false
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation project(':capacitor-android')
+    implementation "com.google.android.gms:play-services-mlkit-subject-segmentation:$mlkitSubjectSegmentationVersion"
+    implementation "com.google.android.gms:play-services-base:$playServicesBaseVersion"
+    testImplementation "junit:junit:$junitVersion"
+}

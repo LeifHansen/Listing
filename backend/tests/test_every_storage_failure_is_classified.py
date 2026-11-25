@@ -195,6 +195,40 @@ WHY_A_BLANK_IS_SAFE = {
         "returns False for a give-back that did not land; the cost is a "
         "seller's monthly count reading a few photos high until the month turns",
 
+    # --- the on-device cutout queue and the per-engine count --------------
+    # The queue is bookkeeping around photos that are already safe as shot:
+    # a failure here can only leave a photo uncut (the seller can cut it in
+    # the studio), never lose or damage one.
+    "cutout_mark":
+        "returns False when the pending rows did not land; those photos stay "
+        "as shot and are cut from the studio instead of the device queue",
+    "cutout_get":
+        "None reads as 'no row', which routes treat as an ordinary photo -- "
+        "the studio still cuts it, only without the art/item kind",
+    "cutout_pending":
+        "answers None (not []) on a read failure; the queue route says so "
+        "with a 503 rather than reporting that nothing is waiting",
+    "cutout_set":
+        "returns False when the state did not land; the photo itself is "
+        "already written, so the cost is a row reading pending and being "
+        "re-offered, whose apply then answers 409 for the changed photo",
+    "cutout_retire":
+        "returns False when the retire did not land; the apply route checks "
+        "the photo's bytes before writing, so a stale pending row cannot cut "
+        "over the seller's edit",
+    "cutout_copy":
+        "returns False when the split's rows did not land; the item's photos "
+        "stay as shot and are cut from the studio",
+    "cutout_forget":
+        "returns False when the delete did not land; cutout_pending only "
+        "answers rows whose listing still exists and is a draft",
+    "cutout_prune_orphans":
+        "answers 0 when the sweep failed; orphans are invisible to "
+        "cutout_pending and the next pass tries again",
+    "cutout_usage":
+        "answers None (not []) on a read failure; the admin card shows "
+        "'unavailable' rather than a month of nothing",
+
     # --- sentinels that already distinguish 'could not ask' ---------------
     "find_users_by_ebay_user_id":
         "answers UNAVAILABLE, which is not an empty result and callers branch on it",

@@ -36,6 +36,14 @@ pytest.importorskip("sqlalchemy")
 # The schema as it stands. Not a description of what SHOULD exist — a record
 # of what does, so that growth is visible.
 SHIPPED = {
+    # New with on-device background removal: create_all makes them.
+    "cutout_photos": (
+        "created_at", "error", "kind", "name", "platform", "provider",
+        "session_id", "state", "updated_at", "user_id", "working_sha",
+    ),
+    "cutout_usage": (
+        "period", "photos", "platform", "provider", "updated_at",
+    ),
     "admin_audit_log": (
         "action", "actor_email", "actor_id", "created_at", "data", "id",
         "ip", "target_id", "target_type",

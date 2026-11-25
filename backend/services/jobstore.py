@@ -79,6 +79,10 @@ MIRROR_FIELDS = (
     # the pause must put the same answers back on the cards, and a deploy
     # during drafting must still draft from them. See main._start_google_lookups.
     "google", "google_enabled",
+    # "device" when the seller's own phone or browser takes the backgrounds
+    # off this batch's photos: a resume, or a split of a paused upload into a
+    # batch, has to keep asking for that rather than for nothing.
+    "_cutout",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",

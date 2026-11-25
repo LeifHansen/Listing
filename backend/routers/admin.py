@@ -15,6 +15,7 @@ the recovery passes it runs are main's own.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import secrets
 from typing import Optional
 
@@ -25,6 +26,25 @@ from ..services import cutout_api, deletion_queue, errorlog, owed_refunds
 from . import deps
 
 router = APIRouter()
+
+
+def _cutout_usage() -> Optional[dict]:
+    """This month's cutouts per engine and the Photoroom spend, or None."""
+    try:
+        period = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m")
+        rows = db.cutout_usage(period)
+    except Exception:  # noqa: BLE001 - diagnostics answer with the DB down
+        rows = None
+    if rows is None:
+        return None
+    cloud = sum(r["photos"] for r in rows if r["provider"] == "photoroom")
+    cost = config.PHOTOROOM_COST_PER_IMAGE
+    return {"period": period, "engines": rows,
+            "photoroom_photos": cloud,
+            "photoroom_cost_usd": round(cloud * cost, 2),
+            "photoroom_budget_usd": config.PHOTOROOM_MONTHLY_BUDGET_USD,
+            "photoroom_enabled": config.PHOTOROOM_ENABLED,
+            "local_providers": list(config.BG_LOCAL_PROVIDERS)}
 
 
 def _diagnostics() -> dict:
@@ -87,6 +107,10 @@ def _diagnostics() -> dict:
         # was -- the status, Photoroom's own words, and when. Since the last
         # restart, from memory, so it answers with the database down.
         "photoroom": cutout_api.health(),
+        # Every engine's photos this month, app-wide, and what Photoroom has
+        # cost against PHOTOROOM_MONTHLY_BUDGET_USD. From the database, so it
+        # is best-effort: None when it cannot be read, never a month of zero.
+        "cutout_usage": _cutout_usage(),
         "tokens_enabled": config.tokens_enabled(),
         "tokens_missing": config.tokens_missing(),
         "stripe_live_mode": config.stripe_live_mode(),

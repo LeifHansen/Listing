@@ -31,6 +31,7 @@ from typing import Optional
 
 from .. import config, db
 from ..config import log
+from . import cutout_api
 from .cutout_api import UNAVAILABLE
 from .tokens import next_reset, period_now
 
@@ -83,6 +84,23 @@ def is_active(user_id: Optional[str]) -> bool:
     return bool(_record(user_id).get("active"))
 
 
+def local_status() -> dict:
+    """What the apps may do ON THE DEVICE, read by them on every start so an
+    engine can be switched off here without an app release
+    (config.BG_LOCAL_PROVIDERS). Needs no account and no switch: nothing
+    leaves the device, and nothing is charged."""
+    providers = [p for p in config.BG_LOCAL_PROVIDERS
+                 if p != "web" or config.bg_web_ready()]
+    web_model = None
+    if "web" in providers:
+        web_model = {"url": config.BG_WEB_MODEL_URL,
+                     "sha256": config.BG_WEB_MODEL_SHA256,
+                     "bytes": config.BG_WEB_MODEL_BYTES or None}
+    return {"providers": providers,
+            "timeout_ms": config.BACKGROUND_REMOVAL_TIMEOUT_MS,
+            "web_model": web_model}
+
+
 def status(user_id: Optional[str]) -> dict:
     """Everything the Settings card and the uploader need."""
     limit = config.BG_REMOVAL_MONTHLY_LIMIT
@@ -96,6 +114,10 @@ def status(user_id: Optional[str]) -> dict:
         "resets_on": next_reset(),
         "provider": PROVIDER,
         "sandbox": config.PHOTOROOM_SANDBOX,
+        "local": local_status(),
+        # The app's month of Photoroom is spent: cloud cutouts pause, the
+        # device carries on.
+        "budget_exhausted": available() and cutout_api.budget_exhausted(),
     }
     if not needs_activation():
         out["active"] = available()

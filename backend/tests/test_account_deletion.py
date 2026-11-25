@@ -29,6 +29,8 @@ def test_delete_user_clears_every_table(dbmod):
     dbmod.upsert_listing("ebay-4242", {"title": "B"}, status="published", user_id=uid)
     dbmod.token_credit(uid, 50, ref="stripe-1")
     dbmod.token_spend(uid, 5, free_quota=50, period="2026-08", feature="identify")
+    # A photo still waiting for the seller's device to take its background off.
+    dbmod.cutout_mark([{"session_id": "sess0001", "name": "img_000.jpg"}], uid)
 
     ids = dbmod.delete_user(uid)
 
@@ -48,6 +50,7 @@ def test_delete_user_clears_every_table(dbmod):
     assert dbmod.token_status(uid, "2026-08", 50) == {
         "free_used": 0, "free_remaining": 50, "purchased": 0}
     assert dbmod.token_history(uid) == []
+    assert dbmod.cutout_get("sess0001", "img_000.jpg") is None
 
 
 def test_delete_user_leaves_other_accounts_marketplaces_and_tokens(dbmod):

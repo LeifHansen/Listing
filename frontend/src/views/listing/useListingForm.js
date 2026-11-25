@@ -535,6 +535,17 @@ export function useListingForm() {
     }));
   }, [imageBase]);
 
+  // A photo of THIS listing whose background the device queue just took off
+  // (lib/bgRemoval/queue): show the new picture, not the cached one.
+  useEffect(() => {
+    const onCut = (e) => {
+      const d = e?.detail || {};
+      if (d.sessionId && d.sessionId === sessionId) bumpImageVersion(d.name);
+    };
+    window.addEventListener("cutout:done", onCut);
+    return () => window.removeEventListener("cutout:done", onCut);
+  }, [sessionId, bumpImageVersion]);
+
   // The photo list, written to the form and the session together. A form and
   // session that disagree about the photos are what made a delete followed by
   // a drag come back as "this listing's photos changed somewhere else" — and
