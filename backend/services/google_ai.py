@@ -45,7 +45,7 @@ API_ROOT = os.getenv(
 # wedged request must not outlive the seller waiting on it (the client gives
 # up on a job at 240s) or pin a bulk worker thread while it does.
 _TIMEOUT_SECONDS = config.env_float("AI_TIMEOUT_SECONDS", 120.0)
-_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2") or 2)
+_MAX_RETRIES = int(config.env_float("AI_MAX_RETRIES", 2))
 # Seconds before the second attempt, doubling after it. A module constant so
 # the tests of the retry can pin it to zero instead of sleeping through it.
 _RETRY_BACKOFF_SECONDS = config.env_float("GOOGLE_RETRY_BACKOFF_SECONDS", 2.0)

@@ -28,6 +28,14 @@ from . import barcodes
 _token_cache: dict = {"token": None, "expires_at": 0.0}
 _tree_cache: dict = {}
 
+# The scope every application token is asked for unless a caller names another.
+BASE_SCOPE = "https://api.ebay.com/oauth/api_scope"
+# Tokens for any OTHER scope, cached apart from the base one ({scope: cache}).
+# Kept apart rather than asking for every scope at once: a client-credentials
+# request naming a scope the application has not been granted is refused
+# outright, and the base token is what taxonomy, comps and notifications run on.
+_scoped_tokens: dict[str, dict] = {}
+
 # One lock for every TTL cache below: identify jobs, bulk workers, and request
 # threads all read/write them concurrently. The lock only guards the dict —
 # never held across an HTTP call, so a slow eBay response can't serialize
@@ -95,25 +103,31 @@ class QueryRefused(RuntimeError):
 _QUERY_REFUSED_STATUSES = (400, 422)
 
 
-def _app_token() -> str:
+def _app_token(scope: str = BASE_SCOPE) -> str:
+    """An application (client-credentials) token for `scope`, cached per scope.
+    Raises httpx.HTTPStatusError when eBay refuses it -- for a scope the
+    application has not been granted, a 400 invalid_scope."""
+    cache = (_token_cache if scope == BASE_SCOPE
+             else _scoped_tokens.setdefault(scope, {"token": None,
+                                                    "expires_at": 0.0}))
     now = time.time()
-    if _token_cache["token"] and now < _token_cache["expires_at"] - 60:
-        return _token_cache["token"]
+    if cache["token"] and now < cache["expires_at"] - 60:
+        return cache["token"]
 
     resp = httpx.post(
         f"{config.EBAY_API_BASE}/identity/v1/oauth2/token",
         data={
             "grant_type": "client_credentials",
-            "scope": "https://api.ebay.com/oauth/api_scope",
+            "scope": scope,
         },
         auth=(config.EBAY_CLIENT_ID, config.EBAY_CLIENT_SECRET),
         timeout=30,
     )
     resp.raise_for_status()
     body = resp.json()
-    _token_cache["token"] = body["access_token"]
-    _token_cache["expires_at"] = now + float(body.get("expires_in", 7200))
-    return _token_cache["token"]
+    cache["token"] = body["access_token"]
+    cache["expires_at"] = now + float(body.get("expires_in", 7200))
+    return cache["token"]
 
 
 def _headers() -> dict:

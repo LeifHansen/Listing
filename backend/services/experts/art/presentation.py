@@ -67,14 +67,23 @@ def _inches(text: str) -> tuple[float, float]:
     zero means "nobody said" -- which the estimator already handles.
     """
     import re
-    match = re.search(r"(\d+(?:\.\d+)?)\s*[x\u00d7]\s*(\d+(?:\.\d+)?)",
-                      str(text or ""))
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:(cm|mm)\b)?\s*[x\u00d7]\s*"
+                      r"(\d+(?:\.\d+)?)\s*(?:(cm|mm)\b)?",
+                      str(text or ""), re.I)
     if not match:
         return (0.0, 0.0)
     try:
-        w, h = float(match.group(1)), float(match.group(2))
+        w, h = float(match.group(1)), float(match.group(3))
     except (TypeError, ValueError):
         return (0.0, 0.0)
+    # A size the lookup gave in CENTIMETRES ("50 x 70 cm", the usual way a
+    # European poster is sold) was read as inches -- a 50 x 70 inch frame and
+    # a parcel nobody can post. Converted. Millimetres stay a misread.
+    unit = (match.group(2) or match.group(4) or "").lower()
+    if unit == "mm":
+        return (0.0, 0.0)
+    if unit == "cm":
+        w, h = round(w / 2.54, 1), round(h / 2.54, 1)
     # A picture measured in feet or millimetres is a misread, not a picture.
     if not (1.0 <= w <= 120.0 and 1.0 <= h <= 120.0):
         return (0.0, 0.0)

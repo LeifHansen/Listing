@@ -67,6 +67,7 @@ three turned the reference off:
 """
 from __future__ import annotations
 
+import functools
 import ipaddress
 import os
 import re
@@ -77,7 +78,11 @@ from urllib.parse import urlparse, urlunparse
 
 MAX_REDIRECTS = 3
 MAX_BYTES = 2 * 1024 * 1024        # a reference page, not a download
-TIMEOUT = 15.0
+TIMEOUT = 15.0                     # per connect/read, which a drip resets
+# The WHOLE fetch -- every hop, attempt, wait and chunk. TIMEOUT alone bounds
+# each read separately, so a server sending a byte every few seconds never
+# tripped it and held the background thread for as long as it liked.
+DEADLINE = 60.0
 
 # What the reader calls itself. A real browser string with an honest tail: the
 # browser part is what gets a page out of sites that refuse unknown clients,
@@ -360,8 +365,19 @@ def fetch(url: str) -> str:
     the site's own Retry-After. What comes out the other side is a
     TemporaryFailure or a Blocked rather than a bare ValueError, so the caller
     can tell "we have not seen this page" from "this page is no good".
+
+    All of it runs against one DEADLINE, and running out of it is a
+    TemporaryFailure: the page was not seen, which says nothing about it.
     """
     import httpx
+
+    deadline = time.monotonic() + DEADLINE
+
+    def left() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TemporaryFailure("the site took too long to send the page")
+        return remaining
 
     current = url
     for _hop in range(MAX_REDIRECTS + 1):
@@ -373,7 +389,8 @@ def fetch(url: str) -> str:
         for attempt in range(ATTEMPTS):
             pause = 0.0
             try:
-                with httpx.Client(timeout=TIMEOUT, follow_redirects=False,
+                with httpx.Client(timeout=min(TIMEOUT, left()),
+                                  follow_redirects=False,
                                   trust_env=False) as client:
                     with client.stream(
                             "GET", _pinned_url(current, addresses[0]),
@@ -405,6 +422,7 @@ def fetch(url: str) -> str:
                             chunks: list[bytes] = []
                             total = 0
                             for chunk in resp.iter_bytes():
+                                left()
                                 total += len(chunk)
                                 if total > MAX_BYTES:
                                     raise ValueError(
@@ -424,7 +442,7 @@ def fetch(url: str) -> str:
             if moved_to:
                 break
             if pause:
-                time.sleep(pause)
+                time.sleep(min(pause, left()))
         if not moved_to:
             # Unreachable: every path above returns, raises, or sets one of
             # these two. Here so a future edit that breaks that invariant
@@ -514,28 +532,48 @@ def _plain(html: str) -> str:
     return " ".join(text.split())
 
 
-def _subtree_end(html: str, start: int, name: str) -> int:
-    """Where the element opened at `start` closes, counting nesting.
+def _subtree_ends(html: str, name: str) -> dict[int, int]:
+    """Where every <name> element in `html` closes, counting nesting, keyed by
+    where it opens; -1 for one that nothing closes.
 
-    Returns `start` when nothing closes it -- an unbalanced document then
-    loses one start tag instead of everything after it, which is the failure
-    worth choosing.
+    One pass with a stack for the whole document. It used to be a forward
+    count per element, which re-read the rest of the page for every element
+    that never closes -- 8,000 unclosed <nav> tags in 40KB took eleven
+    seconds, quadratic in a page the fetch cap allows to be 2MB.
     """
     pattern = re.compile(rf"(?is)</?{re.escape(name)}\b[^>]*>")
-    depth = 1
-    pos = start
-    while True:
-        match = pattern.search(html, pos)
-        if not match:
-            return start
-        pos = match.end()
+    ends: dict[int, int] = {}
+    stack: list[int] = []
+    for match in pattern.finditer(html):
         tag = match.group(0)
         if tag.startswith("</"):
-            depth -= 1
-            if depth <= 0:
-                return pos
+            if stack:
+                ends[stack.pop()] = match.end()
         elif not tag.endswith("/>"):
-            depth += 1
+            stack.append(match.start())
+    for opened in stack:
+        ends[opened] = -1
+    return ends
+
+
+def _subtree_closer(html: str):
+    """`end_of(match, name)`: where the element `match` opened closes, from
+    one _subtree_ends pass per tag name -- or `match.end()` when nothing
+    closes it, so an unbalanced document loses one start tag instead of
+    everything after it, which is the failure worth choosing.
+
+    A start tag the one-pass scan did not see on its own (malformed quoting
+    can fold it into the tag before it) is treated as unclosed rather than
+    re-scanned: re-scanning per element is the quadratic path."""
+    found: dict[str, dict[int, int]] = {}
+
+    def end_of(match, name: str) -> int:
+        if name not in found:
+            found[name] = _subtree_ends(html, name)
+        end = found[name].get(match.start(), -1)
+        return end if end > match.end() else match.end()
+
+    return end_of
 
 
 def _is_chrome(name: str, attrs: str) -> bool:
@@ -558,6 +596,7 @@ def _drop_chrome(html: str) -> str:
     """`html` with the furniture removed, subtree and all."""
     out: list[str] = []
     pos, size = 0, len(html or "")
+    end_of = _subtree_closer(html or "")
     while pos < size:
         match = _START_TAG.search(html, pos)
         if not match:
@@ -571,13 +610,14 @@ def _drop_chrome(html: str) -> str:
             continue
         out.append(html[pos:match.start()])
         out.append(" ")
-        pos = _subtree_end(html, match.end(), name)
+        pos = end_of(match, name)
     return "".join(out)
 
 
 def _main_region(html: str) -> str:
     """The inside of <main>/<article>, when the page marks one and it has
     something in it. What is left over is navigation and boilerplate."""
+    end_of = _subtree_closer(html or "")
     for match in _START_TAG.finditer(html or ""):
         name = match.group(1).lower()
         attrs = _attrs(match.group(2))
@@ -586,7 +626,7 @@ def _main_region(html: str) -> str:
                 or attrs.get("id", "").lower() in ("main", "content",
                                                    "main-content")):
             continue
-        end = _subtree_end(html, match.end(), name)
+        end = end_of(match, name)
         if end > match.end():
             inner = html[match.end():end]
             if len(_plain(inner)) >= 200:
@@ -681,6 +721,9 @@ def _page_lead(html: str) -> str:
     return " — ".join(b for b in bits if b)[:600]
 
 
+# Remembered for the page just read: readable_text and unreadable_reason are
+# both asked about the same page, one after the other, and each needs this.
+@functools.lru_cache(maxsize=2)
 def _content_text(html: str) -> str:
     """The page's OWN words, furniture off and no fallbacks.
 

@@ -36,6 +36,10 @@ from __future__ import annotations
 
 import re
 
+from ..base import NO_MATCH
+from . import match as _match
+from . import roster as _roster
+
 # The mediums a collector actually searches, longest first so "oil on canvas"
 # is found before "oil". Read out of the title and the specifics rather than
 # guessed, because a medium the piece does not have is a query about somebody
@@ -102,12 +106,18 @@ def edition_words(listing) -> str:
 def comp_queries(listing) -> list[str]:
     """Comp searches for this piece, most specific first.
 
-    [] when the draft does not name an artist -- which is most items in this
-    app and every item that is not art. An empty list means "nothing to add",
+    [] when the draft does not name an artist or does not read as art --
+    which is most items in this app. An empty list means "nothing to add",
     and the generic title rungs run exactly as they did.
     """
     artist = artist_of(listing)
     if not artist:
+        return []
+    # Art only. Every draft has a brand, and the Artist specific is a music
+    # aspect too, so without this a pair of Levi's was priced against
+    # "Levi's" alone -- the median of everything the brand ever made -- ahead
+    # of the head-of-title rung. A rostered artist is art whatever the title.
+    if _match.matches(listing) <= NO_MATCH and not _roster.lookup(artist):
         return []
     work = _specific(listing, "title of work", "work", "subject")
     medium = medium_of(listing)
