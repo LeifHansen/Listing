@@ -26,9 +26,16 @@ export async function startConnect(path) {
 // Paths that transmit the user's photos onward to the AI provider. Apple's
 // guideline 5.1.2(i) (and plain courtesy) requires explicit consent before
 // the FIRST such transmission, so these calls gate on ensureAiConsent().
-// One choke point here beats a check in every upload flow — new flows are
-// covered automatically.
-const AI_PHOTO_RE = /^\/api\/(upload|upload-more|bulk\/upload|shelf-scan|identify)/;
+// One choke point here beats a check in every upload flow — but only for the
+// routes it names, so a new one has to be added here. Not every photo the AI
+// reads arrived through an upload on this device: "Finish all" (and the
+// capped enrich before it) reads each listing's own photos -- an imported
+// eBay listing's included, which the server fetches from eBay -- and a split
+// rewrites both drafts from theirs, a draft that may have been made on
+// another phone. (The specifics fill and the guidance step's bulk/notes
+// routes only ever follow an identify or upload in this tab, which asked.)
+const AI_PHOTO_RE = new RegExp("^/api/(upload|upload-more|bulk/upload|shelf-scan"
+  + "|identify|listings/(finish-all|enrich|[^/]+/split))");
 
 // Endpoints that CHECK A PASSWORD. Their 401 means "wrong password", not
 // "your session is gone", and the two must not be confused: signing the
@@ -140,10 +147,9 @@ export async function api(path, opts = {}) {
     if (opts.signal.aborted) abort.abort();
     else opts.signal.addEventListener("abort", () => abort.abort(), { once: true });
   }
-  let res;
-  try {
-    res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);
-  } catch (e) {
+  // A request that ended without an answer: before its headers came, or part
+  // way through its body. Both are told apart by method the same way.
+  const lost = (e) => {
     if (e?.name === "AbortError") {
       // What a timeout MEANS depends on the method, and saying the wrong
       // thing here is worse than saying nothing.
@@ -156,7 +162,7 @@ export async function api(path, opts = {}) {
       // to create a second live listing, and this message used to be sent on
       // every timeout regardless of method.
       const seconds = Math.round(timeoutMs / 1000);
-      throw unknownOutcome(new Error(
+      return unknownOutcome(new Error(
         isRepeatable(opts.method)
           ? `That took longer than ${seconds}s and was given up on. `
             + "Nothing was lost — try again."
@@ -171,7 +177,7 @@ export async function api(path, opts = {}) {
     // request that never left from one whose reply was lost. Saying "try
     // again in a few seconds" to someone whose label purchase or publish may
     // already have gone through is how they pay twice.
-    throw unknownOutcome(new Error(
+    return unknownOutcome(new Error(
       isRepeatable(opts.method)
         ? "Network error — the server may be starting up. Try again in a "
           + "few seconds."
@@ -179,9 +185,18 @@ export async function api(path, opts = {}) {
           + "whether it went through. Check before trying again, so you "
           + "don't end up doing it twice.",
       { cause: e }), opts.method);
-  } finally {
+  };
+  let res;
+  try {
+    res = await fetch(apiUrl(path), abort ? { ...opts, signal: abort.signal } : opts);
+  } catch (e) {
     if (timer) clearTimeout(timer);
+    throw lost(e);
   }
+  // The deadline is NOT cleared here. fetch resolves once the headers are in,
+  // and a body that stalls after them (a few MB of listings on a phone between
+  // networks) would otherwise be read with no deadline at all -- the stuck
+  // spinner the deadline exists to prevent. It runs until the body is read.
   // The reference this request was served under. Kept so that a crash a
   // moment later can name the request that preceded it, which is the only
   // way a client-side stack joins to anything on the server.
@@ -197,6 +212,7 @@ export async function api(path, opts = {}) {
       const sent = (await res.json()).detail;
       if (sent) { detail = sent; served = true; }
     } catch (e) { /* non-JSON error body */ }
+    if (timer) clearTimeout(timer);
     // Out of AI tokens (402 mentioning tokens — distinct from the unrelated
     // 402 the server maps Anthropic-credit exhaustion to): let the app shell
     // open the buy-tokens dialog on top of whatever toast the caller shows.
@@ -243,8 +259,20 @@ export async function api(path, opts = {}) {
   // deadline, the bearer token, the 401 and 402 handling, the request id the
   // next crash is joined by), and a second copy of this wrapper that differed
   // only in its last line is how those stop being the same.
-  if (opts.as === "response") return res;
-  return res.json();
+  if (opts.as === "response") {
+    if (timer) clearTimeout(timer);
+    return res;
+  }
+  try {
+    return await res.json();
+  } catch (e) {
+    // The deadline, or the connection dropping, part way through the body.
+    // Anything else (a body that is not JSON) is thrown as it is.
+    if (e?.name === "AbortError" || e?.name === "TypeError") throw lost(e);
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // `opts` reaches api() untouched, which is how a caller with genuinely long

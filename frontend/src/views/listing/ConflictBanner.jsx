@@ -29,7 +29,8 @@ export function ConflictBanner({ conflicts, sessionId, onResolved }) {
       const r = await postJson(`/api/listings/${sessionId}/resolve-conflict`,
                                { field, choice });
       toast(r.message, { kind: "success" });
-      onResolved?.(r);
+      // Which answer, too: the editor takes eBay's value into its form.
+      onResolved?.(r, { field, choice });
     } catch (e) {
       // Never swallowed: an answer that did not save means the seller's value
       // is still not going to eBay, which is the silence this exists to end.

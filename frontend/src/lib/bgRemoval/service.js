@@ -128,7 +128,10 @@ async function localProvider() {
     Status: "off" (not allowed here), "unsupported", "needs-download",
     "ready". Never throws. */
 export function checkLocal({ force = false } = {}) {
-  if (checking && !force) return checking;
+  // The check runs once; what it resolves to is the snapshot NOW. Handing
+  // back the one from when it ran kept a model that had since downloaded
+  // reading "needs-download", so every later photo prepared it again.
+  if (checking && !force) return checking.then(() => snapshot);
   checking = (async () => {
     const provider = config ? await localProvider() : null;
     if (!provider) {
@@ -150,17 +153,29 @@ export function checkLocal({ force = false } = {}) {
 
 /** Make the device's engine ready -- download its model if it has one to
     download -- reporting progress on the shared snapshot. */
+let preparing = null;
+
 export async function prepareLocal() {
   const state = await checkLocal();
   if (state.status === "ready") return snapshot;
+  // One download however many ask: a photo that arrives while the model is
+  // coming down waits for it rather than being told it is unavailable.
+  if (preparing) return preparing;
   if (state.status !== "needs-download") return snapshot;
-  const provider = await localProvider();
-  if (!provider) return snapshot;
-  emit({ status: "downloading", progress: 0 });
-  const r = await provider.initialize({ onProgress: (p) => emit({ progress: p }) });
-  emit({ status: r.ready ? "ready" : (r.supported ? "needs-download" : "unsupported"),
-         reason: r.ready ? "" : (r.reason || "model_download_failed"), progress: null });
-  return snapshot;
+  preparing = (async () => {
+    const provider = await localProvider();
+    if (!provider) return snapshot;
+    emit({ status: "downloading", progress: 0 });
+    const r = await provider.initialize({ onProgress: (p) => emit({ progress: p }) });
+    emit({ status: r.ready ? "ready" : (r.supported ? "needs-download" : "unsupported"),
+           reason: r.ready ? "" : (r.reason || "model_download_failed"), progress: null });
+    return snapshot;
+  })();
+  try {
+    return await preparing;
+  } finally {
+    preparing = null;
+  }
 }
 
 /** Whether a device cutout can be attempted right now (ready, or ready once
@@ -242,8 +257,21 @@ export async function makeMask(blob, { sourceSha = "", signal } = {}) {
   }
   if (key && inflight.has(key)) return inflight.get(key);
   const run = (async () => {
-    const out = await withDeadline(provider.removeBackground(blob, { signal }),
-                                   timeoutMs(), signal);
+    let out;
+    try {
+      out = await withDeadline(provider.removeBackground(blob, { signal }),
+                               timeoutMs(), signal);
+    } catch (e) {
+      // Past the deadline the run is still going. Let the engine go (the
+      // browser's worker would otherwise make the next photo wait behind it,
+      // and time out too) and ask the device about itself again: a run that
+      // slow may be the "too slow" the capability check means.
+      if (e?.code === "timeout") {
+        try { provider.cancel?.("timeout"); } catch (err) { /* best effort */ }
+        checking = null;
+      }
+      throw e;
+    }
     if (!out?.mask || !out.mask.size) throw new LocalCutoutError("invalid_mask");
     const coverage = await maskCoverage(out.mask);
     if (coverage !== null && coverage < MIN_COVERAGE) {

@@ -139,7 +139,11 @@ export function MessagesView() {
             onOpenListing={(c) => c.listing_record_id && openListing(c.listing_record_id)}
           />
           {header && (
+            // Keyed by conversation: side by side with the list, one composer
+            // for every thread kept a reply typed to one buyer in the box for
+            // the next, one Enter from being sent to the wrong person.
             <Composer
+              key={activeConversationId}
               disabled={!messages.available}
               disabledNote={messages.message}
               onSend={(text) => sendMessage(activeConversationId, text)}

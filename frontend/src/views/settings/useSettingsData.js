@@ -37,11 +37,14 @@ export function useSettingsData() {
     if (user) loadPrefs();
   }, [user, loadPrefs]);
 
-  // One key at a time, by PATCH. The server merges, so nothing else moves,
-  // and the answer is the whole row as saved — which is what is shown.
+  // One key at a time, by PATCH. The server merges, so nothing else moves —
+  // and only this key is taken from the answer. The answer is the whole row
+  // as it stood after THIS save, so two switches flipped quickly and
+  // answered out of order put the second one back on screen.
   const savePref = useCallback(async (key, value) => {
     const r = await patchJson("/api/prefs", { [key]: value });
-    setPrefs(r.prefs || {});
+    const saved = r.prefs && key in r.prefs ? r.prefs[key] : value;
+    setPrefs((cur) => ({ ...(cur || {}), [key]: saved }));
     return r;
   }, []);
   // A few keys at once, for the cards with a Save button.

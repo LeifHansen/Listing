@@ -122,7 +122,13 @@ export function CrosspostWizard({ items, onClose }) {
     }
   };
 
-  const sendable = (rows || []).filter((r) => !r.skip && r.ready && r.taxonomy?.id);
+  // What still stops a row, against the row as it stands: `ready` and
+  // `blockers` are the server's verdict at review time, and a category
+  // chosen here since (Suggest, or the box) answers the one about it.
+  const blockersOf = (r) => (r.blockers || []).filter(
+    (b) => !(b.target === "etsy_taxonomy" && r.taxonomy?.id));
+  const sendable = (rows || []).filter(
+    (r) => !r.skip && r.taxonomy?.id && (r.ready || !blockersOf(r).length));
 
   const run = async () => {
     setBusy(true);
@@ -340,7 +346,7 @@ export function CrosspostWizard({ items, onClose }) {
                     old unless you made them.
                   </p>
                 )}
-                {!row.ready && <Chips items={(row.blockers || []).map((b) => ({
+                {!row.ready && <Chips items={blockersOf(row).map((b) => ({
                   key: b.target, label: b.title, why: b.fix }))} />}
               </div>
               <label className="flex items-center gap-2 text-[13px] text-ink-secondary cursor-pointer">

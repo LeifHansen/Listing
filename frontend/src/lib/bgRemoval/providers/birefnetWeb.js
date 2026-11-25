@@ -114,6 +114,16 @@ export const BiRefNetWebProvider = {
     }
   },
 
+  /** The service stopped waiting on a run. Terminating the worker is the
+      only way to stop one, and a WebAssembly run past the deadline is this
+      machine proving too slow -- remembered now, not on the next visit, and
+      the capability read again so this session hears it. */
+  cancel(reason) {
+    if (reason === "timeout" && capability?.backend === "wasm") rememberTooSlow();
+    capability = null;
+    stopWorker();
+  },
+
   async removeBackground(blob) {
     if (!worker) {
       const r = await this.initialize();

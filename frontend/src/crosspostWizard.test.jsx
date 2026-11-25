@@ -176,6 +176,34 @@ describe("the crosspost wizard", () => {
     expect(sent.some(([p]) => p.startsWith("/api/crosspost/etsy/start"))).toBe(false);
   });
 
+  it("can send a row whose only want was a category, once one is suggested", async () => {
+    // `ready` is the server's verdict at review time; the category box and
+    // Suggest on this step are how the seller answers that one blocker, and
+    // the row stayed unsendable whatever they picked.
+    await mount([live("a")], {
+      "/api/crosspost/etsy/review": () => ({
+        rows: [{ id: "a", title: "Item a", etsy_title: "Item a", ready: false,
+                 taxonomy: { id: 0, path: "", source: "" },
+                 who_made: "someone_else", when_made: "1990s", when_made_source: "listing",
+                 tags: [], materials: [], etsy: {}, warnings: [], policy_flag: false,
+                 blockers: [{ target: "etsy_taxonomy", title: "Etsy category is missing",
+                              fix: "Pick an Etsy category." }] }],
+        skipped: [], ai_calls: 0, mode: "draft" }),
+      "/api/etsy/suggest-taxonomy/a": () => ({
+        taxonomy_id: 1234, path: "Home & Living > Kitchen", source: "ai" }),
+    });
+    await click(button("Continue"));
+    await click([...dialog().querySelectorAll("input[type=checkbox]")].at(-1));
+    await click(button("Review 1"));
+    await tick();
+    expect(button("Crosspost 0").disabled).toBe(true);
+
+    await click(button("Suggest"));
+    await tick();
+    expect(dialog().textContent).not.toContain("Etsy category is missing");
+    expect(button("Crosspost 1").disabled).toBe(false);
+  });
+
   it("reports each listing's own outcome from the run", async () => {
     let polls = 0;
     await mount([live("a"), live("b")], {

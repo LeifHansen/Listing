@@ -17,7 +17,7 @@ export function AuthDialog() {
   // identity coming out of the context object) and allows the `.current` write
   // below. Same object either way — rename only.
   const { authOpen, setAuthOpen, authMode: mode, setAuthMode: setMode,
-          setUser, loadEbayStatus,
+          setUser, loadEbayStatus, loadBgRemovalStatus,
           afterLogin: afterLoginRef } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -44,7 +44,10 @@ export function AuthDialog() {
       setEmail("");
       setPassword("");
       setAuthOpen(false);
+      // Both answer per seller, and the store last read them as nobody (at
+      // boot or on sign-out): background removal's switch is the seller's own.
       loadEbayStatus();
+      loadBgRemovalStatus();
       // Resume the action that was interrupted by the login prompt.
       const resume = afterLoginRef.current;
       afterLoginRef.current = null;

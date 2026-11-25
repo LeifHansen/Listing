@@ -587,6 +587,10 @@ export function UploadPhase({ defaultOpen = false }) {
       // The photos are on the server now and everything from here shows
       // THOSE, so the local previews have done their job.
       files.forEach((f) => URL.revokeObjectURL(f.url));
+      // ...and the pile goes with them: if the question is cleared (a 409
+      // below), a pile left here is broken tiles over a button that would
+      // upload the same photos into a second draft.
+      setFiles([]);
       if (out?.phase === "awaiting_notes") {
         // Written down BEFORE the question goes up, so a seller who leaves
         // the screen a second later can still be brought back to it.

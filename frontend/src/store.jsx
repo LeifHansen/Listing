@@ -320,8 +320,10 @@ export function AppProvider({ children }) {
   // visible and applied on purpose.
   const [listingFilters, setFilters] = useState(EMPTY_FILTERS);
   const setListingFilters = useCallback((next) => {
+    // As typed: the brand and category boxes are bound to this, and trimming
+    // here would eat the space between two words (lib/listingFilters).
     setFilters((cur) => normalizeFilters(
-      typeof next === "function" ? next(cur) : next));
+      typeof next === "function" ? next(cur) : next, { asTyped: true }));
   }, []);
   const clearListingFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
 
@@ -582,6 +584,10 @@ export function AppProvider({ children }) {
   );
   // Action to resume after a login that interrupted it (e.g. Shop-mode "Buy").
   const afterLogin = useRef(null);
+  // Bumped by every sign-out. Long work that outlives a request (the store
+  // import, a bulk upload) reads it before it acts on its answer, so the last
+  // seller's job cannot land in the next seller's session.
+  const signOuts = useRef(0);
 
   const loadAuth = useCallback(async () => {
     let signedIn = false;
@@ -639,8 +645,9 @@ export function AppProvider({ children }) {
 
   // The operator console gate, for RENDERING only (the Admin nav entry and
   // the admin view). The server re-checks the role on every /api/admin call,
-  // so this can never grant anything — and because /api/auth/me re-reads the
-  // role from the database, a revoked admin loses the nav on the next poll.
+  // so this can never grant anything. /api/auth/me re-reads the role from the
+  // database, but it is read at boot only (nothing polls it), so a revoked
+  // admin keeps the nav until the next load -- and every panel behind it 404s.
   const isSuperadmin = user?.role === "superadmin";
 
   // ---------- AI tokens (monetization) ----------
@@ -1002,27 +1009,44 @@ export function AppProvider({ children }) {
     try {
       const res = await api("/api/listings");
       if (seq !== listingsRequest.current) return;   // superseded: a newer answer is coming
-      setListingsState({
-        loaded: true,
-        loading: false,
-        error: "",
-        authed: !!res.authed,
-        dbConfigured: !!(res.db && res.db.configured),
-        items: res.listings || [],
-        // The server says when the page is not the whole store. Every count,
-        // tab, dashboard group and bulk checkbox below is built on `items`,
-        // so this is what stops them reading as complete. See
-        // lib/listingsView.
-        truncated: !!res.truncated,
-        // How many there are, when the server was able to count. Only sent
-        // for a page that WAS cut, and null when the count itself failed --
-        // `listingsView` names it only if it arrived. See lib/listingsView.
-        total: Number.isFinite(res.total) ? res.total : null,
-        // Where the next page starts. Keyset, so it names the last row rather
-        // than counting rows -- see db.list_listings. Absent on a complete
-        // page, which is what stops `loadMoreListings` looping.
-        nextCursor: res.next_cursor || null,
-        loadingMore: false,
+      const page = res.listings || [];
+      setListingsState((s) => {
+        // This answer is the FIRST page. Pages behind it that the seller
+        // loaded with "Load older listings" are kept (a refresh is every
+        // write and every return to the tab, and replacing them threw away
+        // the listing the seller was working on), unless this page is now
+        // the whole store. A listing in both is the first page's copy.
+        const onPage = new Set(page.map((i) => i.id));
+        const olderIds = new Set(s.olderIds || []);
+        const older = res.truncated
+          ? s.items.filter((i) => olderIds.has(i.id) && !onPage.has(i.id)) : [];
+        const keep = older.length > 0;
+        return {
+          loaded: true,
+          loading: false,
+          error: "",
+          authed: !!res.authed,
+          dbConfigured: !!(res.db && res.db.configured),
+          items: keep ? [...page, ...older] : page,
+          olderIds: older.map((i) => i.id),
+          // The server says when the page is not the whole store. Every count,
+          // tab, dashboard group and bulk checkbox below is built on `items`,
+          // so this is what stops them reading as complete. See
+          // lib/listingsView. With older pages kept, the last of them says.
+          truncated: keep ? !!s.truncated : !!res.truncated,
+          // How many there are, when the server was able to count. Only sent
+          // for a page that WAS cut, and null when the count itself failed --
+          // `listingsView` names it only if it arrived. See lib/listingsView.
+          total: Number.isFinite(res.total) ? res.total : null,
+          // Where the next page starts. Keyset, so it names the last row rather
+          // than counting rows -- see db.list_listings. Absent on a complete
+          // page, which is what stops `loadMoreListings` looping. With older
+          // pages kept, it is where THEY end.
+          nextCursor: keep ? s.nextCursor || null : res.next_cursor || null,
+          // An older page still on its way lands on top of this one; letting
+          // the button go here would ask for that same page again.
+          loadingMore: !!s.loadingMore,
+        };
       });
       listingsFreshUntil.current = Date.now() + LISTINGS_FRESH_MS;
     } catch (e) {
@@ -1049,8 +1073,10 @@ export function AppProvider({ children }) {
   const patchListing = useCallback((id, patch) => {
     if (!id || !patch) return;
     setListingsState((s) => {
-      const items = s.items.map((it) => (it.id === id ? { ...it, ...patch } : it));
-      return items === s.items ? s : { ...s, items };
+      // The same state when no card is this listing (a .map() is never the
+      // array it came from, so comparing those could not bail out).
+      if (!s.items.some((it) => it.id === id)) return s;
+      return { ...s, items: s.items.map((it) => (it.id === id ? { ...it, ...patch } : it)) };
     });
   }, []);
 
@@ -1163,7 +1189,7 @@ export function AppProvider({ children }) {
   // job the server has no record of, or after a run of failed polls — the
   // "Syncing your eBay store…" line can no longer hang forever waiting on a
   // request that will never answer.
-  const watchImport = useCallback(async (jobId) => {
+  const watchImport = useCallback(async (jobId, gen) => {
     let fails = 0;
     let missing = 0;
     // An overall deadline as well as the per-poll rules below. A job that
@@ -1175,6 +1201,9 @@ export function AppProvider({ children }) {
     const deadline = Date.now() + 40 * 60 * 1000;
     for (;;) {
       await new Promise((r) => setTimeout(r, 2000));
+      // Signed out meanwhile: the job is not this session's to watch (and
+      // its status route would only 404 into a "sync stopped" error).
+      if (gen !== signOuts.current) return null;
       if (Date.now() > deadline) {
         throw new Error("The sync is taking longer than expected. Anything "
                         + "imported already is in Listings — check back in a "
@@ -1204,6 +1233,7 @@ export function AppProvider({ children }) {
         }
         continue;
       }
+      if (gen !== signOuts.current) return null;
       fails = 0;
       missing = 0;
       setStoreSync((s) => ({
@@ -1239,9 +1269,12 @@ export function AppProvider({ children }) {
     // pressing the button, and always runs.
     if (!force && !autoSyncDue(user.id)) return null;
     syncedOnce.current = true;
+    const gen = signOuts.current;
+    const signedOut = () => gen !== signOuts.current;
     setStoreSync((s) => ({ ...s, syncing: true, error: null, progress: null }));
     try {
       const started = await postJson("/api/ebay/import-listings", {});
+      if (signedOut()) return null;
       // Status reconciliation (sold/ended) can lag behind — fold it in quietly.
       // The full per-item sweep is reserved for the deliberate "Sync with
       // eBay" press: it is a second per-listing pass over the store, and
@@ -1250,6 +1283,7 @@ export function AppProvider({ children }) {
       lastReconcile.current = Date.now();
       postJson("/api/ebay/sync-listings", { force })
         .then((r) => {
+          if (signedOut()) return;
           setStoreSync((s) => ({ ...s, partial: !!r.partial }));
           // `removed` as well as `changed`: the sweep that clears ended
           // listings takes cards OFF this screen, and those are the ones the
@@ -1259,7 +1293,10 @@ export function AppProvider({ children }) {
         .catch(() => {});
       // job_id: the import runs in the background and we watch it. A body with
       // the counts already in it is a server that still imports inline.
-      const res = started?.job_id ? await watchImport(started.job_id) : started;
+      const res = started?.job_id ? await watchImport(started.job_id, gen) : started;
+      // Signed out while it ran: nothing below is the next session's business
+      // -- not its listings, its spinner, or the last seller's "synced" latch.
+      if (signedOut()) return null;
       await loadListings({ quiet: true });
       // "Sync with eBay" means the whole picture the seller is looking at,
       // and the badge on a card is as much a part of that as the card. Read
@@ -1282,6 +1319,7 @@ export function AppProvider({ children }) {
       }));
       return res;
     } catch (e) {
+      if (signedOut()) return null;
       setStoreSync({
         syncing: false, error: e.message, progress: null,
       });
@@ -1402,8 +1440,11 @@ export function AppProvider({ children }) {
       return { ...s, loadingMore: true };
     });
     if (!started && listingsStateRef.current.loadingMore) return;
+    // A page asked for before a sign-out is the last seller's.
+    const gen = signOuts.current;
     try {
       const res = await api(`/api/listings?before=${encodeURIComponent(cursor)}`);
+      if (gen !== signOuts.current) return;
       setListingsState((s) => {
         // Belt and braces against a double append: a page that arrives twice
         // would put every id on screen twice, and the checkboxes a bulk
@@ -1413,6 +1454,8 @@ export function AppProvider({ children }) {
         return {
           ...s,
           items: [...s.items, ...fresh],
+          // What a refresh of the first page keeps (see loadListings).
+          olderIds: [...(s.olderIds || []), ...fresh.map((i) => i.id)],
           truncated: !!res.truncated,
           total: Number.isFinite(res.total) ? res.total : s.total,
           nextCursor: res.next_cursor || null,
@@ -1420,6 +1463,7 @@ export function AppProvider({ children }) {
         };
       });
     } catch (e) {
+      if (gen !== signOuts.current) return;
       // Not recorded as `error`: that field means "there is nothing on
       // screen", and here there is a whole page of listings the seller can
       // still work with. The toast says what failed; the button stays.
@@ -1768,6 +1812,9 @@ export function AppProvider({ children }) {
   // Photoroom as before.
   const runBulkUpload = useCallback(async (files, removeBg, notes = "", cutMode = "") => {
     beginBulk();
+    // A sign-out during the upload (minutes, on a phone) has already cleared
+    // the batch; the last seller's job must not come back as the next one's.
+    const gen = signOuts.current;
     try {
       const prepped = await downscaleAllForUpload(files.map((f) => f.file));
       const fd = new FormData();
@@ -1782,8 +1829,10 @@ export function AppProvider({ children }) {
         // A whole batch of photos over a phone connection: minutes, legitimately.
         { method: "POST", body: fd, timeoutMs: UPLOAD_TIMEOUT_MS });
       files.forEach((f) => URL.revokeObjectURL(f.url));
+      if (gen !== signOuts.current) return;
       startBulk(job_id);
     } catch (e) {
+      if (gen !== signOuts.current) return;
       // Back to the uploader with the pile intact, so retrying is one click —
       // the notes with it, or the seller retypes every hint they just wrote.
       setBulkRetry({ files, removeBg, notes, cutMode });
@@ -1825,6 +1874,14 @@ export function AppProvider({ children }) {
     storeToken(null); // native shell's bearer token — no-op on the web
     setUser(null);
     afterLogin.current = null; // nothing to resume into a session that ended
+    // Answers still on their way belong to the session that just ended. Each
+    // of these reads already lets only its newest request land; a sign-out
+    // counts as newer, so the last seller's sales, or a listing they tapped
+    // open, cannot arrive after them.
+    signOuts.current += 1;
+    saleEventsRequest.current += 1;
+    openRequest.current += 1;
+    listingsRequest.current += 1;
 
     // Every cache below is one account's.
     setListingsState(NO_LISTINGS);
@@ -1840,6 +1897,12 @@ export function AppProvider({ children }) {
     // A device queue working through the previous seller's photos stops.
     cutoutQueue.reset();
     setPoliciesData(null);
+    // Read once and only while empty, so left alone the next seller would be
+    // offered these shelves and this Etsy shop as their own.
+    setStoreCategoriesData(null);
+    setEtsyShop(null);
+    setDraftSelection({});
+    setLiveSelection({});
     setMarketplaces([]);
     setStoreSync(NO_STORE_SYNC);
     setTokens((t) => ({ ...t, total: 0 })); // balance is theirs; the catalog isn't

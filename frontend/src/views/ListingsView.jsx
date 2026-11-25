@@ -194,21 +194,27 @@ export function ListingsView({ search = "" }) {
   const tab = TABS.find((t) => t.id === tabId) || TABS[0];
   const pick = (t) => setListingsTab(t);
 
-  const counts = Object.fromEntries(TABS.map((t) => [
-    t.id, listingsState.items.filter((i) => inTab(t, i)).length,
-  ]));
+  // Memoized on the items, like `base` below: the app context re-renders this
+  // view on every background poll, and each of these walks the whole store
+  // once per tab or filter.
+  const stored = listingsState.items;
+  const counts = useMemo(() => Object.fromEntries(TABS.map((t) => [
+    t.id, stored.filter((i) => inTab(t, i)).length,
+  ])), [stored]);
 
   // The second cut, WHERE a listing lives, appears once there is a second
   // marketplace to cut by: one connected, or one already on a record. An
   // eBay-only seller sees the pipeline exactly as before.
-  const otherMarketplaces = connectedMarketplaces.some((m) => m.key !== "ebay")
-    || listingsState.items.some((i) => Object.keys(i.listing?.marketplaces || {})
-      .some((k) => k !== "ebay"));
+  const otherMarketplaces = useMemo(
+    () => connectedMarketplaces.some((m) => m.key !== "ebay")
+      || stored.some((i) => Object.keys(i.listing?.marketplaces || {})
+        .some((k) => k !== "ebay")),
+    [connectedMarketplaces, stored]);
   const marketId = otherMarketplaces
     && MARKET_FILTERS.some((f) => f.id === listingsMarket) ? listingsMarket : "all";
-  const marketCounts = Object.fromEntries(MARKET_FILTERS.map((f) => [
-    f.id, listingsState.items.filter((i) => inTab(tab, i) && inMarketFilter(f.id, i)).length,
-  ]));
+  const marketCounts = useMemo(() => Object.fromEntries(MARKET_FILTERS.map((f) => [
+    f.id, stored.filter((i) => inTab(tab, i) && inMarketFilter(f.id, i)).length,
+  ])), [stored, tab]);
   const etsy = marketplaces.find((m) => m.key === "etsy");
   const [crosspostOpen, setCrosspostOpen] = useState(false);
 
