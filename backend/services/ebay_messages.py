@@ -45,7 +45,7 @@ from typing import Optional
 import httpx
 
 from .. import config
-from .ebay import is_scope_error
+from .ebay import NEVER_SENT, is_scope_error
 from ..config import log
 
 _TIMEOUT = 30
@@ -89,14 +89,10 @@ class UnknownOutcome(MessagesError):
     outcome_unknown = True
 
 
-# Transport failures that prove the request never reached eBay. Anything
-# else -- a read timeout, a dropped connection mid-reply, an exception type
-# nobody here anticipated -- may have been acted on, the same asymmetry the
-# Trading, Etsy and Depop clients use.
-_NEVER_SENT = (
-    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
-    httpx.UnsupportedProtocol, httpx.InvalidURL,
-)
+# Transport failures that prove the request never reached eBay are
+# ebay.NEVER_SENT. Anything else -- a read timeout, a dropped connection
+# mid-reply, an exception type nobody here anticipated -- may have been acted
+# on, the same asymmetry the Trading, Etsy and Depop clients use.
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _UNKNOWN = ("eBay didn't confirm the send. Open the conversation to see "
             "whether your message landed before sending it again.")
@@ -145,7 +141,7 @@ def _request(method: str, token: str, path: str, *, params=None, json=None,
         try:
             resp = httpx.request(method, f"{base}{path}", headers=_headers(token),
                                  params=params, json=json, timeout=_TIMEOUT)
-        except _NEVER_SENT as exc:
+        except NEVER_SENT as exc:
             raise MessagesError(f"Couldn't reach eBay: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - sent, or sent-ness unproven
             if changes:
@@ -482,8 +478,3 @@ def mark_read(token: str, raw_id: str) -> bool:
             continue
     log.info("ebay_messages: couldn't mark %s read (unknown action name)", rid)
     return False
-
-
-def unread_total(conversations: list) -> int:
-    return sum(_as_int(c.get("unread"), 0) for c in conversations or []
-               if isinstance(c, dict))

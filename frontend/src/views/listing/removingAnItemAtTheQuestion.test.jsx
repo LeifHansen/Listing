@@ -132,6 +132,8 @@ describe("removing an item at the guidance step", () => {
       // The doll head cup is now the second card — and still has its note.
       expect(host.querySelectorAll("textarea")[1].value).toBe("Avon, 1970s");
 
+      await click([...host.querySelectorAll("button")]
+        .find((b) => b.textContent.includes("Approve all")));
       const write = [...host.querySelectorAll("button")]
         .find((b) => b.textContent.includes("Write 2 listings"));
       await click(write);

@@ -95,6 +95,24 @@ describe("the editor header", () => {
     }
   });
 
+  it("offers to split a draft with photos enough to divide", async () => {
+    // One photo cannot be two items (the draft above is not offered it);
+    // two can — the uploader's bulk toggle left off is how that draft
+    // happens, and this is its way back.
+    await mountEditor({ ...DRAFT, images: ["img_000.jpg", "img_001.jpg"] });
+    await openMenu();
+    expect(menuItems().map((t) => t.replace(/[⌘↩]|Ctrl\+/g, "").trim())).toEqual([
+      "Publish Live", "New listing", "Duplicate", "Split into two listings",
+      "Check with eBay", "Save to eBay drafts", "Delete listing",
+    ]);
+    const item = [...host.querySelectorAll('[role="menuitem"]')]
+      .find((b) => b.textContent.trim() === "Split into two listings");
+    await act(async () => { item.click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(document.body.textContent).toContain("Tap the photos that belong to the other item");
+    expect(document.querySelectorAll('button[aria-label*=": this listing"]')).toHaveLength(2);
+  });
+
   it("offers a draft its once-a-month actions, Delete last", async () => {
     await mountEditor(DRAFT);
     await openMenu();

@@ -22,8 +22,6 @@ Two faults, and either one alone is enough to trap a seller in that loop:
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from backend import ebay_errors
@@ -100,13 +98,10 @@ def test_the_length_advice_survives_where_it_is_true():
     assert f"{TITLE_MAX_CHARS} characters or fewer" in it["fix"]
 
 
-def test_both_transports_agree_about_a_title():
-    """Same guard the taxonomy suite already holds for codes: a fix applied
-    to one door and not the other is how these get missed."""
+def test_the_trading_door_blames_a_title_ebay_blamed():
+    """The way in every publish and revise takes. A fix applied to `explain`
+    that does not reach this door is how these get missed."""
     message = "The title is not valid."
-    rest = ebay_errors.from_response(
-        json.dumps({"errors": [{"errorId": 37, "message": message}]}))[0]
     trading = ebay_errors.from_trading_error(
         ebay_trading.TradingError(message, code="37", detail=""))[0]
-    assert rest["target"] == trading["target"] == "title"
-    assert rest["title"] == trading["title"]
+    assert trading["target"] == "title"

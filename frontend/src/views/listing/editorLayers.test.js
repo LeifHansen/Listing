@@ -10,7 +10,8 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   ERASE, RESTORE, applySnapshot, compose, createHistory, drawStroke,
-  layersFrom, pushOperation, pushStroke, replay, rotateQuarter, snapshot,
+  layersFrom, pushOperation, pushStroke, releaseLayers, replay, rotateQuarter,
+  snapshot,
 } from "./editorLayers";
 
 function fakeImage(width = 100, height = 80) {
@@ -153,6 +154,35 @@ describe("snapshots", () => {
     expect(other.height).toBe(80);
     expect(restored).toHaveLength(1);
     expect(calls(other.mask).filter((c) => c.op === "stroke")).toHaveLength(1);
+  });
+});
+
+describe("releaseLayers", () => {
+  // A canvas keeps its pixels until it is collected, and the iOS shell caps
+  // the canvas memory a page may hold: a photo the studio is done with has
+  // to give its back at once, history snapshots included.
+  it("zeroes every canvas the stack and its history hold", () => {
+    const history = createHistory();
+    pushStroke(history, { tool: ERASE, radius: 5, points: [[1, 1]] });
+    pushOperation(history, snapshot(layers, []), snapshot(layers, []));
+    pushOperation(history, snapshot(layers, []), snapshot(layers, []));
+    history.redo.push(history.undo.pop());   // one undone: redo holds it
+    const held = [
+      layers.original, layers.cutout, layers.mask, layers.paint,
+      ...[...history.undo, ...history.redo]
+        .filter((e) => e.kind === "operation")
+        .flatMap((e) => [e.before.original, e.before.cutout,
+                         e.after.original, e.after.cutout]),
+    ];
+    expect(held).toHaveLength(12);
+    expect(held.every((c) => c.width === 100 && c.height === 80)).toBe(true);
+
+    releaseLayers(layers, history);
+    expect(held.every((c) => c.width === 0 && c.height === 0)).toBe(true);
+  });
+
+  it("has nothing to do before a photo has loaded", () => {
+    expect(() => releaseLayers(null, createHistory())).not.toThrow();
   });
 });
 

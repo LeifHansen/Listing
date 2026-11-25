@@ -451,3 +451,17 @@ describe("where a listing lives", () => {
     expect(MARKET_FILTERS.map((f) => f.id)).toEqual(["all", "ebay", "etsy", "ebay-only"]);
   });
 });
+
+describe("when a listing went up", () => {
+  it("is eBay's start time, then this app's publish, then the record's birth", async () => {
+    const { listedAt } = await import("./listingsView.js");
+    const at = (listing, created_at = "2026-01-01T00:00:00Z") => listedAt({ created_at, listing });
+    expect(at({ ebay_start_time: "2025-05-01T00:00:00Z",
+      marketplaces: { ebay: { published_at: "2025-06-01T00:00:00Z" } } }))
+      .toBe("2025-05-01T00:00:00Z");
+    expect(at({ marketplaces: { ebay: { published_at: "2025-06-01T00:00:00Z" } } }))
+      .toBe("2025-06-01T00:00:00Z");
+    expect(at({})).toBe("2026-01-01T00:00:00Z");
+    expect(at({ ebay_start_time: "garbage" }, "")).toBe("");
+  });
+});

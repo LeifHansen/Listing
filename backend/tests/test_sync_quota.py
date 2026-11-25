@@ -58,11 +58,8 @@ def test_call_limit_error_is_explained_not_generic():
     # is the call-limit code" — it is not, it is an expired IAF token, and
     # `ebay_trading._failure` correctly routes it to the reconnect message.
     # A fixture that mislabels a code is a trap for whoever reads it next.
-    issues = ebay_errors.from_response(
-        '{"errors":[{'
-        '"message":"Application has exceeded the number of calls permitted."}]}')
-    assert len(issues) == 1
-    issue = issues[0]
+    issue = ebay_errors.explain(
+        {"message": "Application has exceeded the number of calls permitted."})
     assert "API limit" in issue["title"]
     # The seller must be told the listing is fine and when to retry.
     assert "listing" in issue["fix"].lower()
@@ -70,10 +67,9 @@ def test_call_limit_error_is_explained_not_generic():
 
 
 def test_selling_limit_error_names_the_real_fix():
-    issues = ebay_errors.from_response(
-        '{"errors":[{"errorId":21919188,'
-        '"message":"You have reached your monthly selling limit."}]}')
-    issue = issues[0]
+    issue = ebay_errors.explain(
+        {"errorId": 21919188,
+         "message": "You have reached your monthly selling limit."})
     assert "selling limit" in issue["title"].lower()
     assert "Seller Hub" in issue["fix"]
 
@@ -81,10 +77,9 @@ def test_selling_limit_error_names_the_real_fix():
 def test_ordinary_rejections_still_map_to_their_field():
     # The limit branches must not swallow the field-targeted errors that make
     # the fix-it chips work.
-    price = ebay_errors.from_response(
-        '{"errors":[{"errorId":25002,"message":"The price is invalid."}]}')[0]
+    price = ebay_errors.explain(
+        {"errorId": 25002, "message": "The price is invalid."})
     assert price["target"] == "price"
-    specifics = ebay_errors.from_response(
-        '{"errors":[{"errorId":25002,'
-        '"message":"The item specific Brand is missing."}]}')[0]
+    specifics = ebay_errors.explain(
+        {"errorId": 25002, "message": "The item specific Brand is missing."})
     assert specifics["target"] == "specifics"

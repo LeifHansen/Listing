@@ -16,7 +16,7 @@
  */
 
 /** The floor, matching backend money.MIN_CHARM_PRICE and bulk MIN_PRICE. */
-export const MIN_CHARM_PRICE = 0.99;
+const MIN_CHARM_PRICE = 0.99;
 
 /** `amount` on the nearest .99, or null when it isn't a price at all. */
 export function charmPrice(amount) {

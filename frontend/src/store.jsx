@@ -1,12 +1,15 @@
 import {
   createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
 } from "react";
-import { api, postJson, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
+import { api, postJson, pollJob, downscaleAllForUpload, UPLOAD_TIMEOUT_MS } from "@/lib/api";
 import {
   EMPTY_FILTERS, addSavedView, normalizeFilters, normalizeSavedView,
   normalizeSavedViews, removeSavedView,
 } from "@/lib/listingFilters";
 import { readLocal, writeLocal, clearLocal } from "@/lib/localPrefs";
+import { DEFAULT_SORT, normalizeSort } from "@/lib/listingSort";
+import { DEFAULT_LIMITS, saleIndex } from "@/lib/saleEvents";
+import { isDraft } from "@/lib/listingsView";
 import { storeToken } from "@/lib/platform";
 import { useToast } from "@/components/ui/Toaster";
 
@@ -75,7 +78,7 @@ const NO_MESSAGES = {
   message: "", loaded: false,
 };
 const NO_STORE_SYNC = {
-  syncing: false, lastSynced: null, error: null, progress: null,
+  syncing: false, error: null, progress: null,
   // Whether the last sweep actually covered the store — it SAMPLES on a
   // big one, and the list it samples is a capped read, so the oldest live
   // listings may never reach it. The Dashboard's green tick is a
@@ -93,11 +96,18 @@ const NO_LISTINGS = {
 // identical in an empty array, and only one of them is a reason to tell a
 // seller they have no saved views.
 const NO_SAVED_VIEWS = { items: [], loaded: false, saving: false };
+// The seller's eBay sale events (lib/saleEvents). `checked` false means the
+// last pull could not reach eBay and `items` is what was last known — never
+// "no sales". `needsReconnect`: the token predates the sell.marketing scope.
+const NO_SALE_EVENTS = Object.freeze({
+  items: [], loaded: false, loading: false, checked: true, needsReconnect: false,
+  connected: false, syncedAt: "", limits: DEFAULT_LIMITS,
+});
+// How long a pull of the seller's sales is good for on this screen. The
+// server keeps its own, longer window (sale_events.REFRESH_MAX_AGE); this
+// only stops the Manage tab asking again every time it is opened.
+const SALE_EVENTS_FRESH_MS = 10 * 60 * 1000;
 
-// What the eBay callback's ?why= means, in words a seller can act on. The
-// backend picks the bucket from eBay's own error code; "eBay connection
-// failed. Please try again." was the whole message before, which is advice
-// that cannot work for two of these three.
 // How long a mirror rebuild stays good enough to skip.
 //
 // An import is one eBay GetItem per listing, against a default allowance of
@@ -163,6 +173,10 @@ export function markAutoSynced(userId, now = Date.now()) {
   writeLocal(autoSyncKey(userId), String(now));
 }
 
+// What the eBay callback's ?why= means, in words a seller can act on. The
+// backend picks the bucket from eBay's own error code; "eBay connection
+// failed. Please try again." was the whole message before, which is advice
+// that cannot work for two of these three.
 const EBAY_CONNECT_ERRORS = {
   expired: "That eBay connection link expired or was already used. Start it again from Settings.",
   config: "eBay rejected this app's credentials, so this isn't something you can fix by retrying — the app's eBay setup needs attention.",
@@ -254,11 +268,26 @@ export function AppProvider({ children }) {
     setMarket(id);
     try { writeLocal("listings-market", id); } catch (e) { /* a preference */ }
   }, []);
+  // The order of the Manage grid (lib/listingSort). Remembered per device
+  // like the layout, and for the same reason the filters below are NOT: a
+  // sort hides nothing, and the Sort button always names the one that is on,
+  // so a remembered order can never look like missing listings.
+  const [listingsSort, setSort] = useState(() => {
+    try { return normalizeSort(readLocal("listings-sort")); } catch (e) { return DEFAULT_SORT; }
+  });
+  const setListingsSort = useCallback((next) => {
+    const id = normalizeSort(next);
+    setSort(id);
+    try { writeLocal("listings-sort", id); } catch (e) { /* a preference */ }
+  }, []);
   // The ticks on the LIVE listings (the drafts have draftSelection below):
   // an id -> true map of what the seller picked for a bulk action on the
   // Manage tab (End & relist, or a crosspost). Memory-only, and held here so
   // opening a listing to fix it keeps the other ticks.
   const [liveSelection, setLiveSelection] = useState({});
+  // Which half of the Manage tab is showing: the listings grid or the Sales
+  // list. Memory-only, like the tab: Manage opens on the listings.
+  const [manageSection, setManageSection] = useState("listings");
   const listingsJumpRef = useRef(null);
   const openListings = useCallback((tab) => {
     const t = tab || "active";
@@ -330,8 +359,11 @@ export function AppProvider({ children }) {
   }, []);
 
   const saveListingView = useCallback(async (name) => {
+    // The order rides along only when it is not the default: a view saved
+    // in "Recommended" is a list, not an instruction to re-sort.
     const result = addSavedView(savedViews.items, {
       name, tab: listingsTab, filters: listingFilters,
+      sort: listingsSort === DEFAULT_SORT ? "" : listingsSort,
     });
     if (!result.ok) {
       toast(result.error, { kind: "warning" });
@@ -347,7 +379,7 @@ export function AppProvider({ children }) {
       : `Saved “${result.view.name}” — it's on every device you sign in from.`,
     { kind: "success" });
     return result;
-  }, [savedViews.items, listingsTab, listingFilters, writeSavedViews, toast]);
+  }, [savedViews.items, listingsTab, listingFilters, listingsSort, writeSavedViews, toast]);
 
   const deleteListingView = useCallback(async (id) => {
     const gone = savedViews.items.find((v) => v.id === id);
@@ -369,7 +401,51 @@ export function AppProvider({ children }) {
     if (!v) return;
     setListingsTab(v.tab);
     setFilters(v.filters);
+    if (v.sort) setListingsSort(v.sort);
+  }, [setListingsSort]);
+
+  // ---------- sale events (eBay markdown sales) ----------
+  // The list is the SERVER's: every sale route answers with the whole of it,
+  // and `adoptSaleEvents` takes that answer as it is — the same arrangement
+  // as the saved views, so what is on screen is what is recorded.
+  const [saleEvents, setSaleEvents] = useState(NO_SALE_EVENTS);
+  const saleEventsFreshUntil = useRef(0);
+  const saleEventsRequest = useRef(0);
+  const adoptSaleEvents = useCallback((res) => {
+    if (!res || !Array.isArray(res.events)) return;
+    setSaleEvents((cur) => ({
+      ...cur,
+      items: res.events,
+      loaded: true,
+      loading: false,
+      connected: res.connected !== false,
+      checked: res.checked ?? cur.checked,
+      needsReconnect: res.needs_reconnect ?? cur.needsReconnect,
+      syncedAt: res.synced_at ?? cur.syncedAt,
+      limits: { ...DEFAULT_LIMITS, ...(res.limits || {}) },
+    }));
   }, []);
+  /* Read the seller's sales — pulled from eBay first when the server's copy
+     is old (`force` always pulls). Only the newest request's answer lands,
+     the same guard the metrics use. */
+  const loadSaleEvents = useCallback(async ({ force = false, quiet = false } = {}) => {
+    if (!force && Date.now() < saleEventsFreshUntil.current) return;
+    const seq = ++saleEventsRequest.current;
+    saleEventsFreshUntil.current = Date.now() + SALE_EVENTS_FRESH_MS;
+    if (!quiet) setSaleEvents((cur) => ({ ...cur, loading: true }));
+    try {
+      const res = force
+        ? await postJson("/api/sale-events/refresh", { force: true })
+        : await api("/api/sale-events");
+      if (seq !== saleEventsRequest.current) return;
+      adoptSaleEvents(res);
+    } catch (e) {
+      if (seq !== saleEventsRequest.current) return;
+      // Keep what we had, marked as unchecked — and give the window back.
+      saleEventsFreshUntil.current = 0;
+      setSaleEvents((cur) => ({ ...cur, loading: false, checked: false }));
+    }
+  }, [adoptSaleEvents]);
 
   // ---------- server health ----------
   const [health, setHealth] = useState({
@@ -633,12 +709,19 @@ export function AppProvider({ children }) {
   }, [user, loadNotifications]);
   const markNotificationsRead = useCallback(async (ids) => {
     // Optimistic: the badge clears instantly, the server catches up.
-    setNotifications((n) => ({
-      ...n,
-      items: n.items.map((i) => (
-        !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
-      unread: ids ? Math.max(0, n.unread - ids.length) : 0,
-    }));
+    // Only what was unread comes off the badge: opening a notification that
+    // was already read used to take one off anyway, until the next poll.
+    setNotifications((n) => {
+      const newlyRead = ids
+        ? n.items.filter((i) => ids.includes(i.id) && !i.read).length
+        : n.unread;
+      return {
+        ...n,
+        items: n.items.map((i) => (
+          !ids || ids.includes(i.id) ? { ...i, read: true } : i)),
+        unread: Math.max(0, n.unread - newlyRead),
+      };
+    });
     try {
       await postJson("/api/notifications/read", ids ? { ids } : { all: true });
     } catch (e) { /* the next poll re-syncs */ }
@@ -731,9 +814,8 @@ export function AppProvider({ children }) {
 
   const openMessages = useCallback((id) => {
     setView("messages");
-    setActiveConversationId(id || null);
-    if (id) { loadThread(id); markConversationRead(id); }
-  }, [loadThread, markConversationRead]);
+    openConversation(id);
+  }, [openConversation]);
 
   const sendMessage = useCallback(async (id, text) => {
     const body = (text || "").trim();
@@ -899,7 +981,6 @@ export function AppProvider({ children }) {
         error: "",
         authed: !!res.authed,
         dbConfigured: !!(res.db && res.db.configured),
-        dbConnected: !!(res.db && res.db.connected),
         items: res.listings || [],
         // The server says when the page is not the whole store. Every count,
         // tab, dashboard group and bulk checkbox below is built on `items`,
@@ -1126,6 +1207,9 @@ export function AppProvider({ children }) {
       // past the cache: this press is the seller saying what they hold is out
       // of date, which is exactly what a cached answer would hand back.
       loadMetrics({ fresh: force });
+      // And the sales: one made in Seller Hub since the last pull is part of
+      // the store the seller just asked to see.
+      loadSaleEvents({ force, quiet: true });
       // A pass eBay cut short has NOT rebuilt the mirror, so it must not
       // latch "synced" for the next six hours — that would leave the rest of
       // the store missing until the window expired twice over.
@@ -1134,20 +1218,20 @@ export function AppProvider({ children }) {
       // may well land after this, and overwriting it here would reset an
       // honest "we couldn't cover it all" back to a clean tick.
       setStoreSync((s) => ({
-        ...s, syncing: false, lastSynced: Date.now(), error: null,
+        ...s, syncing: false, error: null,
         progress: null,
       }));
       return res;
     } catch (e) {
       setStoreSync({
-        syncing: false, lastSynced: null, error: e.message, progress: null,
+        syncing: false, error: e.message, progress: null,
       });
       // Failed for a reason worth retrying: let a later deliberate sync (or the
       // next app load) start a fresh one instead of latching "already synced".
       syncedOnce.current = false;
       return { error: e.message };
     }
-  }, [user, ebay.connected, loadListings, loadMetrics, watchImport]);
+  }, [user, ebay.connected, loadListings, loadMetrics, loadSaleEvents, watchImport]);
   // Offer the mirror an automatic rebuild as soon as we have a user and a
   // connected eBay account — syncStore decides whether one is actually DUE,
   // and bails out immediately in every other case (including no user, no
@@ -1390,6 +1474,41 @@ export function AppProvider({ children }) {
     }
   }, [toast, loadListings]);
 
+  // Split -- the inverse of the merge, for a draft written for two items
+  // (the uploader's bulk toggle left off). `body` is what the split dialog
+  // collected: the photos that belong to the other item, whether to rewrite
+  // this draft from the photos it keeps, and a line about each. The server
+  // moves the photos and starts the AI on both drafts (see its split route).
+  //
+  // THROWS on failure, which is what keeps the dialog up with its ticks in
+  // place. On success the grid is refreshed at once -- the new draft is in
+  // Drafts as a stub, this one has fewer photos -- and refreshed again when
+  // the AI lands, which is minutes away and must not be waited on here. The
+  // caller closes an editor it has open on this listing: a chain is
+  // rewriting it, and an autosave over the rewrite would undo it.
+  const splitListing = useCallback(async (id, body) => {
+    const res = await postJson(`/api/listings/${id}/split`, body);
+    loadListings({ quiet: true });
+    const jobs = Object.values(res.jobs || {}).filter(Boolean);
+    toast(`${res.photos} photo${res.photos === 1 ? "" : "s"} moved to a new draft — `
+      + (jobs.length > 1 ? "the AI is writing both listings now."
+        : "the AI is writing it now."), { kind: "success" });
+    Promise.allSettled(jobs.map((j) => pollJob(j))).then((outcomes) => {
+      loadListings({ quiet: true });
+      const failed = outcomes.filter((o) => o.status === "rejected");
+      if (failed.length) {
+        toast(`The AI couldn't finish ${failed.length === jobs.length ? "the" : "one of the"} `
+          + `split listings: ${failed[0].reason?.message || "unknown error"}. `
+          + "The photos are safe — use Start over on that draft to retry.",
+          { kind: "error", ttl: 12000 });
+      } else {
+        toast(jobs.length > 1 ? "Both listings are written — find them in Drafts."
+          : "The new listing is written — find it in Drafts.", { kind: "success" });
+      }
+    });
+    return res;
+  }, [toast, loadListings]);
+
   // Mass delete (drafts): one request for the whole selection.
   const bulkDeleteListings = useCallback(async (ids) => {
     try {
@@ -1407,9 +1526,8 @@ export function AppProvider({ children }) {
     }
   }, [toast]);
 
-  // Turn one of a saved listing's photos 90° clockwise, from its card. The
-  // same server call the editor's tile makes (see useListingForm.rotateImage),
-  // for the seller who can see from the grid that a photo is sideways and
+  // Turn one of a saved listing's photos 90° clockwise, from its card (the
+  // studio's Rotate makes the same server call), for the seller who can see from the grid that a photo is sideways and
   // used to have to open the full editor to turn it. Resolves with the
   // rotated file's own version -- the cache-buster no load of this photo has
   // used, which is what the card needs to show the new bytes -- and RETHROWS
@@ -1574,7 +1692,6 @@ export function AppProvider({ children }) {
     const ids = activeBulk?.done ? activeBulk.itemIds : null;
     if (!ids || !ids.length || !listingsState.loaded) return;
     const byId = new Map(listingsState.items.map((it) => [it.id, it]));
-    const isDraft = (it) => it.status === "draft" || it.status === "dry_run";
     if (ids.some((id) => byId.has(id) && isDraft(byId.get(id)))) return;
     if (!ids.some((id) => byId.has(id))) return;  // nothing landed: keep the way back
     clearBulk();
@@ -1674,6 +1791,9 @@ export function AppProvider({ children }) {
     // from the account that just signed out.
     setFilters(EMPTY_FILTERS);
     setSavedViews(NO_SAVED_VIEWS);
+    setSaleEvents(NO_SALE_EVENTS);
+    saleEventsFreshUntil.current = 0;
+    setManageSection("listings");
     listingsJumpRef.current = null;
 
     // ...and land where signing back in is the obvious next move. There is no
@@ -1792,11 +1912,13 @@ export function AppProvider({ children }) {
   }, [toast, loadTokens]);
 
   // Any AI call that 402s for tokens pops the buy dialog (see lib/api.js).
+  // Opening it is enough: TokensDialog re-reads the balance as it opens, and
+  // reading it here as well was the same /api/tokens request twice.
   useEffect(() => {
-    const onNeeded = () => { loadTokens(); setTokensOpen(true); };
+    const onNeeded = () => setTokensOpen(true);
     window.addEventListener("tokens:needed", onNeeded);
     return () => window.removeEventListener("tokens:needed", onNeeded);
-  }, [loadTokens]);
+  }, []);
 
   // Balance changes with login state; it also refreshes when the dialog opens.
   // loadTokens writes state only after its fetch resolves, so there is no
@@ -1878,16 +2000,24 @@ export function AppProvider({ children }) {
     };
   }, [metricsLive, loadMetrics]);
 
+  // Which card is in which sale — joined here once, so the grid, the bulk bar
+  // and the filters all read the same answer (lib/saleEvents.saleIndex).
+  const saleByListing = useMemo(
+    () => saleIndex(saleEvents.items, listingsState.items),
+    [saleEvents.items, listingsState.items]);
+
   const value = useMemo(() => ({
     dark, toggleDark,
     view, setView, listingsTab, setListingsTab, openListings, listingsJumpRef,
     settingsSection, openSettings, clearSettingsSection,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
+    listingsSort, setListingsSort, manageSection, setManageSection,
+    saleEvents, loadSaleEvents, adoptSaleEvents, saleByListing,
     listingFilters, setListingFilters, clearListingFilters,
-    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    savedViews, saveListingView, deleteListingView,
     applyListingView,
-    health, loadHealth,
+    health,
     user, setUser, authOpen, setAuthOpen, authMode, setAuthMode, openAuth, afterLogin, loadAuth, logout,
     clearSignedInState,
     isSuperadmin,
@@ -1897,9 +2027,9 @@ export function AppProvider({ children }) {
     etsyOptions, loadEtsyOptions,
     tokens, tokensOpen, setTokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
-    messages, loadMessages, threads, loadThread, sendMessage,
+    messages, loadMessages, threads, sendMessage,
     activeConversationId, openConversation, openMessages,
-    markConversationRead, messageSource, setMessageSource,
+    messageSource, setMessageSource,
     policiesData, setPoliciesData,
     storeCategoriesData, setStoreCategoriesData,
     draftSelection, setDraftSelection,
@@ -1908,19 +2038,21 @@ export function AppProvider({ children }) {
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, setSession, currentSession, startNew, openListing, deleteListing, bulkDeleteListings,
-    duplicateListing,
+    duplicateListing, splitListing,
     rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
   }), [
-    dark, toggleDark, view, listingsTab, openListings, health, loadHealth, user, authOpen, authMode, openAuth,
+    dark, toggleDark, view, listingsTab, openListings, health, user, authOpen, authMode, openAuth,
     settingsSection, openSettings, clearSettingsSection,
     isSuperadmin,
     listingsLayout, setListingsLayout,
     listingsMarket, setListingsMarket, liveSelection,
+    listingsSort, setListingsSort, manageSection, setManageSection,
+    saleEvents, loadSaleEvents, adoptSaleEvents, saleByListing,
     listingFilters, setListingFilters, clearListingFilters,
-    savedViews, loadSavedViews, saveListingView, deleteListingView,
+    savedViews, saveListingView, deleteListingView,
     applyListingView,
     loadAuth, logout, clearSignedInState, ebay, loadEbayStatus, canPublishLive, policiesData,
     bgRemoval, loadBgRemovalStatus,
@@ -1929,15 +2061,15 @@ export function AppProvider({ children }) {
     marketplaces, loadMarketplaces, connectedMarketplaces,
     tokens, tokensOpen, loadTokens,
     notifications, loadNotifications, markNotificationsRead,
-    messages, loadMessages, threads, loadThread, sendMessage,
+    messages, loadMessages, threads, sendMessage,
     activeConversationId, openConversation, openMessages,
-    markConversationRead, messageSource,
+    messageSource,
     listingsState, loadListings, loadMoreListings, patchListing,
     invalidateListings,
     metricsById, metricsStatus, loadMetrics,
     storeSync, syncStore,
     session, currentSession, startNew, openListing,
-    deleteListing, bulkDeleteListings, duplicateListing, rotateListingPhoto,
+    deleteListing, bulkDeleteListings, duplicateListing, splitListing, rotateListingPhoto,
     skippedDraftIds, toggleSkipDraft,
     activeBulk, startBulk, bulkSettled, clearBulk, runBulkUpload,
     bulkRetry, clearBulkRetry,
@@ -1951,5 +2083,3 @@ export function useApp() {
   if (!ctx) throw new Error("useApp must be used inside <AppProvider>");
   return ctx;
 }
-
-export { postJson };

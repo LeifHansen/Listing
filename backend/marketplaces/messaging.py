@@ -21,11 +21,25 @@ inbox picks it up; nothing here needs editing.
 from __future__ import annotations
 
 import re
-from typing import Optional, Protocol, runtime_checkable
 
-# Every method a provider needs before the inbox will talk to it. Checked with
-# getattr rather than isinstance so a provider that carries none of them (Etsy
-# and Depop today) is simply absent from the inbox instead of erroring.
+# Every method a provider needs before the inbox will talk to it -- the
+# optional messaging half of a marketplace provider:
+#
+#   messaging_status(uid) -> {available, reason, message}. `reason` is "" when
+#       the inbox can actually read this marketplace, else a stable token the
+#       UI maps to copy: "disabled" (operator flag off), "not_connected",
+#       "needs_reconnect" (scope never granted), "unsupported", "error".
+#   list_conversations(uid, limit=25) -> list[dict]
+#   get_conversation(uid, raw_id, limit=50) -> dict
+#   send_message(uid, raw_id, text) -> dict
+#   mark_read(uid, raw_id) -> bool
+#
+# The three readers return app-shaped dicts, never raw marketplace JSON, and
+# ids are RAW (unqualified) — this module adds the marketplace prefix.
+#
+# Checked with getattr rather than isinstance so a provider that carries none
+# of them (Etsy and Depop today) is simply absent from the inbox instead of
+# erroring.
 MESSAGING_METHODS = (
     "messaging_status",
     "list_conversations",
@@ -33,29 +47,6 @@ MESSAGING_METHODS = (
     "send_message",
     "mark_read",
 )
-
-
-@runtime_checkable
-class MessagingProvider(Protocol):
-    """The optional messaging half of a marketplace provider.
-
-    `messaging_status(uid)` returns {available, reason, message} — reason is
-    "" when the inbox can actually read this marketplace, else a stable token
-    the UI maps to copy: "disabled" (operator flag off), "not_connected",
-    "needs_reconnect" (scope never granted), "unsupported", "error".
-
-    The three readers return app-shaped dicts, never raw marketplace JSON, and
-    ids are RAW (unqualified) — this module adds the marketplace prefix.
-    """
-
-    key: str
-    label: str
-
-    def messaging_status(self, uid: Optional[str]) -> dict: ...
-    def list_conversations(self, uid: str, limit: int = 25) -> list[dict]: ...
-    def get_conversation(self, uid: str, raw_id: str, limit: int = 50) -> dict: ...
-    def send_message(self, uid: str, raw_id: str, text: str) -> dict: ...
-    def mark_read(self, uid: str, raw_id: str) -> bool: ...
 
 
 def supports_messaging(provider) -> bool:

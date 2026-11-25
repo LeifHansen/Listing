@@ -40,7 +40,11 @@ function workingStorage(initial = {}) {
 }
 
 beforeEach(() => forgetAiConsentForTests());
-afterEach(() => { vi.unstubAllGlobals(); forgetAiConsentForTests(); });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  forgetAiConsentForTests();
+});
 
 describe("what counts as consent to send photos to the AI", () => {
   it("does not read an unreadable browser as a yes", () => {
@@ -92,15 +96,15 @@ describe("asking for consent when nobody can answer", () => {
     // the upload hung forever, while its comment claimed it was handling
     // exactly this case. Either way the answer is the same: we did not ask,
     // so we do not have a yes.
-    vi.stubGlobal("window", { dispatchEvent: () => true });
+    vi.spyOn(window, "dispatchEvent").mockImplementation(() => true);
     await expect(ensureAiConsent()).rejects.toThrow();
     expect(hasAiConsent()).toBe(false);
   });
 
   it("refuses when raising the ask throws", async () => {
     noStorage();
-    vi.stubGlobal("window", {
-      dispatchEvent: () => { throw new Error("no CustomEvent here"); },
+    vi.spyOn(window, "dispatchEvent").mockImplementation(() => {
+      throw new Error("no CustomEvent here");
     });
     await expect(ensureAiConsent()).rejects.toThrow();
     expect(hasAiConsent()).toBe(false);
@@ -108,12 +112,10 @@ describe("asking for consent when nobody can answer", () => {
 
   it("waits for the person when the dialog is listening", async () => {
     noStorage();
-    vi.stubGlobal("window", {
-      dispatchEvent: (e) => {
-        e.detail.shown = true;                 // what the dialog marks
-        setTimeout(() => e.detail.accept(), 0);
-        return true;
-      },
+    vi.spyOn(window, "dispatchEvent").mockImplementation((e) => {
+      e.detail.shown = true;                 // what the dialog marks
+      setTimeout(() => e.detail.accept(), 0);
+      return true;
     });
     await expect(ensureAiConsent()).resolves.toBeUndefined();
     expect(hasAiConsent()).toBe(true);
@@ -121,12 +123,10 @@ describe("asking for consent when nobody can answer", () => {
 
   it("passes a decline back to the caller", async () => {
     noStorage();
-    vi.stubGlobal("window", {
-      dispatchEvent: (e) => {
-        e.detail.shown = true;
-        setTimeout(() => e.detail.decline(), 0);
-        return true;
-      },
+    vi.spyOn(window, "dispatchEvent").mockImplementation((e) => {
+      e.detail.shown = true;
+      setTimeout(() => e.detail.decline(), 0);
+      return true;
     });
     await expect(ensureAiConsent()).rejects.toThrow(/without your OK/i);
     expect(hasAiConsent()).toBe(false);
@@ -135,7 +135,7 @@ describe("asking for consent when nobody can answer", () => {
   it("does not ask again once consent is held", async () => {
     workingStorage({ "thryft-ai-consent": "yes" });
     let asked = 0;
-    vi.stubGlobal("window", { dispatchEvent: () => { asked += 1; return true; } });
+    vi.spyOn(window, "dispatchEvent").mockImplementation(() => { asked += 1; return true; });
     await expect(ensureAiConsent()).resolves.toBeUndefined();
     expect(asked).toBe(0);
   });

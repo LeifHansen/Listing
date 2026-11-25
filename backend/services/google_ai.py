@@ -36,7 +36,6 @@ import httpx
 from .. import config
 from ..config import log
 from ..models import IdentifyResult, Listing
-from . import barcodes
 
 API_ROOT = os.getenv(
     "GOOGLE_AI_API_ROOT",
@@ -423,7 +422,8 @@ def _generate(tag: str, parts: list[dict], system: str = "",
 
 def identify(image_paths: list[Path], image_names: list[str],
              strategy: str = "", notes: str = "",
-             item_notes: str = "", subject=None) -> IdentifyResult:
+             item_notes: str = "", subject=None,
+             lookup: Optional[dict] = None) -> IdentifyResult:
     """Identify the item(s) in the photos and draft a full listing.
 
     Signature, prompt and result are claude_ai.identify's — the two backends
@@ -437,12 +437,8 @@ def identify(image_paths: list[Path], image_names: list[str],
     from . import claude_ai
 
     parts: list[dict] = [_image_part(p) for p in image_paths[:_MAX_IDENTIFY_IMAGES]]
-    parts.append({"text": (
-        "These are the product photos for one listing. Draft it."
-        + claude_ai._PRICING_STRATEGY_HINTS.get(strategy, "")
-        + claude_ai.identify_notes_block(notes)
-        + claude_ai.item_notes_block(item_notes)
-    )})
+    parts.append({"text": claude_ai._identify_ask(strategy, notes, item_notes,
+                                                  lookup)})
 
     payload = _generate("identify", parts,
                         system=claude_ai._identify_system(subject),
@@ -451,23 +447,8 @@ def identify(image_paths: list[Path], image_names: list[str],
         raise GoogleAIError(
             "the AI response was too long and got cut off; try again or use "
             "fewer photos", 502)
-    data = claude_ai._extract_json(_answer_text(payload))
-
-    listing = claude_ai._to_listing(data, image_names)
-    # eBay charges extra for subtitles — never auto-fill one.
-    listing.subtitle = ""
-    # Constrain confidence to the known set: it is rendered into the UI, so a
-    # free-form (prompt-injected) value must never reach the DOM.
-    conf = str(data.get("confidence", "medium")).lower().strip()
-    if conf not in ("low", "medium", "high"):
-        conf = "medium"
-    return IdentifyResult(
-        listing=listing,
-        confidence=conf,
-        raw_observations=str(data.get("raw_observations", "")),
-        tags=[t for t in (data.get("tags") or []) if isinstance(t, dict)][:6],
-        identifiers=barcodes.from_scan(data.get("identifiers")),
-    )
+    return claude_ai._identify_result(
+        claude_ai._extract_json(_answer_text(payload)), image_names)
 
 
 # --- the grounded pricing lookup -------------------------------------------
@@ -519,24 +500,11 @@ def research_item(image_paths: list[Path], listing: Listing,
     from . import claude_ai
 
     try:
-        specifics = "; ".join(
-            f"{s.name}: {s.value}" for s in (listing.item_specifics or [])[:12]
-            if (s.value or "").strip())
-        context = (
-            "A first-pass AI drafted this listing FROM THE PHOTOS ALONE, with "
-            "no lookup of any kind. Check it.\n\n"
-            f"Drafted title: {listing.title}\n"
-            f"Drafted brand: {listing.brand or '(none)'}\n"
-            f"Drafted price: "
-            f"{'(none)' if listing.price is None else f'${listing.price:.2f}'}\n"
-            f"Category: {listing.category_suggestion or '(unknown)'}\n"
-            f"Specifics: {specifics or '(none)'}\n"
-            f"What the first pass saw: {(observations or '')[:600]}\n\n"
-            "Establish what this actually is and what it is actually worth. "
-            "Search Google before you answer — for the maker and the work, "
-            "for the identifying marks, and above all for what comparable "
-            "examples have SOLD for recently."
-            + claude_ai._RESEARCH_SCHEMA)
+        context = claude_ai._research_context(
+            listing, observations,
+            ask=(" Search Google before you answer — for the maker and the "
+                 "work, for the identifying marks, and above all for what "
+                 "comparable examples have SOLD for recently."))
         parts = [_image_part(p) for p in image_paths[:_MAX_RESEARCH_IMAGES]]
         parts.append({"text": context})
         payload = _generate("research", parts, max_tokens=_RESEARCH_MAX_TOKENS,

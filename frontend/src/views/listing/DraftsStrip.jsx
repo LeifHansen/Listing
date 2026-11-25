@@ -11,6 +11,7 @@ import { SectionHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ListingCard } from "@/components/ListingCard";
 import { MergeListingsDialog } from "@/components/MergeListingsDialog";
+import { SplitListingDialog } from "@/components/SplitListingDialog";
 import { ViewToggle } from "@/components/ui/ViewToggle";
 import { DraftCategoryEdit } from "./CategoryQuickPick";
 import { DraftFormatEdit } from "./FormatQuickPick";
@@ -20,7 +21,7 @@ import {
   MarketTargetChips, publishListing, usePublishTargets, publishTally,
   UNCONFIRMED_PUBLISH, blocksEveryListing,
 } from "./publishShared";
-import { blockerLabels, blockersFor, marketNames } from "./blockers";
+import { blockerLabels, blockersFor, marketLabel, marketNames } from "./blockers";
 import {
   liveLabel, PublishedBurst, publishedCardMotion, usePublishCelebration,
   withCelebrating,
@@ -87,7 +88,7 @@ function DraftShipping({ item, className }) {
 function resultSummary(res) {
   if (!res.multi) return null;
   return Object.entries(res.results || {})
-    .map(([key, r]) => `${key === "ebay" ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
+    .map(([key, r]) => `${marketLabel(key)} ${r.published ? "✓" : r.ok ? "—" : "✗"}`)
     .join(" · ");
 }
 
@@ -107,7 +108,7 @@ function resultSummary(res) {
 export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   const {
     listingsState, openListing, loadListings, patchListing, deleteListing,
-    bulkDeleteListings, rotateListingPhoto, duplicateListing,
+    bulkDeleteListings, rotateListingPhoto, duplicateListing, splitListing,
     metricsById, skippedDraftIds, toggleSkipDraft,
     listingsLayout, setListingsLayout,
     draftSelection, setDraftSelection,
@@ -155,6 +156,9 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
   // fresh answers (what merges in, which draft is master, whose entries win)
   // rather than the last merge's.
   const [merge, setMerge] = useState({ open: false, drafts: [], candidates: [], key: 0 });
+  // The merge's inverse (see SplitListingDialog): the draft being taken
+  // apart, and a key that remounts the dialog with fresh ticks per open.
+  const [split, setSplit] = useState({ open: false, item: null, key: 0 });
 
   const q = search.trim().toLowerCase();
   // Memoized because this is three passes and a sort over the seller's whole
@@ -210,9 +214,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
 
   // Where a publish lands, in words — for the confirm dialog.
   const targetNames = effectiveTargets && effectiveTargets.length > 1
-    ? effectiveTargets
-        .map((k) => k === "ebay" ? "eBay" : k.charAt(0).toUpperCase() + k.slice(1))
-        .join(" and ")
+    ? effectiveTargets.map(marketLabel).join(" and ")
     : "your eBay store";
 
   // Publish one saved draft. Returns whether it went live; the caller owns the
@@ -469,6 +471,15 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
       { kind: "success" });
   };
 
+  // Split a draft that was written for two items. The store moves the
+  // photos and starts the AI on both drafts, and refreshes this grid as each
+  // lands; the dialog stays up (with its ticks) if the server says no.
+  const askSplit = (item) => setSplit((s) => ({ open: true, item, key: s.key + 1 }));
+  const splitDraft = async (body) => {
+    await splitListing(split.item.id, body);
+    setSplit((s) => ({ ...s, open: false }));
+  };
+
   const askDelete = async (item) => {
     const name = item.listing?.title || item.title || "this listing";
     if (await confirm({
@@ -590,6 +601,17 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
           </div>
         </div>
       )}
+      {split.item && (
+        <SplitListingDialog
+          key={split.key}
+          open={split.open}
+          onClose={() => setSplit((s) => ({ ...s, open: false }))}
+          sessionId={split.item.id}
+          images={split.item.listing?.images || []}
+          title={split.item.listing?.title || split.item.title}
+          onSplit={splitDraft}
+        />
+      )}
       {merge.drafts.length > 0 && (
         <MergeListingsDialog
           key={merge.key}
@@ -653,6 +675,7 @@ export function DraftsStrip({ search = "", only = null, publishAll = false }) {
                    seller could see but not fix without opening the editor. */
                 onRotate={rotateListingPhoto}
                 onDuplicate={duplicateListing}
+                onSplit={askSplit}
                 onSkip={() => toggleSkipDraft(item.id)}
                 skipped={skippedDraftIds.has(item.id)}
                 metrics={metricsById[item.id]}

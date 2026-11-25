@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Coins, Sparkles, Check, History } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { api } from "@/lib/api";
-import { useApp, postJson } from "@/store";
-import { isNative, openExternal } from "@/lib/platform";
+import { api, postJson } from "@/lib/api";
+import { useApp } from "@/store";
+import { isNative, openExternal, tokenPurchasesAllowed } from "@/lib/platform";
 import { Dialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toaster";
@@ -114,7 +114,7 @@ export function TokensDialog() {
         // complete inside the app — but a link out to the system browser is
         // allowed on the US storefront. Never fall back to in-webview
         // navigation here; a visible error beats a rejected binary.
-        const opened = await openExternal(res.url);
+        const opened = await openExternal(res.url, { system: true });
         if (opened) {
           toast("Finishing your purchase in the browser — your tokens appear "
             + "here automatically once it completes.", { ttl: 6000 });
@@ -199,8 +199,14 @@ export function TokensDialog() {
           </p>
         </div>
 
-        {/* Packs */}
-        {tokens.stripe ? (
+        {/* Packs. Not on an Android build that may not sell them: see
+            tokenPurchasesAllowed — and nothing there says where else to buy,
+            which Google Play counts as the same link out. */}
+        {!tokenPurchasesAllowed() ? (
+          <p className="text-[13px] text-ink-secondary rounded-card border border-line p-3">
+            Tokens can't be bought in this app — your free monthly tokens still apply.
+          </p>
+        ) : tokens.stripe ? (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {(tokens.packs || []).map((p) => (
               <div

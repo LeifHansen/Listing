@@ -3,9 +3,11 @@ import { motion } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ArrowRight, PlusCircle, LayoutDashboard,
   ExternalLink, Trash2, ArrowLeft, Camera, Loader2, CloudOff, ListChecks, Save,
-  Rocket, RefreshCw, Copy,
+  Rocket, RefreshCw, Copy, Split,
 } from "lucide-react";
+import { useNativeBack } from "@/lib/nativeShell";
 import { cn } from "@/lib/utils";
+import { isDraft } from "@/lib/listingsView";
 import { useApp } from "@/store";
 import { useToast } from "@/components/ui/Toaster";
 import { Button } from "@/components/ui/Button";
@@ -14,6 +16,7 @@ import { ConfidenceBadge, TagPill } from "@/components/ui/badges";
 import { LoadingOverlay } from "@/components/ui/AIStatus";
 import { BrandMark } from "@/components/BrandMark";
 import { BulkBanner } from "@/components/BulkBanner";
+import { SplitListingDialog } from "@/components/SplitListingDialog";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { useListingForm } from "./listing/useListingForm";
 import { UploadPhase } from "./listing/UploadPhase";
@@ -89,7 +92,7 @@ function PublishedScreen({ w }) {
   // Drafts set aside with Skip (on the draft's own card) never come back as
   // "next" — not even after publishing more drafts.
   const draftsLeft = (listingsState.items || [])
-    .filter((it) => (it.status === "draft" || it.status === "dry_run")
+    .filter((it) => isDraft(it)
       && it.id !== w.sessionId && !skippedDraftIds.has(it.id))
     .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
   const next = draftsLeft[0];
@@ -199,14 +202,18 @@ function PublishedScreen({ w }) {
 export function Workflow() {
   const {
     session, startNew, setSession, openListings, deleteListing, duplicateListing,
-    activeBulk,
+    splitListing, activeBulk,
   } = useApp();
   const { confirm } = useToast();
   const w = useListingForm();
   // Ctrl/⌘+Enter publishes; see useEditorShortcuts.
   useEditorShortcuts(w);
-  // { name } — the photo open in the studio (clean up, remove background, crop).
+  // The name of the photo open in the studio (clean up, remove background,
+  // crop), or null.
   const [editing, setEditing] = useState(null);
+  // The split dialog (see SplitListingDialog); `key` remounts it with fresh
+  // ticks on every open rather than the last split's.
+  const [splitting, setSplitting] = useState({ open: false, key: 0 });
 
   // Leaving a DRAFT asks nothing. Autosave has been sending every edit as it
   // was made (useListingForm), and Done sends whatever the timer has not
@@ -264,9 +271,31 @@ export function Workflow() {
   // since the editor opens where you already are (see store.openListing).
   // A draft is saved on the way out (see `leave`); a live listing asks.
   const back = () => leave(() => setSession(null));
+  // Android's back button is this same Back, ahead of the app's own "go to
+  // the dashboard" (lib/nativeShell): the draft saves, a live listing asks.
+  useNativeBack(() => {
+    back();
+    return true;
+  }, 10);
 
   // The header's ⋯ menu: the actions a seller takes once a month, which
   // used to be five buttons across the header and four more in the bar.
+  // Split: a draft written for two items becomes two. Drafts with photos
+  // enough to divide only -- a live listing's photos are the real listing's.
+  const canSplit = !w.isLive && session.status !== "ended"
+    && (w.form.images || []).length >= 2;
+  const split = async (body) => {
+    // What is typed here is saved first: the split copies the server's copy.
+    if (!mustConfirmLeaving) await w.flushSave();
+    await splitListing(session.sessionId, body);
+    // The AI is rewriting this draft (and writing the other). An editor left
+    // open on it would autosave the old text back over the rewrite, so it
+    // closes onto Drafts, where both drafts are.
+    setSplitting({ open: false, key: splitting.key });
+    setSession(null);
+    openListings("drafts");
+  };
+
   const menuItems = [
     // The bar's primary action, listed here for its shortcut.
     { label: w.isLive ? "Update Live Listing" : "Publish Live",
@@ -281,6 +310,11 @@ export function Workflow() {
         if (!mustConfirmLeaving) await w.flushSave();
         duplicateListing(session.sessionId);
       } },
+    canSplit && {
+      label: "Split into two listings", icon: <Split aria-hidden />,
+      title: "Two items in one draft? Move the other item's photos to a new draft the AI writes",
+      onSelect: () => setSplitting((s) => ({ open: true, key: s.key + 1 })),
+    },
     { label: "Check with eBay", icon: <ListChecks aria-hidden />,
       title: "Runs eBay's own checks on this listing without publishing it",
       onSelect: w.runPreflight },
@@ -385,6 +419,18 @@ export function Workflow() {
           so feedback is visible no matter where the page is scrolled. */}
       {w.aiBusy && <LoadingOverlay messages={w.aiBusy} />}
 
+      {splitting.key > 0 && (
+        <SplitListingDialog
+          key={splitting.key}
+          open={splitting.open}
+          onClose={() => setSplitting((s) => ({ ...s, open: false }))}
+          sessionId={session.sessionId}
+          images={w.form.images || []}
+          title={w.form.title}
+          onSplit={split}
+        />
+      )}
+
       {/* Above everything: an unanswered conflict is an edit that will never
           reach eBay, so it is not something to scroll past. */}
       {(session?.conflicts || []).length > 0 && (
@@ -422,7 +468,7 @@ export function Workflow() {
                 it back means re-shooting or re-sending up to 150MB. */}
             <PhotosCard
               w={w}
-              onEdit={(name) => setEditing({ name })}
+              onEdit={setEditing}
               onDelete={(name) => w.deleteImage(name, confirm)}
               onRemoveVideo={(name) => w.removeVideo(name, confirm)}
             />
@@ -460,10 +506,9 @@ export function Workflow() {
 
       <ImageEditor
         sessionId={w.sessionId}
-        name={editing?.name}
-        initialAction={editing?.action}
+        name={editing}
         onClose={() => setEditing(null)}
-        onSaved={() => editing && w.bumpImageVersion(editing.name)}
+        onSaved={() => w.bumpImageVersion(editing)}
       />
     </motion.div>
   );
@@ -494,8 +539,7 @@ function ListHome({ search }) {
   // Whether the strip below will draw anything. DraftsStrip renders null with
   // nothing to show, which is right — the uploader above IS the empty state —
   // but a page that just stops has no floor, so an empty one gets a line.
-  const hasDrafts = (listingsState.items || []).some(
-    (i) => i.status === "draft" || i.status === "dry_run");
+  const hasDrafts = (listingsState.items || []).some(isDraft);
 
   return (
     <motion.div variants={stagger} initial="hidden" animate="show"

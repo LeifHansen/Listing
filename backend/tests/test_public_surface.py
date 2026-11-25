@@ -107,6 +107,36 @@ def test_the_diagnostics_still_exist_behind_admin_auth(api, monkeypatch):
     assert "db" in body
 
 
+def test_why_backgrounds_stopped_coming_off_is_for_the_operator_only(
+        api, monkeypatch):
+    """A seller reads "unavailable" whether the key was refused or the
+    account ran out of images; the operator reads which, with Photoroom's own
+    words. Those words are about the app's account, so they stay behind the
+    admin token -- /api/health and /api/ready carry none of it."""
+    from backend import config
+    from backend.services import cutout_api
+
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "s3cret")
+    monkeypatch.setattr(cutout_api, "_last_success_at", None)
+    monkeypatch.setattr(cutout_api, "_failures_since_success", 0)
+    monkeypatch.setattr(cutout_api, "_last_failure", None)
+    cutout_api._failed("out_of_credits", "The Photoroom account has no API "
+                       "plan, or has used all of its images.", 402,
+                       "Account quota exhausted")
+
+    body = api.get("/api/admin/diagnostics",
+                   headers={"x-admin-token": "s3cret"}).json()
+    assert body["photoroom"]["failing"] is True
+    assert body["photoroom"]["last_failure"]["kind"] == "out_of_credits"
+    assert body["photoroom"]["last_failure"]["status"] == 402
+    assert body["photoroom"]["last_failure"]["detail"] == "Account quota exhausted"
+
+    for public in ("/api/health", "/api/ready"):
+        text = api.get(public).text
+        assert "quota exhausted" not in text.lower(), public
+        assert "out_of_credits" not in text, public
+
+
 def test_diagnostics_report_the_etsy_tier_without_the_roster(api, monkeypatch):
     """Which tier Etsy has the app on is the operator's answer to "why can't
     this seller connect", and the seat ceiling is what says whether adding one

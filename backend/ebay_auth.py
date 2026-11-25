@@ -213,6 +213,43 @@ def _account_get(path: str, access_token: str) -> dict:
     return resp.json()
 
 
+def _locations_response(access_token: str) -> httpx.Response:
+    """GET the seller's inventory locations. Each caller reads the answer
+    its own way, so this hands back the response, not a parse of it."""
+    return httpx.get(
+        f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
+        headers={"Authorization": f"Bearer {access_token}",
+                 "Accept": "application/json"},
+        timeout=30,
+    )
+
+
+def _once(memo: Optional[dict], key: str, call):
+    """`call()` -- or, when the caller passes the same `memo` dict to several
+    lookups in one operation, what it gave the first time, exception
+    included.
+
+    The policy re-check asks for the same three policy lists and the same
+    location list twice over: once to pick defaults
+    (fetch_policies_and_location) and once to learn which ids exist
+    (policy_ids_on_account, location_keys_on_account). Each reader still
+    parses the answer exactly as it always did; only the request is shared,
+    so the two halves of one pass also can no longer see two different
+    answers from eBay.
+    """
+    if memo is None:
+        return call()
+    if key not in memo:
+        try:
+            memo[key] = (True, call())
+        except Exception as exc:  # noqa: BLE001 - replayed to every reader
+            memo[key] = (False, exc)
+    ok, value = memo[key]
+    if ok:
+        return value
+    raise value
+
+
 def fetch_payments_program(access_token: str) -> dict:
     """Payments-program opt-in status for the connected seller.
 
@@ -406,7 +443,8 @@ def list_business_policies(access_token: str) -> dict:
     return out
 
 
-def policy_ids_on_account(access_token: str) -> dict[str, set[str]]:
+def policy_ids_on_account(access_token: str,
+                          memo: Optional[dict] = None) -> dict[str, set[str]]:
     """{kind: {policy ids that actually exist on the connected account}}.
 
     A saved policy id is only usable on the account that owns it: eBay rejects
@@ -420,7 +458,7 @@ def policy_ids_on_account(access_token: str) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     for kind, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
-            data = _account_get(path, access_token)
+            data = _once(memo, path, lambda p=path: _account_get(p, access_token))
         except Exception:  # noqa: BLE001 - unknown, not empty
             continue
         out[kind] = {p.get(id_field, "") for p in data.get(list_field, [])
@@ -428,16 +466,13 @@ def policy_ids_on_account(access_token: str) -> dict[str, set[str]]:
     return out
 
 
-def location_keys_on_account(access_token: str) -> Optional[set[str]]:
+def location_keys_on_account(access_token: str,
+                             memo: Optional[dict] = None) -> Optional[set[str]]:
     """Every merchantLocationKey on the connected account, or None if the
     lookup failed (unknown — callers must not treat that as "none")."""
     try:
-        resp = httpx.get(
-            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
-            headers={"Authorization": f"Bearer {access_token}",
-                     "Accept": "application/json"},
-            timeout=30,
-        )
+        resp = _once(memo, "location",
+                     lambda: _locations_response(access_token))
         if resp.status_code != 200:
             return None
         return {loc.get("merchantLocationKey", "")
@@ -548,11 +583,13 @@ def _policy_summary(kind: str, p: dict) -> str:
     return ""
 
 
-def fetch_policies_and_location(access_token: str) -> dict:
+def fetch_policies_and_location(access_token: str,
+                                memo: Optional[dict] = None) -> dict:
     """Best-effort auto-discovery of the seller's default policies + location.
 
     Returns whatever it can find; missing pieces stay empty (the seller may
-    need to create business policies in Seller Hub first).
+    need to create business policies in Seller Hub first). `memo` shares the
+    reads with the lookups that follow it in the same pass -- see _once.
     """
     out = {
         "fulfillment_policy_id": "",
@@ -562,7 +599,7 @@ def fetch_policies_and_location(access_token: str) -> dict:
     }
     for kind, (path, list_field, id_field) in _POLICY_SPECS.items():
         try:
-            data = _account_get(path, access_token)
+            data = _once(memo, path, lambda p=path: _account_get(p, access_token))
             items = data.get(list_field, [])
             if items:
                 # Fulfillment: prefer a USPS Ground Advantage policy (cheapest
@@ -574,11 +611,8 @@ def fetch_policies_and_location(access_token: str) -> dict:
         except Exception:  # noqa: BLE001 - best effort
             pass
     try:
-        resp = httpx.get(
-            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-            timeout=30,
-        )
+        resp = _once(memo, "location",
+                     lambda: _locations_response(access_token))
         resp.raise_for_status()
         locs = resp.json().get("locations", [])
         if locs:
@@ -598,12 +632,7 @@ def ship_from_postal(access_token: str, merchant_location_key: str = "") -> str:
     eBay directly) has only a merchantLocationKey, so fetch the address behind
     it. Returns "" when it can't be determined; never raises."""
     try:
-        resp = httpx.get(
-            f"{config.EBAY_API_BASE}/sell/inventory/v1/location",
-            headers={"Authorization": f"Bearer {access_token}",
-                     "Accept": "application/json"},
-            timeout=30,
-        )
+        resp = _locations_response(access_token)
         if resp.status_code != 200:
             return ""
         locs = resp.json().get("locations", []) or []

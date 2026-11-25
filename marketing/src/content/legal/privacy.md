@@ -1,11 +1,10 @@
 ---
 title: Privacy Policy
 description: What information Thryft Shop handles, how it is used, and how to delete it.
-updated: 2026-08-12
+updated: 2026-11-24
 ---
 
-Thryft Shop helps sellers create marketplace listings (eBay today) from
-photos. This page explains what information the service handles and how it is
+Thryft Shop helps sellers create eBay listings from photos. This page explains what information the service handles and how it is
 used.
 
 ## Information we collect
@@ -21,33 +20,41 @@ used.
 - **Payments:** if you buy AI tokens, the payment is handled by Stripe. Your
   card details go to Stripe directly and are never sent to or stored by us; we
   keep only the record of the purchase.
-- **Marketplace connections:** if you connect a marketplace account (eBay
-  today), we store the OAuth refresh token that marketplace issues and — for
-  eBay — the identifiers of your business policies and merchant location. We
-  never see your marketplace passwords.
+- **eBay connection:** if you connect your eBay account, we store the OAuth
+  refresh token eBay issues and the identifiers of your business policies and
+  merchant location. We never see your eBay password.
 
 ## How we use it
 
-- Uploaded photos are sent to Anthropic's Claude API to identify the item and
-  draft the listing text.
+- Uploaded photos are sent to an AI service to identify the item and draft the
+  listing text: Anthropic's Claude, and Google's Gemini when we use it to
+  identify the item and research its price. Before your first upload the app
+  asks for your permission and names the service it will use. Nothing is sent
+  until you agree.
+- When an item looks like a print or a painting, we may run a reverse image
+  search to find the artist: a temporary link to the photo goes to SerpApi,
+  which asks Google Lens which web pages show the same image.
 - If you turn on background removal in Settings, the photos you choose to have
   their background removed are sent to Photoroom, which cuts the item out and
   sends it back. Nothing about your account is shared with Photoroom, and no
   photo is sent there until you turn the feature on.
-- Listing details and photos are sent to the marketplaces you choose (eBay
-  today) when you ask us to suggest categories or publish a listing there.
+- Listing details and photos are sent to eBay when you ask us to suggest
+  categories or publish a listing there.
 - Account and listing data are stored in our database (hosted on Neon) so your
   listing history is available when you log in.
 - Uploaded photos are stored on our server and in Cloudflare R2 object storage,
   which is also where eBay fetches them from when a listing is published.
+- If you read or answer eBay buyer messages in the app, they pass through our
+  server on their way between you and eBay. We don't keep them; eBay does.
+- When the app hits an error, it sends us a report — the error, the screen it
+  happened on, and your account id — so we can fix it.
 
 ## What we don't do
 
 - We do not sell your data or share it with anyone beyond the service providers
-  named above (Anthropic, Photoroom if you turn on background removal, the
-  marketplaces you connect — eBay today —
-  our payment processor Stripe, and our hosting/storage providers Fly.io, Neon,
-  and Cloudflare).
+  named above (Anthropic, Google, SerpApi, Photoroom if you turn on background
+  removal, eBay if you connect your account, our payment processor
+  Stripe, and our hosting/storage providers Fly.io, Neon, and Cloudflare).
 - We do not use your photos or listings for advertising.
 
 ## eBay account deletion
@@ -65,22 +72,23 @@ the personal details it was about.
 
 ## Deleting your account
 
-You can delete your account yourself, from inside the app, at any time:
-**Settings → Delete account**. Your account, your listing drafts and your
-stored marketplace tokens are removed straight away. Your uploaded photos are
+You can delete your account yourself at any time, in the mobile app or on the
+web at app.thryftshop.com (sign in, then
+**Settings → Delete account**). Your account, your listing drafts and your
+stored eBay tokens are removed straight away. Your uploaded photos are
 then deleted from our image storage; that part runs just after, so it can take
 a short while to finish on a large account. You don't need to email anyone and
 there's no waiting period.
 
-Deleting your account removes the marketplace tokens we hold, so this app can
-no longer reach your marketplace accounts. It does not by itself cancel the
-authorization on the marketplace's side — to do that, revoke this app's access
-in your eBay account settings.
+Deleting your account removes the eBay tokens we hold, so this app can no
+longer reach your eBay account. It does not by itself cancel the authorization
+on eBay's side — to do that, revoke this app's access in your eBay account
+settings.
 
 One thing we can't delete: listings you already published stay live on eBay
-under your own seller account. End those on the marketplace
-itself if you want them taken down.
+under your own seller account. End those on eBay itself if you want them
+taken down.
 
-You can also disconnect any marketplace on its own — either in Settings, or by
-revoking access in that marketplace's own account settings — without deleting
-your Thryft Shop account.
+You can also disconnect eBay on its own — either in Settings, or by revoking
+access in your eBay account settings — without deleting your Thryft Shop
+account.

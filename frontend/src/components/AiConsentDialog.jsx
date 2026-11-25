@@ -69,8 +69,8 @@ export function AiConsentDialog() {
             </span>
           ))}{" "}
           for analysis. They're used only to create your listing —
-          never for ads, and never shared beyond the marketplaces you choose
-          to publish to. Details are in our{" "}
+          never for ads, and never shared beyond eBay when you choose to
+          publish there. Details are in our{" "}
           <SiteLink path="/privacy-policy"
             className="text-blue underline">privacy policy</SiteLink>.
         </p>

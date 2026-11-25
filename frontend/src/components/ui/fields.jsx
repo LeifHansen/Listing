@@ -42,13 +42,12 @@ const controlClasses = cn(
 // for a setting whose consequence the seller must read before deciding (a
 // fee, a promise eBay scores them on). Settings uses it because the app
 // ships inside a phone shell where a hover ⓘ is never seen.
-export function Field({ label, hint, help, note, error, required, children, className }) {
+export function Field({ label, hint, help, note, error, children, className }) {
   return (
     <label className={cn("flex flex-col gap-1.5 min-w-0", className)}>
       {label && (
         <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
           {label}
-          {required && <span className="text-error" aria-hidden>*</span>}
           {hint && <span className="font-normal text-ink-faint">{hint}</span>}
           {help && <InfoTip text={help} />}
         </span>

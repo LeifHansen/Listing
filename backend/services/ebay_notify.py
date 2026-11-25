@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from .. import config
 from ..config import log
+from . import taxonomy
 
 # kid -> (public key object, fetched_at). eBay's keys are stable for long
 # stretches; the TTL is here so a rotation cannot pin a stale key forever.
@@ -48,19 +49,21 @@ class KeyUnavailable(RuntimeError):
 
 
 def _app_token() -> str:
-    """A client-credentials token for the Notification API public-key call."""
-    resp = httpx.post(
-        f"{config.EBAY_API_BASE}/identity/v1/oauth2/token",
-        data={"grant_type": "client_credentials",
-              "scope": "https://api.ebay.com/oauth/api_scope"},
-        auth=(config.EBAY_CLIENT_ID, config.EBAY_CLIENT_SECRET),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    if not resp.is_success:
+    """A client-credentials token for the Notification API public-key call.
+
+    The application token taxonomy and pricing already mint and cache: one
+    client-credentials grant for the app rather than a second copy of it
+    here. Its refusals are re-raised as KeyUnavailable, because a token eBay
+    would not give means the key cannot be fetched -- an outage to retry, not
+    a forged notice."""
+    try:
+        token = taxonomy._app_token()
+    except httpx.HTTPStatusError as exc:
         raise KeyUnavailable(
-            f"eBay refused an application token ({resp.status_code})")
-    token = (resp.json() or {}).get("access_token") or ""
+            "eBay refused an application token "
+            f"({exc.response.status_code})") from exc
+    except KeyError as exc:
+        raise KeyUnavailable("eBay returned no application token") from exc
     if not token:
         raise KeyUnavailable("eBay returned no application token")
     return token

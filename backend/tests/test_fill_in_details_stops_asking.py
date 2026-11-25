@@ -37,7 +37,7 @@ def _item(**listing):
     read recommend_for's whole list rather than the one rec that wins.
 
     `created_at` is overridable for the cross-store test, which goes through
-    recommendations() — that keeps only the STRONGEST rec per listing, and a
+    ranked() — that keeps only the STRONGEST rec per listing, and a
     listing 21 days old earns a price drop at priority 68 that would hide the
     specifics rec at 45 regardless of what this is testing.
     """
@@ -177,7 +177,7 @@ def test_the_count_reaches_the_listing_it_was_measured_for():
               {"name": "Color", "value": "Gold"}]
     items = [_fresh(id="A", missing_info=[], item_specifics=filled),
              _fresh(id="B", missing_info=[], item_specifics=filled)]
-    recs = recommender.recommendations(items, blanks_by_id={"A": 14})
+    recs = recommender.ranked(items, blanks_by_id={"A": 14})
     by_id = {r["listing_id"]: r["type"] for r in recs}
     assert by_id["A"] == "specifics"
     assert by_id.get("B") != "specifics"

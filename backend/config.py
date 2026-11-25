@@ -418,6 +418,28 @@ def serpapi_ready() -> bool:
     return bool(SERPAPI_KEY)
 
 
+# THE PRIMARY ITEM IDENTIFIER AND PRICE: Google image search in AI Mode,
+# through SerpApi's google_ai_mode engine with the item's photo attached. It is
+# what a seller gets by pointing the Google app at the thing in their hand —
+# Google matches the PHOTO against the web (which no model reading the photo
+# alone can do) and its AI answers what the item is and what it sells for.
+# The vision models still WRITE the listing; this decides what it is about and
+# what it costs. Everything that used to decide those (the photos-only guess,
+# the grounded research pass, the eBay keyword comps) runs only when this
+# could not answer. See services/google_lookup.py.
+#
+# auto (the default): on whenever SERPAPI_KEY is set. off: never — every
+# draft goes back to the photos-only identifier and the fallbacks. Needs R2
+# too, because Google fetches the photo from a URL.
+GOOGLE_AI_MODE = os.getenv("GOOGLE_AI_MODE", "auto").strip().lower() or "auto"
+
+
+def google_ai_mode_ready() -> bool:
+    """Configured for the Google image search lookup (the key and the switch;
+    whether R2 can hand Google a photo URL is objstore's to say)."""
+    return bool(SERPAPI_KEY) and GOOGLE_AI_MODE != "off"
+
+
 # --- Background removal: Photoroom ----------------------------------------
 # Photo backgrounds come off through Photoroom's Remove Background API
 # (services/cutout_api). The app owns ONE Photoroom account and key: Photoroom
@@ -504,11 +526,6 @@ EBAY_MEDIA_BASE = ("https://apim.sandbox.ebay.com/commerce/media/v1_beta"
                    if _SANDBOX else
                    "https://apim.ebay.com/commerce/media/v1_beta")
 
-# Scopes needed to create listings, read/fetch business policies, run Promoted
-# Listings, and read the connected seller's identity (so we can show WHICH eBay
-# account is linked). sell.marketing was added later: a seller who connected
-# before it must reconnect once to grant it (their existing refresh token only
-# carries the scopes they originally approved).
 # The commit this image was built from, stamped in by the Dockerfile's
 # GIT_SHA build arg. Empty for a local run or a build that didn't pass it.
 BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
@@ -523,6 +540,11 @@ BUILD_SHA = os.getenv("BUILD_SHA", "").strip()
 # this was moved to protect.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
 
+# Scopes needed to create listings, read/fetch business policies, run Promoted
+# Listings, and read the connected seller's identity (so we can show WHICH eBay
+# account is linked). sell.marketing was added later: a seller who connected
+# before it must reconnect once to grant it (their existing refresh token only
+# carries the scopes they originally approved).
 EBAY_OAUTH_SCOPES = [
     "https://api.ebay.com/oauth/api_scope",
     "https://api.ebay.com/oauth/api_scope/sell.inventory",
@@ -973,6 +995,19 @@ def config_warnings() -> list[str]:
         warnings.append(
             f"IDENTIFY_PROVIDER={IDENTIFY_PROVIDER!r} is not one of "
             f"auto/google/anthropic — it is being read as 'auto'.")
+    # The primary identifier is set up and still cannot run: Google fetches
+    # the photo from a URL, and without R2 there is none to hand it. Every
+    # draft quietly falls back to the photos-only guess — the identifier this
+    # setting exists to replace.
+    if GOOGLE_AI_MODE not in ("auto", "off"):
+        warnings.append(
+            f"GOOGLE_AI_MODE={GOOGLE_AI_MODE!r} is not one of auto/off — it "
+            f"is being read as 'auto'.")
+    if google_ai_mode_ready() and not r2_configured():
+        warnings.append(
+            "SERPAPI_KEY is set but R2 is not, so the Google image search "
+            "identifier cannot hand Google a photo URL and every draft falls "
+            "back to the photos-only identifier — configure R2.")
     # Works, and so says nothing: every cutout comes back watermarked and goes
     # onto eBay that way unless somebody looks closely at a listing photo.
     if PHOTOROOM_SANDBOX:

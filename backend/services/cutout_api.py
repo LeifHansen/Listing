@@ -43,10 +43,17 @@ that merely reaches services/images depend on the HTTP stack.
 No key is ever logged, and no exception MESSAGE is either: httpx puts the
 request URL in its messages. The type name and the HTTP status are enough to
 debug with and safe to write down.
+
+THE OPERATOR READS THE REAL REASON. A seller reads UNAVAILABLE for a refused
+key and for an empty account alike, because neither is theirs to fix. The
+operator can fix both, and health() is where they read which one it was --
+see "what the operator reads" below.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
+import threading
 import time
 from io import BytesIO
 from typing import Callable, Optional
@@ -65,8 +72,9 @@ _MAX_SIDE = int(os.getenv("BG_API_MAX_SIDE", "2048") or 2048)
 # Total attempts per photo. Big batches WILL trip a per-minute rate limit and
 # the odd network blip; those retry with backoff instead of failing the photo.
 # Hard failures (bad key, no plan, out of images) never retry -- they would
-# fail identically every time.
-_TRIES = int(os.getenv("BG_API_TRIES", "4") or 4)
+# fail identically every time. At least one: zero would make no request at
+# all and then read the response that never came.
+_TRIES = max(1, int(os.getenv("BG_API_TRIES", "4") or 4))
 
 # One cutout answers in a second or three; 30s is generous for a slow day.
 # The studio's client deadline (frontend MODEL_TIMEOUT_MS) is sized to outlast
@@ -105,6 +113,73 @@ class NothingFound(PhotoroomError):
     where it would not for an outage."""
 
 
+# --- what the operator reads -------------------------------------------------
+#
+# The log used to be the only place that said whether a batch came back with
+# its backgrounds on because the key was refused, the account was out of
+# images, or Photoroom was down -- and Fly's log is a stream that has rolled
+# past the batch by the time anyone asks. So the engine keeps the last thing
+# that went wrong with the SERVICE, for /api/admin/diagnostics.
+#
+# The service, not the photo. A photo Photoroom answered for and found nothing
+# in (NothingFound) proves the key, the account and the network all work, so
+# it counts as a success here. A 400 is about one photo too, but it is kept:
+# a 400 on every photo is a request format that changed under us.
+#
+# In memory, like objstore's latch: the diagnostics endpoint has to answer
+# with the database down, production is one process, and a restart clearing
+# the record is honest -- the next cutout that fails writes it again.
+
+_health_lock = threading.Lock()
+_last_failure: Optional[dict] = None
+_last_success_at: Optional[str] = None
+_failures_since_success = 0
+
+
+def _stamp() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _failed(kind: str, reason: str, status: Optional[int] = None,
+            detail: str = "") -> None:
+    """Remember why the engine just failed. `reason` is the operator's
+    sentence; `detail` is Photoroom's own words, from _short_reason or an
+    exception's type name, so never a key or a URL."""
+    global _last_failure, _failures_since_success
+    with _health_lock:
+        _last_failure = {"kind": kind, "reason": reason, "status": status,
+                         "detail": detail, "at": _stamp()}
+        _failures_since_success += 1
+
+
+def _succeeded() -> None:
+    global _last_success_at, _failures_since_success
+    with _health_lock:
+        _last_success_at = _stamp()
+        _failures_since_success = 0
+
+
+def health() -> dict:
+    """Whether Photoroom is working, and if not, why -- for the operator.
+
+    `failing` is whether the most recent call failed. `last_failure` is kept
+    after a success, so a fault that has since cleared can still be read;
+    compare its `at` with `last_success_at`. Since the last restart only.
+
+    Never on /api/ready, which anyone can read: `detail` is Photoroom's own
+    words about the app's account.
+    """
+    with _health_lock:
+        failure = dict(_last_failure) if _last_failure else None
+        success, streak = _last_success_at, _failures_since_success
+    return {"configured": config.photoroom_ready(),
+            "sandbox": config.PHOTOROOM_SANDBOX,
+            "failing": streak > 0,
+            "failures_since_success": streak,
+            "last_failure": failure,
+            "last_success_at": success}
+
+
 # --- HTTP plumbing ----------------------------------------------------------
 
 def _backoff(resp, attempt: int) -> float:
@@ -119,9 +194,9 @@ def _backoff(resp, attempt: int) -> float:
     return min(15.0, float(2 ** attempt))
 
 
-def _send_with_retries(name: str, send: Callable, exc_cls: type):
+def _send_with_retries(send: Callable):
     """Run `send()` (an httpx call) with retries on 429/5xx/network errors.
-    Returns the final response; raises `exc_cls` when the service stayed
+    Returns the final response; raises PhotoroomError when Photoroom stayed
     unreachable through every attempt.
 
     Only 429s and 5xx retry. A 401, 402 or 403 is a fact about the account,
@@ -132,25 +207,30 @@ def _send_with_retries(name: str, send: Callable, exc_cls: type):
     for attempt in range(1, _TRIES + 1):
         try:
             resp = send()
-        except exc_cls:
+        except PhotoroomError:
             raise
         except Exception as exc:  # noqa: BLE001 - network/timeout
             if attempt == _TRIES:
                 # The TYPE only, never str(exc): httpx puts the request URL in
                 # its messages.
-                raise exc_cls(
-                    f"Couldn't reach {name} ({type(exc).__name__}) — "
+                _failed("unreachable",
+                        f"Couldn't reach Photoroom through {_TRIES} attempt(s) "
+                        "— an outage at Photoroom or a network problem "
+                        "between this server and it.",
+                        detail=type(exc).__name__)
+                raise PhotoroomError(
+                    f"Couldn't reach Photoroom ({type(exc).__name__}) — "
                     "it may be down; the photo was kept as shot.") from exc
             wait = _backoff(None, attempt)
-            log.info("%s: network error (%s) — retry %d/%d in %.0fs",
-                     name, type(exc).__name__, attempt, _TRIES - 1, wait)
+            log.info("Photoroom: network error (%s) — retry %d/%d in %.0fs",
+                     type(exc).__name__, attempt, _TRIES - 1, wait)
             time.sleep(wait)
             continue
         retryable = resp.status_code == 429 or resp.status_code >= 500
         if retryable and attempt < _TRIES:
             wait = _backoff(resp, attempt)
-            log.info("%s: HTTP %d — retry %d/%d in %.0fs",
-                     name, resp.status_code, attempt, _TRIES - 1, wait)
+            log.info("Photoroom: HTTP %d — retry %d/%d in %.0fs",
+                     resp.status_code, attempt, _TRIES - 1, wait)
             time.sleep(wait)
             continue
         break
@@ -159,34 +239,31 @@ def _send_with_retries(name: str, send: Callable, exc_cls: type):
 
 def jpeg_payload(img: Image.Image) -> bytes:
     """The JPEG bytes the engine gets, capped to _MAX_SIDE."""
-    rgb = img.convert("RGB")
+    rgb = img.convert("RGB")  # always a new image, so safe to shrink in place
     if max(rgb.size) > _MAX_SIDE:
-        rgb = rgb.copy()
         rgb.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
     buf = BytesIO()
     rgb.save(buf, "JPEG", quality=92)
     return buf.getvalue()
 
 
-def _decode(body: bytes, sent: Image.Image, name: str, exc_cls: type,
-            ) -> Image.Image:
-    """The service's bytes as an RGBA cutout, or exc_cls with the reason.
+def _decode(body: bytes, sent: Image.Image) -> Image.Image:
+    """Photoroom's bytes as an RGBA cutout, or PhotoroomError with the reason.
 
     Pure: no network, so the tests that matter here need no httpx.
     """
     try:
         cut = Image.open(BytesIO(body)).convert("RGBA")
     except Exception as exc:  # noqa: BLE001 - whatever came back isn't an image
-        raise exc_cls(f"{name} returned an unreadable image.") from exc
+        raise PhotoroomError("Photoroom returned an unreadable image.") from exc
     if cut.split()[3].getbbox() is None:
-        raise NothingFound(f"{name} couldn't find an item in this photo — "
+        raise NothingFound("Photoroom couldn't find an item in this photo — "
                            "it was kept as shot.")
-    _check_not_preview(cut, sent, name, exc_cls)
+    _check_not_preview(cut, sent)
     return cut
 
 
-def _check_not_preview(cut: Image.Image, sent: Image.Image, name: str,
-                       exc_cls: type) -> None:
+def _check_not_preview(cut: Image.Image, sent: Image.Image) -> None:
     """Refuse a result that came back far smaller than what we sent.
 
     Shipping that would upscale a small cutout into a 1600px listing photo,
@@ -195,8 +272,8 @@ def _check_not_preview(cut: Image.Image, sent: Image.Image, name: str,
     if max(sent.size) <= 0:
         return
     if max(cut.size) < max(sent.size) * _PREVIEW_RATIO:
-        raise exc_cls(
-            f"{name} returned a {cut.width}x{cut.height} preview instead of "
+        raise PhotoroomError(
+            f"Photoroom returned a {cut.width}x{cut.height} preview instead of "
             "the full-size cutout. The photo was kept as shot.")
 
 
@@ -248,31 +325,58 @@ def photoroom_cutout(img: Image.Image) -> Optional[Image.Image]:
         return None
     payload = jpeg_payload(img)
     sent = Image.open(BytesIO(payload))
-    resp = _send_with_retries("Photoroom", lambda: _segment(payload),
-                              PhotoroomError)
+    resp = _send_with_retries(lambda: _segment(payload))
     status = resp.status_code
+    said = _short_reason(resp) if status != 200 else ""
     if status in (401, 403):
         log.error("photoroom: HTTP %d — the PHOTOROOM_API_KEY was refused "
-                  "(missing, mistyped or revoked): %s",
-                  status, _short_reason(resp))
+                  "(missing, mistyped or revoked): %s", status, said)
+        _failed("key_refused",
+                "Photoroom refused the API key. PHOTOROOM_API_KEY is "
+                "missing, mistyped or revoked — compare it with the key in "
+                "the Photoroom API dashboard.", status, said)
         raise PhotoroomError(UNAVAILABLE)
     if status == 402:
         log.error("photoroom: HTTP 402 — the Photoroom account has no API "
-                  "plan or has used its images: %s", _short_reason(resp))
+                  "plan or has used its images: %s", said)
+        _failed("out_of_credits",
+                "The Photoroom account has no API plan, or has used all of "
+                "its images — renew or top up the plan in the Photoroom API "
+                "dashboard.", status, said)
         raise PhotoroomError(UNAVAILABLE)
     if status == 429:
+        _failed("rate_limited",
+                f"Photoroom kept rate-limiting through {_TRIES} attempt(s).",
+                status, said)
         raise PhotoroomError(
             "Background removal is busy — Photoroom kept rate-limiting us "
             "even after several retries. Try again in a minute.")
     if status == 400:
-        log.info("photoroom: HTTP 400: %s", _short_reason(resp))
+        log.info("photoroom: HTTP 400: %s", said)
+        _failed("photo_refused",
+                "Photoroom refused the photo. On one photo that is the photo; "
+                "on every photo the request format no longer matches its "
+                "API.", status, said)
         raise PhotoroomError(
             "Photoroom couldn't process this photo — it was kept as shot.")
     if status != 200:
-        log.warning("photoroom: HTTP %d: %s", status, _short_reason(resp))
+        log.warning("photoroom: HTTP %d: %s", status, said)
+        _failed("service_error", f"Photoroom answered HTTP {status}.",
+                status, said)
         raise PhotoroomError(
             f"Photoroom error {status} — the photo was kept as shot.")
-    return _decode(resp.content, sent, "Photoroom", PhotoroomError)
+    try:
+        cut = _decode(resp.content, sent)
+    except NothingFound:
+        # Photoroom answered properly about this photo: the service works.
+        _succeeded()
+        raise
+    except PhotoroomError as exc:
+        # A 200 that wasn't a usable cutout: unreadable, or a preview.
+        _failed("bad_answer", str(exc), status)
+        raise
+    _succeeded()
+    return cut
 
 
 def engine_state() -> dict:

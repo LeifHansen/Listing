@@ -54,6 +54,16 @@ def test_the_builder_names_what_it_can_send():
         assert name in ebay_trading.REVISABLE_FIELDS
 
 
+def test_a_store_shelf_move_is_sent_and_not_reported_as_staying():
+    """The revise carries <Storefront> whenever the shelf is marked, so a move
+    is an edit that reached eBay — not one that "stayed here"."""
+    listing = _live(store_category_id="42")
+    listing.mark_dirty("store_category_id")
+    assert ebay_trading.unsendable_revise_fields(listing) == []
+    _call, body = ebay_trading.build_revise_item(listing, "110000000001")
+    assert "<StoreCategoryID>42</StoreCategoryID>" in body
+
+
 def test_a_corrected_package_weight_is_reported_as_unsent():
     listing = _live()
     listing.mark_dirty("package_weight_lb", "package_weight_oz")

@@ -16,6 +16,14 @@ export default defineConfig({
   resolve: { alias: { "@": path.resolve(process.cwd(), "src") } },
   test: {
     environment: "jsdom",
+    // Each test file in its own VM context inside a long-lived worker. The
+    // default pool started a fresh process and built a whole jsdom for every
+    // one of the 150-odd files, which was half of the run's time; this keeps
+    // the files isolated from each other (module mocks and stubbed globals do
+    // not leak) at about a third of the CPU. The one thing it does not allow
+    // is replacing `window` itself with vi.stubGlobal -- spy on the method
+    // instead (see lib/aiConsent.test.js).
+    pool: "vmThreads",
     include: ["src/**/*.test.{js,jsx}"],
     setupFiles: ["./src/test/setup.js"],
   },

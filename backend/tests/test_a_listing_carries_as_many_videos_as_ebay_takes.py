@@ -149,8 +149,6 @@ def test_the_model_caps_videos_at_what_ebay_allows():
     it. Past MAX_VIDEOS eBay ignores the extras instead of refusing them."""
     listing = Listing(videos=[{"file": f"video_{i}.mp4"} for i in range(5)])
     assert len(listing.videos) == MAX_VIDEOS
-    assert MAX_VIDEOS == ebay_video.MAX_VIDEOS_PER_LISTING, (
-        "two copies of eBay's limit that can disagree")
 
 
 def test_a_video_entry_that_names_no_video_is_dropped():
@@ -510,6 +508,13 @@ def test_a_file_that_is_not_mp4_never_reaches_the_disk(api, tmp_path):
     assert not fake.rows["s1"]["listing"].get("videos")
 
 
+def _videos_on_disk(main, session_id: str) -> list[str]:
+    """The video files the session holds on the volume, read without
+    creating anything."""
+    d = main.storage.video_path(session_id)
+    return sorted(p.name for p in d.glob("*") if p.is_file()) if d.is_dir() else []
+
+
 def test_a_video_that_only_ebay_would_refuse_is_refused_here_and_removed(api):
     """Named .mp4, actually QuickTime. Nothing is left behind on the volume:
     a rejected upload that kept its 150MB would be worse than the upload."""
@@ -517,20 +522,20 @@ def test_a_video_that_only_ebay_would_refuse_is_refused_here_and_removed(api):
     res = _upload(client, data=mp4_bytes(brand=b"qt  "))
     assert res.status_code == 400 and "mp4" in res.text.lower()
     assert not fake.rows["s1"]["listing"].get("videos")
-    assert main.storage.list_videos("s1") == []
+    assert _videos_on_disk(main, "s1") == []
 
 
 def test_removing_a_video_takes_it_off_the_listing_and_the_disk(api):
     main, client, fake = api
     name = _upload(client).json()["videos"][0]["file"]
-    assert main.storage.list_videos("s1") == [name]
+    assert _videos_on_disk(main, "s1") == [name]
 
     res = client.delete(f"/api/listings/s1/video/{name}")
 
     assert res.status_code == 200, res.text
     assert res.json()["videos"] == []
     assert fake.rows["s1"]["listing"]["videos"] == []
-    assert main.storage.list_videos("s1") == []
+    assert _videos_on_disk(main, "s1") == []
 
 
 def test_a_video_name_from_the_client_cannot_escape_the_session(api):

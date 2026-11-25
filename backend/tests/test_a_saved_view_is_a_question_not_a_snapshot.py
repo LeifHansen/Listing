@@ -85,7 +85,7 @@ def test_a_view_stores_the_question_and_not_the_listings(seller):
     """The one thing a saved list must never do is go stale."""
     _put(seller, [VIEW])
     stored = seller.db.saved_listing_views(seller.uid)
-    assert set(stored[0]) == {"id", "name", "tab", "filters", "created_at"}
+    assert set(stored[0]) == {"id", "name", "tab", "filters", "sort", "created_at"}
     assert "listings" not in json.dumps(stored)
 
 
@@ -182,3 +182,23 @@ def test_junk_where_the_views_should_be_is_an_empty_strip(seller):
         r = seller.put("/api/listing-views", json={"views": junk})
         assert r.status_code == 200, r.text
         assert r.json()["views"] == []
+
+
+def test_a_saved_view_keeps_the_order_it_was_saved_in(seller):
+    """A view can carry the grid's order ("Oldest listed" for a stale-stock
+    view, say). The server keeps the id as text, bounded, without judging it:
+    the frontend owns the vocabulary (lib/listingSort) and falls back to its
+    default for an id it does not know, the same arrangement as the filters."""
+    saved = _put(seller, [{**VIEW, "sort": "listed-asc"}])
+    assert saved[0]["sort"] == "listed-asc"
+    assert seller.get("/api/listing-views").json()["views"][0]["sort"] == "listed-asc"
+
+
+def test_a_view_from_before_sorts_comes_back_with_none(seller):
+    saved = _put(seller, [VIEW])
+    assert saved[0]["sort"] == ""
+
+
+def test_a_sort_is_bounded_like_everything_else_in_a_view(seller):
+    saved = _put(seller, [{**VIEW, "sort": "x" * 500}])
+    assert len(saved[0]["sort"]) == 24

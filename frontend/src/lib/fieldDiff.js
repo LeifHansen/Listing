@@ -16,14 +16,14 @@
    button. */
 
 // Mirrors backend/main.py `_PATCHABLE` (the card fields, any stage) ...
-export const CARD_FIELDS = [
+const CARD_FIELDS = [
   "fulfillment_policy_id", "category_id", "category_suggestion",
   "price", "quantity", "condition", "condition_descriptors",
   "listing_format", "auction_start_price",
 ];
 
 // ... and `_EDITOR_PATCHABLE` (the editor's fields, drafts only).
-export const EDITOR_FIELDS = [
+const EDITOR_FIELDS = [
   "title", "subtitle", "brand", "description", "condition_description",
   "item_specifics",
   "package_weight_lb", "package_weight_oz",

@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import config, db, errors, objstore, storage
-from ..services import deletion_queue, errorlog, owed_refunds
+from ..services import cutout_api, deletion_queue, errorlog, owed_refunds
 from . import deps
 
 router = APIRouter()
@@ -81,6 +81,12 @@ def _diagnostics() -> dict:
         # is actually on, what's still missing before money can move, and which
         # Stripe mode the keys are in — a test key on a production deploy
         # accepts nothing and otherwise looks identical to a working one.
+        # Background removal. A seller is told only that it is "unavailable"
+        # whether the key was refused or the account ran out of images, since
+        # neither is theirs to fix; this is where the operator reads which it
+        # was -- the status, Photoroom's own words, and when. Since the last
+        # restart, from memory, so it answers with the database down.
+        "photoroom": cutout_api.health(),
         "tokens_enabled": config.tokens_enabled(),
         "tokens_missing": config.tokens_missing(),
         "stripe_live_mode": config.stripe_live_mode(),
@@ -137,6 +143,18 @@ def admin_diagnostics(request: Request) -> dict:
     return _diagnostics()
 
 
+def _page(rows: list[dict], limit: int, stamp: str
+          ) -> tuple[list[dict], Optional[str]]:
+    """A read of `limit` + 1 rows, cut to the page and the cursor for the next
+    one. The extra row is the probe -- the same trade /api/listings makes --
+    so the answer can say whether it is the whole list; the cursor names the
+    page's last row by its `stamp` column, and is None on the last page."""
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    return rows, (deps.page_cursor(rows[-1].get(stamp), rows[-1].get("id"))
+                  if truncated and rows else None)
+
+
 # --- superadmin console ------------------------------------------------------
 #
 # The operator console: cross-user reads and a handful of account actions,
@@ -177,16 +195,12 @@ def admin_users(request: Request, q: str = "", before: str = "",
     deps.require_superadmin(request)
     limit = max(1, min(limit, 100))
     cursor = deps.cursor_from(before) if before else None
-    # One row more than will be returned, so the answer can say whether it
-    # is the whole list — same probe-row trade as /api/listings.
-    rows = db.admin_list_users(limit=limit + 1, before=cursor, q=q)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
+    rows, next_cursor = _page(
+        db.admin_list_users(limit=limit + 1, before=cursor, q=q),
+        limit, "created_at")
     out = {"users": rows,
            "rollups": db.admin_user_rollups([u["id"] for u in rows]),
-           "next_cursor": (deps.page_cursor(rows[-1].get("created_at"),
-                                            rows[-1].get("id"))
-                           if truncated and rows else None)}
+           "next_cursor": next_cursor}
     try:
         out["total"] = db.admin_count_users()
     except errors.StorageUnavailable:
@@ -225,7 +239,7 @@ def admin_grant_tokens(user_id: str, request: Request,
     if not 1 <= amount <= _ADMIN_GRANT_CAP:
         raise HTTPException(
             400, f"Grants are 1 to {_ADMIN_GRANT_CAP} tokens.")
-    note = str(payload.get("note") or "").strip()[:200]
+    note = str(body.get("note") or "").strip()[:200]
     target = db.get_user_by_id(user_id)   # raises → 503 when unreadable
     if not target:
         raise HTTPException(404, "No such account.")
@@ -300,14 +314,11 @@ def admin_listings(request: Request, q: str = "", status: str = "",
     deps.require_superadmin(request)
     limit = max(1, min(limit, 100))
     cursor = deps.cursor_from(before) if before else None
-    rows = db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
-                                  status=status, user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"listings": rows,
-            "next_cursor": (deps.page_cursor(rows[-1].get("updated_at"),
-                                             rows[-1].get("id"))
-                            if truncated and rows else None)}
+    rows, next_cursor = _page(
+        db.admin_list_listings(limit=limit + 1, before=cursor, q=q,
+                               status=status, user_id=user_id),
+        limit, "updated_at")
+    return {"listings": rows, "next_cursor": next_cursor}
 
 
 @router.get("/api/admin/listings/{listing_id}")
@@ -332,14 +343,11 @@ def admin_ledger_view(request: Request, kind: str = "", user_id: str = "",
     deps.require_superadmin(request)
     limit = max(1, min(limit, 200))
     cursor = deps.cursor_from(before) if before else None
-    rows = db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
-                           user_id=user_id)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (deps.page_cursor(rows[-1].get("created_at"),
-                                             rows[-1].get("id"))
-                            if truncated and rows else None)}
+    rows, next_cursor = _page(
+        db.admin_ledger(limit=limit + 1, before=cursor, kind=kind,
+                        user_id=user_id),
+        limit, "created_at")
+    return {"entries": rows, "next_cursor": next_cursor}
 
 
 @router.get("/api/admin/compliance")
@@ -385,17 +393,14 @@ def _error_report(before: str = "", limit: int = 50, since_hours: int = 0,
     """
     limit = max(1, min(limit, 200))
     cursor = deps.cursor_from(before) if before else None
-    rows = db.error_events_list(limit=limit + 1, before=cursor,
-                                since_hours=since_hours,
-                                min_severity=min_severity,
-                                include_resolved=include_resolved)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"errors": rows,
-            "sink": errorlog.stats(),
-            "next_cursor": (deps.page_cursor(rows[-1].get("last_seen"),
-                                             rows[-1].get("id"))
-                            if truncated and rows else None)}
+    rows, next_cursor = _page(
+        db.error_events_list(limit=limit + 1, before=cursor,
+                             since_hours=since_hours,
+                             min_severity=min_severity,
+                             include_resolved=include_resolved),
+        limit, "last_seen")
+    return {"errors": rows, "sink": errorlog.stats(),
+            "next_cursor": next_cursor}
 
 
 @router.get("/api/admin/errors")
@@ -459,10 +464,7 @@ def admin_audit_view(request: Request, before: str = "",
     deps.require_superadmin(request)
     limit = max(1, min(limit, 200))
     cursor = deps.cursor_from(before) if before else None
-    rows = db.admin_audit_list(limit=limit + 1, before=cursor)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    return {"entries": rows,
-            "next_cursor": (deps.page_cursor(rows[-1].get("created_at"),
-                                             rows[-1].get("id"))
-                            if truncated and rows else None)}
+    rows, next_cursor = _page(
+        db.admin_audit_list(limit=limit + 1, before=cursor),
+        limit, "created_at")
+    return {"entries": rows, "next_cursor": next_cursor}

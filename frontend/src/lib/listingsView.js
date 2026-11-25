@@ -149,8 +149,31 @@ export const ARCHIVED_STATUSES = ["sold", "ended"];
 
 export const isArchived = (item) => ARCHIVED_STATUSES.includes(item?.status);
 
-/* Most recently touched first. */
-const byRecency = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
+/* Most recently touched first. Exported for lib/listingSort, which breaks
+   its ties the same way so an explicit sort and the default one agree about
+   two cards that are otherwise equal. */
+export const byRecency = (a, b) => (b.updated_at || "").localeCompare(a.updated_at || "");
+
+
+/* When this listing went up — the date a seller means by "listed".
+
+   Not `updated_at`: that is when anything last wrote the row, and an enrich
+   pass or a price cut stamps "now" on hundreds at once. Not `created_at`
+   alone either: a draft made here in March and published in May was listed
+   in May. eBay's own start time comes first, then the moment this app
+   published it, then the record's birth — the order
+   backend/services/duplicates._listed_at uses (with the publish stamp it
+   doesn't need between them), so "newest listed" here and "which copy is
+   older" there cannot disagree.
+
+   "" when none of them parses: a date nobody recorded is not "just now". */
+export function listedAt(item) {
+  const l = item?.listing || {};
+  for (const v of [l.ebay_start_time, l.marketplaces?.ebay?.published_at, item?.created_at]) {
+    if (v && !Number.isNaN(Date.parse(v))) return v;
+  }
+  return "";
+}
 
 
 /* The newest listings the seller can still do something about — what the
@@ -231,7 +254,7 @@ export function orderListings(items, metricsById = {}) {
    selling. The server decides (listing_sync.ENDED_GRACE_DAYS) and publishes
    the number on /api/health; this is only what to say before that answer has
    arrived, so a dialog never promises a month the sweep does not measure. */
-export const DEFAULT_ENDED_GRACE_DAYS = 30;
+const DEFAULT_ENDED_GRACE_DAYS = 30;
 
 export function endedGraceDays(health) {
   const days = Number(health?.ended_grace_days);

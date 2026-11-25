@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input, Select } from "@/components/ui/fields";
 import { specificRowIndex } from "./specifics";
 import { Section } from "./Section";
-import { issuesFor } from "./publishShared";
+import { RefusalNotes, issuesFor } from "./publishShared";
 
 /* Details -- the item specifics, as chips.
  *
@@ -36,7 +36,7 @@ const norm = (s) => (s || "").trim().toLowerCase();
 // The trust marker for one specific: ✓ = the AI read it off the item (tag,
 // label, print) or it's unambiguous; ⚠ = a reasonable inference worth a
 // glance; nothing = the seller typed or confirmed it (or it's empty).
-export function ConfidenceMark({ row, className }) {
+function ConfidenceMark({ row }) {
   if (!row || !(row.value || "").trim() || !row.confidence) return null;
   const high = row.confidence === "high";
   const label = high
@@ -46,7 +46,7 @@ export function ConfidenceMark({ row, className }) {
     <span
       title={label} aria-label={label} tabIndex={0}
       className={cn("inline-flex shrink-0 cursor-help outline-none",
-        high ? "text-green" : "text-warning", className)}
+        high ? "text-green" : "text-warning")}
     >
       {high ? <Check size={13} aria-hidden /> : <AlertTriangle size={13} aria-hidden />}
     </span>
@@ -55,7 +55,7 @@ export function ConfidenceMark({ row, className }) {
 
 // One labelled group under the chips. The rule under the heading is what
 // makes the page scannable without boxes.
-function SpecGroup({ title, note, count, children }) {
+function SpecGroup({ title, count, children }) {
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-baseline flex-wrap gap-x-2 gap-y-0.5 pb-1.5 border-b border-line">
@@ -63,7 +63,6 @@ function SpecGroup({ title, note, count, children }) {
         {count != null && (
           <span className="font-display text-[12px] font-semibold text-ink-faint tabular-nums">{count}</span>
         )}
-        {note && <span className="text-[12px] font-normal text-ink-faint">{note}</span>}
       </div>
       {children}
     </section>
@@ -504,19 +503,7 @@ export function DetailsCard({ w }) {
     >
       <div className="flex flex-col gap-4">
         {/* What eBay said, where the chips are. */}
-        {refused.length > 0 && (
-          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
-            {refused.map((issue, i) => (
-              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
-                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
-                <span className="text-[13px] text-ink flex-1 min-w-0">
-                  <strong className="font-bold">{issue.title}</strong>
-                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        <RefusalNotes issues={refused} />
         {missingRequired > 0 && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-input border border-warning/40 bg-warning-soft px-3.5 py-2.5">
             <AlertTriangle size={16} className="text-warning shrink-0" aria-hidden />

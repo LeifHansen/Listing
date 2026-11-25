@@ -132,4 +132,33 @@ describe("the ⋯ menu", () => {
     act(() => items()[1].click());
     expect(picked).toEqual([]);
   });
+
+  it("holds a radio set — a sort order — with the chosen one ticked", () => {
+    render([
+      { label: "Newest", checked: true, onSelect: () => picked.push("newest") },
+      { label: "Cheapest", checked: false, onSelect: () => picked.push("cheapest") },
+      { label: "Export", onSelect: () => picked.push("export") },
+    ]);
+    open();
+    const radios = [...host.querySelectorAll('[role="menuitemradio"]')];
+    expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(["true", "false"]);
+    // A plain action in the same list stays a plain menuitem.
+    expect(items().map((i) => i.textContent)).toEqual(["Export"]);
+    act(() => radios[1].click());
+    expect(picked).toEqual(["cheapest"]);
+  });
+
+  it("walks the radio items with the arrow keys too", () => {
+    render([
+      { label: "Newest", checked: true },
+      { label: "Cheapest", checked: false },
+    ]);
+    open();
+    const radios = [...host.querySelectorAll('[role="menuitemradio"]')];
+    expect(document.activeElement).toBe(radios[0]);
+    act(() => {
+      menu().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(radios[1]);
+  });
 });

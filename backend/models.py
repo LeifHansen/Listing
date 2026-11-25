@@ -48,10 +48,10 @@ MAX_CONDITION_DESCRIPTORS = 20
 #
 # The plumbing either side of this number carries a list anyway (Listing.videos
 # below, the repeatable <VideoID> the Trading schema takes), so raising the
-# ceiling the day eBay does is this constant and the one beside it in
-# services/ebay_video.py. Held here as well because models.py is the layer with
-# no eBay dependency -- the route and the editor both need the number, and
-# neither should have to import an httpx-backed module to learn it.
+# ceiling the day eBay does is this one constant (services/ebay_video.py reads
+# it too). It lives here because models.py is the layer with no eBay
+# dependency -- the route and the editor both need the number, and neither
+# should have to import an httpx-backed module to learn it.
 MAX_VIDEOS = 1
 
 # How a listing sells. FIXED_PRICE is Buy It Now (the default and the great
@@ -783,6 +783,22 @@ class ItemNotesRequest(BaseModel):
     notes: dict[str, str] = Field(default_factory=dict)
 
 
+class PendingLookupRequest(BaseModel):
+    """Ask Google about one item again, with the seller's correction — the
+    review step's "Submit Changes". See POST /api/bulk/notes/{job_id}/google.
+
+    `gi` and `photo` identify the item the way the other guidance-step edits
+    do: a slot, and one of that slot's own photo URLs, so a request aimed at a
+    slot a removal has since renumbered names nothing rather than the wrong
+    item. `notes` is what the seller typed; it rides the question to Google
+    and becomes the item's line for the draft.
+    """
+
+    gi: int
+    photo: str
+    notes: str = Field(default="", max_length=4000)
+
+
 class PendingPhotoRequest(BaseModel):
     """One photo to take off one item at the guidance step — see POST
     /api/bulk/notes/{job_id}/delete-photo.
@@ -826,6 +842,42 @@ class PendingMergeRequest(BaseModel):
     """
 
     items: list[PendingItemRequest] = Field(default_factory=list)
+
+
+class PendingSplitRequest(BaseModel):
+    """A single upload the seller wants sorted into items after all — see
+    POST /api/bulk/notes/{job_id}/split.
+
+    The uploader's bulk toggle was left off, so the whole pile is one item at
+    the guidance step. This asks for the grouping a batch would have run,
+    with `notes` as the seller's own inventory of the pile ("a blue polo, a
+    champagne bottle") — the hint the grouping reads as the expected number
+    of items, and the one thing that fixes its usual mistake. Optional.
+    """
+
+    notes: str = ""
+
+
+class SplitListingRequest(BaseModel):
+    """A draft that was written for two items, split in two — see POST
+    /api/listings/{listing_id}/split.
+
+    `photos` are the file names (as in Listing.images) that belong to the
+    OTHER item: they move to a new draft, which the AI writes from them. What
+    is not named stays. `redraft` re-runs the AI over the photos this listing
+    keeps, because its title and description were written for both items;
+    off, the text is left exactly as it is and only the photos leave.
+
+    `notes` is about the other item and `keep_notes` about this one — each
+    the line a seller types at the guidance step, so the two drafts are
+    written knowing which is which. Both optional; `keep_notes` left None
+    leaves whatever this listing already had.
+    """
+
+    photos: list[str] = Field(default_factory=list)
+    redraft: bool = True
+    notes: str = ""
+    keep_notes: Optional[str] = None
 
 
 class PublishRequest(BaseModel):

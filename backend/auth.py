@@ -55,7 +55,9 @@ _ABSENT_PASSWORD_HASH = bcrypt.hashpw(
     b"\x00 no account -- see verify_password", bcrypt.gensalt()).decode()
 
 
-def _make_token(user_id: str) -> str:
+def make_token(user_id: str) -> str:
+    """Mint a session token: the cookie's value on the web, and the Bearer
+    credential native clients send."""
     now = _dt.datetime.now(_dt.timezone.utc)
     payload = {"sub": user_id, "iat": now, "exp": now + _dt.timedelta(days=TOKEN_TTL_DAYS)}
     return jwt.encode(payload, config.SECRET_KEY, algorithm="HS256")
@@ -64,7 +66,7 @@ def _make_token(user_id: str) -> str:
 def set_session_cookie(response: Response, user_id: str, secure: bool) -> None:
     response.set_cookie(
         COOKIE_NAME,
-        _make_token(user_id),
+        make_token(user_id),
         max_age=TOKEN_TTL_DAYS * 24 * 3600,
         httponly=True,
         samesite="lax",
@@ -74,11 +76,6 @@ def set_session_cookie(response: Response, user_id: str, secure: bool) -> None:
 
 def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(COOKIE_NAME)
-
-
-def make_token(user_id: str) -> str:
-    """Public: mint a session token (for native clients using Bearer auth)."""
-    return _make_token(user_id)
 
 
 def current_user(request: Request) -> Optional[dict]:

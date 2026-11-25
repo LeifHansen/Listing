@@ -56,7 +56,6 @@ function stub(over = {}) {
     upsertSpecific: () => {},
     confirmSpecific: () => {},
     confirmAllSpecifics: () => {},
-    autofillSpecifics: () => {},
     ...over,
   };
 }

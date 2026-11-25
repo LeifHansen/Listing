@@ -107,6 +107,9 @@ describe("the admin console gate", () => {
     // commit that asks for it.
     expect(entry.getAttribute("aria-current")).toBe("page");
     expect(text()).toContain("Overview");
+    // The panel under the tabs is fetched the first time the console opens
+    // (see AdminView), so it is the one thing here that is waited for.
+    await act(async () => { await import("@/views/admin/AdminOverview"); });
     expect(text()).toContain("Accounts");
     await act(async () => { root.unmount(); });
   });

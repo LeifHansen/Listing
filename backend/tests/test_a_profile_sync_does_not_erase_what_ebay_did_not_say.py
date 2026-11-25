@@ -6,7 +6,7 @@ and "" is "we don't know" rather than a name. POST /api/profile/sync-ebay
 wrote the username and email straight through, so pressing "Sync from eBay"
 on an account whose token lacks the email scope — the usual case — erased the
 email the app had, and a response without a username erased that too. A blank
-username makes listing_sync.belongs_to scope nothing.
+username makes listing_sync.owns scope nothing.
 """
 from __future__ import annotations
 

@@ -165,7 +165,7 @@ def owns(listing: Listing | dict, account) -> bool:
 
     Records that predate immutable ids fall back to the username, which is
     all they have. Refusing those outright would strand sellers who did
-    nothing wrong, so they stay readable — but see `may_write`.
+    nothing wrong, so they stay readable.
     """
     owner_id = account_id_of(listing)
     caller_id, caller_name = _identity(account)
@@ -209,54 +209,6 @@ def matchable(listing: Listing | dict, account) -> bool:
     owner_id = account_id_of(listing)
     caller_id, _caller_name = _identity(account)
     return not (owner_id and caller_id and owner_id != caller_id)
-
-
-def may_write(listing: Listing | dict, account) -> bool:
-    """True when this record may be WRITTEN on `account`'s behalf.
-
-    Stricter than `owns`, because the failures are not symmetric: showing a
-    seller a listing that turns out not to be theirs is a confusing screen,
-    while REVISING one is an edit to a stranger's live listing that no later
-    correction undoes.
-
-    So a write needs the caller to be identified, and needs the record to
-    agree — by immutable id where there is one, by a named username where the
-    record is too old to have anything better.
-    """
-    caller_id, caller_name = _identity(account)
-    if not caller_id and not caller_name:
-        # Nothing to prove ownership against.
-        return False
-    owner_id = account_id_of(listing)
-    if owner_id:
-        return bool(caller_id) and owner_id == caller_id
-    owner_name = account_of(listing)
-    if owner_name == UNKNOWN_ACCOUNT:
-        return False
-    if not owner_name:
-        # A legacy record with no owner recorded. The connected account is
-        # the only one it can plausibly belong to, and refusing would make
-        # every pre-existing listing permanently uneditable.
-        return True
-    return bool(caller_name) and owner_name == caller_name
-
-
-def belongs_to(listing: Listing | dict, account: str) -> bool:
-    """Deprecated alias for `owns`, kept for callers that hold only a name.
-
-    This used to be the ownership rule itself, and it decided on the seller's
-    eBay USERNAME — a display name they can change. Worse, it returned True
-    when EITHER side was blank, so a connected account whose identity could
-    not be read (the identity scope 403s on older connections) matched every
-    record in the database. Since eBay's GetItem answers for any seller's
-    item, a status sweep then re-confirmed another account's listings as live
-    under this one.
-
-    It delegates now so there is exactly ONE ownership rule. Prefer `owns`
-    for reads and `may_write` for writes, passing the creds bundle so the
-    immutable account id is available.
-    """
-    return owns(listing, account)
 
 
 def _is_blank(value) -> bool:
@@ -534,6 +486,23 @@ def keeps_grace(record: dict) -> bool:
     return bool((record.get("listing") or {}).get("images"))
 
 
+def _utc_instant(raw) -> Optional[datetime]:
+    """An ISO-8601 timestamp as an AWARE datetime, or None if unreadable.
+
+    eBay writes its times as "2026-07-30T18:04:11.000Z", and every time this
+    module reads is UTC, so a value that names no zone is taken as UTC rather
+    than left naive -- see `_started_at` for what a naive one costs.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _ended_since(record: dict) -> Optional[datetime]:
     """When this record ended, as an aware datetime, or None if unreadable.
 
@@ -546,21 +515,16 @@ def _ended_since(record: dict) -> Optional[datetime]:
     listing = record.get("listing") or {}
     raw = str(listing.get("ended_at") or "").strip()
     if raw:
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            log.info("sync: %s has an unreadable ended_at (%r)",
-                     record.get("id"), raw)
+        parsed = _utc_instant(raw)
+        if parsed is not None:
+            return parsed
+        log.info("sync: %s has an unreadable ended_at (%r)",
+                 record.get("id"), raw)
     stamp = record.get("updated_at")
     if isinstance(stamp, datetime):
         return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
-    if isinstance(stamp, str) and stamp.strip():
-        try:
-            parsed = datetime.fromisoformat(stamp.strip().replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            pass
+    if isinstance(stamp, str):
+        return _utc_instant(stamp)
     return None
 
 
@@ -728,23 +692,18 @@ def _started_at(data: dict) -> Optional[datetime]:
     """An imported listing's eBay start time, as an aware datetime.
 
     This is what the row's updated_at becomes, so "most recent first" means
-    most recently listed rather than most recently touched by a sync."""
-    raw = str(data.get("ebay_start_time") or "").strip()
-    if not raw:
-        return None
-    try:  # eBay sends "2026-07-30T18:04:11.000Z"
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    # "Aware" was the contract and the Z was the only thing enforcing it. The
-    # value goes into a DateTime(timezone=True) column, and Postgres reads a
-    # NAIVE datetime written there as being in the session's timezone -- the
-    # same silent offset as the sessions_valid_from trap, arriving from the
-    # value side instead of the column side. eBay's times are UTC; anything
-    # that reaches here without a zone came through this app's own storage,
-    # where they are UTC too. duplicates._listed_at and recommender._age_days
-    # already do exactly this with the same values.
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    most recently listed rather than most recently touched by a sync.
+
+    "Aware" was the contract and the Z was the only thing enforcing it. The
+    value goes into a DateTime(timezone=True) column, and Postgres reads a
+    NAIVE datetime written there as being in the session's timezone -- the
+    same silent offset as the sessions_valid_from trap, arriving from the
+    value side instead of the column side. eBay's times are UTC; anything
+    that reaches here without a zone came through this app's own storage,
+    where they are UTC too. duplicates._listed_at and recommender._age_days
+    already do exactly this with the same values.
+    """
+    return _utc_instant(data.get("ebay_start_time"))
 
 
 def _warn_if_capped(items, what: str, user_id: str) -> None:
@@ -926,6 +885,15 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
         log.warning("sync: user=%s has at least %d records — the dedupe read is "
                     "capped, duplicates may survive this run",
                     user_id, _KNOWN_LIMIT)
+    # The ended records that have run out of road go now, before the indexes
+    # below are built to match this run's items: a record that is about to be
+    # removed must not be the one an active listing gets merged into. Swept
+    # from `all_known` rather than `known` — a mirror stamped with an account
+    # the seller has since disconnected is exactly the stale card this is
+    # for, and nothing else will ever come back for it.
+    cleared = sweep_ended_records(all_known, user_id)
+    for rid in cleared:
+        known.pop(rid, None)
     # Match on the eBay item id, not just on the mirror id: a listing this app
     # published is already here under its session id, and keying the sync on
     # "ebay-<item>" alone imported it again as a separate card on every sync —
@@ -938,18 +906,6 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
     # but never got an answer for is reclaimed instead of imported as a
     # second card. See _index_by_publish_key.
     by_key = _index_by_publish_key(known.values())
-    # The ended records that have run out of road go now, before the indexes
-    # above are used to match this run's items: a record that is about to be
-    # removed must not be the one an active listing gets merged into. Swept
-    # from `all_known` rather than `known` — a mirror stamped with an account
-    # the seller has since disconnected is exactly the stale card this is
-    # for, and nothing else will ever come back for it.
-    cleared = sweep_ended_records(all_known, user_id)
-    for rid in cleared:
-        known.pop(rid, None)
-    if cleared:
-        owned = _index_by_item(known.values())
-        by_key = _index_by_publish_key(known.values())
     # Records already written by an earlier listing in this run. See the
     # first-claim-wins guard in the save loop.
     claimed: set[str] = set()
@@ -1424,37 +1380,33 @@ def publish_policies(listing: Listing, creds: dict) -> dict:
             "return_policy_id": creds.get("return_policy_id")}
 
 
-def offers_enabled(uid: Optional[str]) -> bool:
-    """Account default: accept Best Offer on every NEW listing, no minimum.
-
-    The "Allow offers" switch in Settings, read at publish time so it covers
-    every listing this app creates without touching the drafts themselves.
-
-    OFF unless the seller saved it on, and off again when the preference
-    cannot be read. Neither is timidity about a free feature: offers change
-    what the listing IS to a buyer — the price stops being the price, and the
-    seller signs up to answer messages about it — and an outage is not a
-    decision. Same reasoning as auto_promote (marketplaces/ebay_provider.py),
-    which is a fee; the failure here is cheaper but it is still the app
-    listing an item on terms the seller did not choose.
-
-    Deliberately NOT applied on a revise. The switch says "new listings", and
-    flipping it must not go back through a live store silently opening
-    hundreds of existing listings to negotiation.
-    """
-    return offers_terms(uid)["enabled"]
-
-
 def offers_terms(uid: Optional[str]) -> dict:
     """The seller's Best Offer defaults for a NEW listing, in one read:
     {enabled, auto_accept_pct, auto_decline_pct}.
 
-    Same fail-closed contract as the switch alone -- nobody, an absent
-    preference and an unreadable one are all "off, no limits". The limits
-    are percentages of the asking price; 0 means that limit is not set, so
-    with both at 0 the listing goes up exactly as "Allow offers" always
-    did: every offer reaches the seller. They are read together with the
-    switch so a publish cannot see one half of the setting and not the other.
+    `enabled` is the "Allow offers" switch in Settings: accept Best Offer on
+    every new listing. Read at publish time so it covers every listing this
+    app creates without touching the drafts themselves.
+
+    OFF unless the seller saved it on, and off again when the preference
+    cannot be read -- nobody, an absent preference and an unreadable one are
+    all "off, no limits". Neither is timidity about a free feature: offers
+    change what the listing IS to a buyer — the price stops being the price,
+    and the seller signs up to answer messages about it — and an outage is
+    not a decision. Same reasoning as auto_promote
+    (marketplaces/ebay_provider.py), which is a fee; the failure here is
+    cheaper but it is still the app listing an item on terms the seller did
+    not choose.
+
+    Deliberately NOT applied on a revise. The switch says "new listings", and
+    flipping it must not go back through a live store silently opening
+    hundreds of existing listings to negotiation.
+
+    The limits are percentages of the asking price; 0 means that limit is not
+    set, so with both at 0 the listing goes up exactly as "Allow offers"
+    always did: every offer reaches the seller. They are read together with
+    the switch so a publish cannot see one half of the setting and not the
+    other.
     """
     off = {"enabled": False, "auto_accept_pct": 0.0, "auto_decline_pct": 0.0}
     if not uid:
@@ -1502,11 +1454,11 @@ def international_shipping_enabled(uid: Optional[str]) -> bool:
     """Has this seller switched eBay International Shipping on for new
     listings?
 
-    Same contract as offers_enabled, for the same reason: the switch changes
-    who a listing is sold to. With it on, eBay shows the listing to buyers
-    abroad and the seller posts the sale to eBay's US hub; eBay carries it
-    from there. That is a commitment the seller makes, so silence and an
-    unreadable preference are both a no.
+    Same contract as the "Allow offers" switch (offers_terms), for the same
+    reason: the switch changes who a listing is sold to. With it on, eBay
+    shows the listing to buyers abroad and the seller posts the sale to eBay's
+    US hub; eBay carries it from there. That is a commitment the seller makes,
+    so silence and an unreadable preference are both a no.
 
     A REVISE never carries it. The switch says "new listings", and flipping
     it must not walk back through a live store opting hundreds of listings in
@@ -1517,25 +1469,21 @@ def international_shipping_enabled(uid: Optional[str]) -> bool:
                       "international shipping")
 
 
-def publish_best_offer(creds: Optional[dict]) -> bool:
-    """Whether a publish made with `creds` goes out with Best Offer on.
+def publish_best_offer_terms(creds: Optional[dict]) -> dict:
+    """The Best Offer terms a publish made with `creds` carries -- the
+    switch and the two limits, from the account's own preferences.
 
     The companion of publish_policies: it reads the account's own switch off
     the same creds dict, so create_on_ebay and the verifier below cannot
     disagree about what the real publish sends.
     """
-    return publish_best_offer_terms(creds)["enabled"]
-
-
-def publish_best_offer_terms(creds: Optional[dict]) -> dict:
-    """The Best Offer terms a publish made with `creds` carries -- the
-    switch and the two limits, from the account's own preferences."""
     return offers_terms(str((creds or {}).get("_uid") or ""))
 
 
 def publish_international_shipping(creds: Optional[dict]) -> bool:
     """Whether a publish made with `creds` opts the listing into eBay
-    International Shipping. Same shape as publish_best_offer, same reason."""
+    International Shipping. Same shape as publish_best_offer_terms, same
+    reason."""
     return international_shipping_enabled(
         str((creds or {}).get("_uid") or ""))
 

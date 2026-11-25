@@ -361,18 +361,3 @@ def capped_by_type(recs: list[dict], per_type: int) -> list[dict]:
         kept[r["type"]] = seen + 1
         out.append(r)
     return out
-
-
-def recommendations(items: list[dict], metrics_by_id: Optional[dict] = None,
-                    limit: int = 8,
-                    blanks_by_id: Optional[dict] = None) -> list[dict]:
-    """Ranked recommendations across many listing records (best first). Keeps
-    the single strongest action per listing so the list spans the whole
-    portfolio instead of piling onto one item.
-
-    `limit` is a flat cap across every type. Callers that render these in
-    GROUPS want `ranked` + `capped_by_type` + `totals_by_type` instead: a
-    group cannot say how big it is from a list that was cut to fit.
-    """
-    return ranked(items, metrics_by_id=metrics_by_id,
-                  blanks_by_id=blanks_by_id)[:limit]

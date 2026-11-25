@@ -72,7 +72,10 @@ function countHints(notes) {
 //                     below for why anywhere else still starts shut.
 export function UploadPhase({ defaultOpen = false }) {
   const { setSession, currentSession, runBulkUpload, bulkRetry, clearBulkRetry,
-          invalidateListings, bgRemoval, openSettings } = useApp();
+          invalidateListings, bgRemoval, openSettings,
+          // The store's "a batch is running from here": not the local
+          // startBulk below, which is the button that uploads one.
+          startBulk: watchBulk } = useApp();
   const { toast } = useToast();
   const inputRef = useRef(null);
   const cameraRef = useRef(null);
@@ -159,11 +162,41 @@ export function UploadPhase({ defaultOpen = false }) {
   // see AiNotesStep: a failed submit has to come back to the words they
   // wrote, not to an empty box.
   const [itemNotes, setItemNotes] = useState({});
+  // The approval on the review card, held here for the same reason.
+  // Scoped to the job they were given on: an approval belongs to one
+  // question, and must never show up on the next upload's card.
+  const [approvals, setApprovals] = useState({ jobId: null, map: {} });
   // Answering it. Separate from `busy` because the two render differently:
   // `busy` is the wait before the question, this is the wait after it.
   const [notesBusy, setNotesBusy] = useState(false);
   // Taken once, on mount — a later retry must not re-seed the drop zone.
   useEffect(() => { clearBulkRetry(); }, [clearBulkRetry]);
+
+  // Every preview is an object URL, and an object URL keeps its photo in
+  // memory until it is revoked. Removing a photo and the upload itself
+  // revoke theirs; leaving the screen with a pile still staged did not, so a
+  // shoot picked and walked away from stayed in memory for the life of the
+  // tab. A pile handed to a bulk upload is the store's from then on — it
+  // revokes them, or hands them back to the next uploader if the upload
+  // fails — so that one is left alone (see startBulk).
+  //
+  // Deferred a tick and re-checked, because StrictMode rehearses an unmount
+  // on every mount in development: revoking then would break the previews a
+  // failed batch has just handed back.
+  const filesNow = useRef(files);
+  useEffect(() => { filesNow.current = files; });
+  const handedOff = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      setTimeout(() => {
+        if (mounted.current || handedOff.current) return;
+        filesNow.current.forEach((f) => URL.revokeObjectURL(f.url));
+      }, 0);
+    };
+  }, []);
 
   // A question the seller walked away from.
   //
@@ -194,7 +227,8 @@ export function UploadPhase({ defaultOpen = false }) {
         if (!live) return;
         if (!j.done && j.phase === "awaiting_notes") {
           setPending({ sessionId: saved.sessionId, jobId: saved.jobId,
-                       items: j.pending_items || [] });
+                       items: j.pending_items || [], google: j.google || {},
+                       googleEnabled: !!j.google_enabled });
           return;
         }
       } catch (e) { /* 404, or not ours: no question left to put back */ }
@@ -206,6 +240,37 @@ export function UploadPhase({ defaultOpen = false }) {
     return () => { live = false; };
     // Once, on mount: this is a restore, not a subscription.
   }, []);
+
+  // Google's answer arrives on the job's status while the question is up —
+  // the paused job runs the lookup on its own clock — so the card is polled
+  // until it has one. Only while an answer is still coming: a settled card
+  // has nothing more to learn from the server until the seller acts.
+  const googleWaiting = !!pending && !notesBusy && pending.googleEnabled
+    && (pending.items || []).some((it) => {
+      const entry = (pending.google || {})[String(it.key ?? it.gi)];
+      return !entry || entry.status === "pending";
+    });
+  useEffect(() => {
+    if (!googleWaiting || !pending?.jobId) return undefined;
+    const jobId = pending.jobId;
+    let live = true;
+    let timer;
+    const tick = async () => {
+      try {
+        const j = await api(`/api/bulk/status/${jobId}`);
+        if (!live) return;
+        if (!j.done && j.phase === "awaiting_notes") {
+          setPending((cur) => (cur && cur.jobId === jobId
+            ? { ...cur, google: { ...(cur.google || {}), ...(j.google || {}) },
+                googleEnabled: !!j.google_enabled }
+            : cur));
+        }
+      } catch { /* the next tick asks again */ }
+      if (live) timer = setTimeout(tick, 2000);
+    };
+    timer = setTimeout(tick, 1500);
+    return () => { live = false; clearTimeout(timer); };
+  }, [googleWaiting, pending?.jobId]);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -266,11 +331,13 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // The revokes below happen out here, never inside a setFiles updater: an
+  // updater has to be pure (see addFiles), and React runs it twice over in
+  // development.
   const removeFile = (i) => {
-    setFiles((cur) => {
-      URL.revokeObjectURL(cur[i].url);
-      return cur.filter((_, j) => j !== i);
-    });
+    const gone = files[i].url;
+    URL.revokeObjectURL(gone);
+    setFiles((cur) => cur.filter((f) => f.url !== gone));
   };
 
   const togglePick = (url) => {
@@ -289,23 +356,25 @@ export function UploadPhase({ defaultOpen = false }) {
   };
 
   const removePicked = () => {
-    setFiles((cur) => {
-      const kept = cur.filter((f) => !picked.has(f.url));
-      // Revoke only what actually left: a URL still on screen must keep
-      // working, and a revoked one renders as a broken tile.
-      cur.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
-      return kept;
-    });
+    // Revoke only what actually left: a URL still on screen must keep
+    // working, and a revoked one renders as a broken tile.
+    files.forEach((f) => { if (picked.has(f.url)) URL.revokeObjectURL(f.url); });
+    setFiles((cur) => cur.filter((f) => !picked.has(f.url)));
     endSelecting();
   };
 
   // The batch screen takes over on the click — no waiting on the upload with
   // the Sell tab still on screen — which unmounts this component, so the
   // upload itself runs from the store (see runBulkUpload).
-  const startBulk = once("bulk", async () => {
+  //
+  // `once` is applied at CALL time, as useListingForm.publish does: the body
+  // writes a ref, and a closure over one handed to once() during render is
+  // what React's refs rule refuses. Same in-flight guard, same key.
+  const startBulk = () => once("bulk", async () => {
     if (!files.length) return;
+    handedOff.current = true;   // the previews go with the pile
     await runBulkUpload(files, cutting, notes);
-  });
+  })();
 
   // The draft has landed — the same ending for the pass that ran straight
   // through and the one that waited for the seller's notes.
@@ -376,6 +445,47 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
+  // "It's more than one item": the bulk toggle the seller did not tick, put
+  // right at the question instead of after a draft that describes both.
+  //
+  // The server sorts the photos the way a batch would have (phase
+  // "grouping", polled here like every other pass) and the job comes back
+  // paused either way. Sorted into several items, it IS a batch now, and the
+  // batch screen takes over — its question has the tools this one lacks
+  // (merge two cards, drop one), and its answer is what drafts them all. So
+  // the uploader's own record of the question goes, and the store's record
+  // of a running batch takes its place, exactly as a bulk upload's would.
+  // Still one item (the sort saw one, or could not run), the question comes
+  // back here as it was, with the server's reason as a toast: nothing has
+  // been lost, and the line typed under the item is still in its box.
+  const splitPending = async (hint) => {
+    if (!pending || notesBusy) return;
+    setNotesBusy(true);
+    setStage({ phase: "grouping" });
+    try {
+      await postJson(`/api/bulk/notes/${pending.jobId}/split`, { notes: hint });
+      const out = await pollJob(pending.jobId, {
+        onUpdate: (j) => setStage(j),
+        stopWhen: (j) => j.phase === "awaiting_notes",
+      });
+      if (out?.split_error) {
+        setPending({ ...pending, items: out.pending_items || pending.items,
+                     google: out.google || pending.google || {},
+                     googleEnabled: !!out.google_enabled });
+        toast(out.split_error, { kind: "warning", ttl: 12000 });
+        return;
+      }
+      clearLocal(ASK_KEY);
+      setPending(null);
+      watchBulk(pending.jobId);
+    } catch (e) {
+      toast(`Couldn't sort the photos: ${e.message}`, { kind: "error" });
+    } finally {
+      setNotesBusy(false);
+      setStage(null);
+    }
+  };
+
   // Drop one photo from the item the question is about. The job is still
   // paused, so nothing has been drafted from it and nothing is refunded —
   // the photo simply isn't there when the AI starts reading.
@@ -394,7 +504,27 @@ export function UploadPhase({ defaultOpen = false }) {
     }
   };
 
-  const process = once("process", async () => {
+  // "Submit Changes": ask Google about the item again with what the seller
+  // typed. The card goes to "asking" at once, and the poll above picks up
+  // the answer. Throws on failure so the card keeps its button.
+  const askGoogle = async (gi, photo, text) => {
+    if (!pending) return undefined;
+    try {
+      const res = await postJson(`/api/bulk/notes/${pending.jobId}/google`,
+                                 { gi, photo, notes: text });
+      if (res?.google) {
+        setPending((cur) => (cur ? { ...cur, google: { ...(cur.google || {}),
+                                                         ...res.google } } : cur));
+      }
+      return res;
+    } catch (e) {
+      toast(`Couldn't ask Google again: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  };
+
+  // Call-time `once`, like startBulk above: it can end up in startBulk.
+  const process = () => once("process", async () => {
     if (!files.length) return;
     if (bulkOn) return startBulk();
     setBusy(true);
@@ -443,7 +573,8 @@ export function UploadPhase({ defaultOpen = false }) {
         writeLocal(ASK_KEY, JSON.stringify({ sessionId: up.session_id,
                                              jobId: up.job_id }));
         setPending({ sessionId: up.session_id, jobId: up.job_id,
-                     items: out.pending_items || [] });
+                     items: out.pending_items || [], google: out.google || {},
+                     googleEnabled: !!out.google_enabled });
         return;
       }
       finish(up.session_id, out);
@@ -453,7 +584,7 @@ export function UploadPhase({ defaultOpen = false }) {
       setBusy(false);
       setStage(null);
     }
-  });
+  })();
 
   if (busy || notesBusy) {
     // Real pipeline stages from the job status; the pre-job moment (uploading
@@ -463,7 +594,9 @@ export function UploadPhase({ defaultOpen = false }) {
     const stageLine = !stage?.phase ? "Uploading your photos…"
       : stage.phase === "optimizing"
         ? `${cutting ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
-        : stage.phase === "identifying" ? "Identifying your item…"
+        : stage.phase === "grouping" ? "Sorting your photos into items…"
+        : stage.phase === "google" ? "Looking it up on Google…"
+        : stage.phase === "identifying" ? "Writing your listing…"
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
               : stage.phase === "maker" ? "Double-checking the brand…"
@@ -503,6 +636,12 @@ export function UploadPhase({ defaultOpen = false }) {
           onChange={(gi, text) => setItemNotes((cur) => ({ ...cur, [gi]: text }))}
           onSubmit={submitNotes}
           onDeletePhoto={deletePhoto}
+          onSplit={splitPending}
+          google={pending.google}
+          googleEnabled={pending.googleEnabled}
+          onAskGoogle={askGoogle}
+          approved={approvals.jobId === pending.jobId ? approvals.map : {}}
+          onApprovedChange={(map) => setApprovals({ jobId: pending.jobId, map })}
         />
       </div>
     );

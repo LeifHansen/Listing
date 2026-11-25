@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { motion } from "framer-motion";
 import {
   PlusCircle, Store, LogIn, AlertTriangle, ArrowRightLeft, RefreshCcw,
-  TrendingDown, X,
+  TrendingDown, FolderInput, HandCoins, CircleStop, BadgePercent, BadgeX, Tag,
 } from "lucide-react";
 import { pollJob, postJson } from "@/lib/api";
 import { useApp } from "@/store";
@@ -10,25 +10,39 @@ import { useToast } from "@/components/ui/Toaster";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { BulkAmountPanel } from "@/components/ui/BulkAmountPanel";
+import { DiscountPanel } from "@/components/bulk/DiscountPanel";
+import { AddToSalePanel } from "@/components/bulk/AddToSalePanel";
+import { SaleDialog } from "@/views/sales/SaleDialog";
+import { LiveBulkBar } from "@/components/LiveBulkBar";
+import { StoreCategoryPanel } from "@/components/bulk/StoreCategoryPanel";
 import { ListingCard } from "@/components/ListingCard";
 import { ListingFilters } from "@/components/ListingFilters";
+import { SavedViewTabs } from "@/components/SavedViewTabs";
 import { ListingCardSkeleton } from "@/components/ui/Skeleton";
 import { ViewToggle } from "@/components/ui/ViewToggle";
+import { Segmented } from "@/components/ui/Segmented";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ListingsIllustration } from "@/components/ui/illustrations";
 import { cn, formatMoney } from "@/lib/utils";
-import { reasonLines } from "@/lib/bulkReport";
+import { bulkToast, endingSummary } from "@/lib/bulkActions";
 import { hasSalePrice, saleProceeds, soldUnits } from "@/lib/sales";
 import {
-  endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listingsView,
-  MARKET_FILTERS, orderListings,
+  endedGraceDays, inMarketFilter, isDraft, isLive, keptWhenEnded, listedAt,
+  listingsView, MARKET_FILTERS,
 } from "@/lib/listingsView";
 import { filterListings, isEmptyFilters } from "@/lib/listingFilters";
+import { sortListings, sortMeta } from "@/lib/listingSort";
+import { ebayCategoryOptions, storeCategoryOptions } from "@/lib/categoryOptions";
+import { useStoreCategories } from "@/lib/useStoreCategories";
 import { DraftCategoryEdit } from "@/views/listing/CategoryQuickPick";
 import { DraftFormatEdit } from "@/views/listing/FormatQuickPick";
 import { DraftPriceEdit } from "@/views/listing/PriceQuickEdit";
 import { canQuickEdit, QuickEditPanel } from "@/views/listing/QuickEdit";
-import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
+
+// Fetched when the seller first opens it, not with the app: only a seller
+// with Etsy connected can, and most of them only now and then.
+const CrosspostWizard = lazy(() => import("@/views/crosspost/CrosspostWizard")
+  .then((m) => ({ default: m.CrosspostWizard })));
 
 /* The listings pipeline: ONE view of the seller's whole store, cut by
    lifecycle tab. It IS the Manage tab now (ManageView wraps it with the page
@@ -40,9 +54,11 @@ import { CrosspostWizard } from "@/views/crosspost/CrosspostWizard";
    What is on screen above the grid, top to bottom, and nothing else:
 
      1. the lifecycle tabs, with the grid/list toggle at their right end;
-     2. the filter bar — Filters, Save view, the saved views, and (for a
-        seller on more than one marketplace) where-it-lives at its right;
-     3. the chips for what is on, with "Showing N of M";
+        and the seller's saved views after a divider (SavedViewTabs);
+     2. the filter bar — Filters, the store / eBay category pickers, Sort,
+        and (for a seller on more than one marketplace) where-it-lives at
+        its right;
+     3. the chips for what is on, "Save view", and "Showing N of M";
      4. the selection bar, only while something is ticked;
      5. the "older listings" notice, only when the page is cut.
 
@@ -79,11 +95,13 @@ export const TABS = [
     // for a month so it can be relisted, then removed on its own. Sales stay
     // for good.
     id: "inactive", label: "Inactive", statuses: ["ended", "sold"],
-    sub: "Every sale, plus your listings that ended — relist one or leave it, "
-      + "we clear it out after a month",
+    // "Everything you sold", not "every sale": Manage has a Sales section
+    // now, and it means eBay sale EVENTS (discounts), not sold items.
+    sub: "Everything you sold, plus your listings that ended — relist one or "
+      + "leave it, we clear it out after a month",
     empty: {
       illustration: ListingsIllustration, title: "Nothing finished yet",
-      message: "Sales collect here for good, with what each one went for. "
+      message: "What you sell collects here for good, with what each one went for. "
         + "Listings you end stay for a month in case you want to relist, "
         + "then they're removed on their own.",
     },
@@ -98,7 +116,7 @@ export const TABS = [
       + "archive (finished listings sit at the end)",
     empty: {
       illustration: ListingsIllustration, title: "No listings yet",
-      message: "Let's create your first listing — snap a few photos and the AI writes the rest.",
+      message: "Let's create your first eBay listing — snap a few photos and the AI writes the rest.",
       action: { label: "Create Listing", icon: PlusCircle, go: "new" },
     },
   },
@@ -135,13 +153,25 @@ const LOWER_PRICES = {
     + "you ticked it is skipped.",
 };
 
+// "Send offers to watchers…": eBay's own floor (5%) and this app's ceiling
+// (50%), the same as the dashboard's group button — a buyer takes one of
+// these with a single tap, so the ceiling is lower than a price cut's.
+const SEND_OFFERS = {
+  unit: "%", initial: 10, min: 5, max: 50, step: 1,
+  label: "Offer each ticked listing's watchers",
+  submit: (n, value) => `Send ${value}% off to ${n === 1 ? "its" : `${n} listings'`} watchers`,
+  note: "A private offer to the buyers eBay says are interested. Your listed "
+    + "price doesn't change. Listings nobody is watching are skipped.",
+};
+
 export function ListingsView({ search = "" }) {
   const {
     listingsState, openListing, setView, startNew, user, openAuth, deleteListing,
     rotateListingPhoto, duplicateListing,
     ebay, loadListings, loadMoreListings, metricsById, skippedDraftIds,
     listingsTab, setListingsTab, listingsLayout, setListingsLayout,
-    listingFilters, clearListingFilters,
+    listingFilters, clearListingFilters, listingsSort,
+    saleEvents, saleByListing, adoptSaleEvents,
     health,
     listingsMarket, setListingsMarket, liveSelection, setLiveSelection,
     marketplaces, connectedMarketplaces,
@@ -243,29 +273,46 @@ export function ListingsView({ search = "" }) {
   }, [confirm, health, loadListings, toast]);
 
   const q = search.trim().toLowerCase();
-  // Newest first, except that a listing a buyer has bid or made an offer on
-  // goes to the top and the archive goes to the bottom: see
-  // lib/listingsView.orderListings. The card itself says why it is where it
-  // is (the green glow and its chip, or a Sold / Ended badge, in ListingCard).
+  // The tab, the marketplace and the search box: each about one field, and
+  // all of them BEFORE the filter bar — so the category pickers can count
+  // their choices off this list and a tick in one does not empty the rest.
+  const base = useMemo(() => listingsState.items
+    .filter((i) => inTab(tab, i))
+    .filter((i) => inMarketFilter(marketId, i))
+    .filter((i) => !q
+      || (i.listing?.title || i.title || "").toLowerCase().includes(q)
+      || (i.listing?.brand || "").toLowerCase().includes(q)
+      || (i.listing?.description || "").toLowerCase().includes(q)),
+  [listingsState.items, tab, marketId, q]);
+
+  // The filter bar's cut on top, then the order. Every predicate lives in
+  // lib/listingFilters and every order in lib/listingSort, so the grid, the
+  // "showing N of M" line and the empty state below all ask the same
+  // question of the same list. The default order ("Recommended") is the one
+  // the grid always had: a listing a buyer has bid or made an offer on goes
+  // to the top and the archive to the bottom (lib/listingsView.orderListings),
+  // and the card itself says why it is where it is.
   // Memoized for the same reason as the drafts grid above it on this screen:
-  // two passes and a sort over every listing the seller owns, re-run on every
+  // passes and a sort over every listing the seller owns, re-run on every
   // render, and the app context hands this component a new value on each
   // background poll whether or not a listing changed.
-  const items = useMemo(() => {
-    const shown = listingsState.items
-      .filter((i) => inTab(tab, i))
-      .filter((i) => inMarketFilter(marketId, i))
-      .filter((i) => !q
-        || (i.listing?.title || i.title || "").toLowerCase().includes(q)
-        || (i.listing?.brand || "").toLowerCase().includes(q)
-        || (i.listing?.description || "").toLowerCase().includes(q));
-    // The filter bar's cut, last: the tab, the marketplace and the search box
-    // are each about one field, and this is the one that stacks. Every
-    // predicate lives in lib/listingFilters, so the grid, the "showing N of M"
-    // line and the empty state below all ask the same question of the same
-    // list.
-    return orderListings(filterListings(shown, listingFilters), metricsById);
-  }, [listingsState.items, tab, marketId, q, metricsById, listingFilters]);
+  const items = useMemo(() => sortListings(
+    // `now` left to its default: the age windows measure against the moment
+    // this list is worked out, and the memo above decides when that is.
+    filterListings(base, listingFilters, undefined, { metricsById, saleByListing }),
+    listingsSort, metricsById,
+  ), [base, listingFilters, listingsSort, metricsById, saleByListing]);
+
+  // The category pickers' choices, counted off `base` (see above).
+  const storeCats = useStoreCategories();
+  const storeOptions = useMemo(
+    () => storeCategoryOptions(storeCats.categories, base),
+    [storeCats.categories, base]);
+  const ebayOptions = useMemo(() => ebayCategoryOptions(base), [base]);
+  // Only for a seller with shelves to pick from — or a listing already on
+  // one, which is how a store that could not be read still gets the filter.
+  const showStore = storeCats.categories.length > 0
+    || base.some((i) => String(i.listing?.store_category_id || "").replace(/^0$/, ""));
 
   // Ticks on the live listings, on the tabs that show them. They used to
   // wait for a second marketplace, because the crosspost was the only thing
@@ -287,12 +334,46 @@ export function ListingsView({ search = "" }) {
   const clearLive = () => setLiveSelection({});
 
   // The bulk job running off the ticks, or null: { verb, done, total, title }.
-  // Both of the bar's jobs are minutes of serial eBay calls the server runs
+  // Every action on the bar is minutes of serial eBay calls the server runs
   // in the background and this polls, so the bar can say which listing it is
   // on rather than sit on a spinner. One at a time — the server holds one
   // reservation per account for each, and a second job from the same bar
   // while one runs would be two runs over the same ticks.
   const [running, setRunning] = useState(null);
+  // Which action's panel is open under the bar ("lower", "offers", "shelf"),
+  // or null. One at a time: two half-filled amounts under one bar is two
+  // questions with one set of ticks.
+  const [openPanel, setOpenPanel] = useState(null);
+  const togglePanel = (key) => setOpenPanel((cur) => (cur === key ? null : key));
+
+  /* Start a bulk job over the ticks and see it through: POST, poll, toast
+     the report, clear the ticks, reload. `did(n, res)` words the changed
+     ones; `fail` is the sentence for a run that could not start or finish. */
+  const runJob = async ({ verb, url, body = {}, did, empty, fail }) => {
+    const picked = selectedLive;
+    if (!picked.length || running) return;
+    setOpenPanel(null);
+    setRunning({ verb, done: 0, total: picked.length, title: "" });
+    try {
+      const start = await postJson(url, { ...body, listing_ids: picked.map((i) => i.id) });
+      const total = start.total || picked.length;
+      const res = await pollJob(start.job_id, {
+        onUpdate: (j) => setRunning({
+          verb, done: j.current || 0, total: j.total_items || total,
+          title: j.current_title || "",
+        }),
+      });
+      toast(...bulkToast(res, { did, empty }));
+      clearLive();
+      await loadListings({ quiet: true });
+    } catch (e) {
+      toast(`${fail}: ${e.message}`, { kind: "error" });
+      // Some may have gone through before the failure: show what is true.
+      loadListings({ quiet: true });
+    } finally {
+      setRunning(null);
+    }
+  };
 
   // End & relist: every ticked listing comes off eBay and goes straight back
   // up as a NEW listing — a new item id, a new "listed" date, and a fresh
@@ -313,37 +394,11 @@ export function ListingsView({ search = "" }) {
       confirmLabel: n === 1 ? "End & relist" : `End & relist ${n}`,
       danger: true,
     }))) return;
-    setRunning({ verb: "Relisting", done: 0, total: n, title: "" });
-    try {
-      const start = await postJson("/api/ebay/end-and-relist",
-        { listing_ids: picked.map((i) => i.id) });
-      const total = start.total || n;
-      const res = await pollJob(start.job_id, {
-        onUpdate: (j) => setRunning({
-          verb: "Relisting", done: j.current || 0, total: j.total_items || total,
-          title: j.current_title || "",
-        }),
-      });
-      const parts = [];
-      if (res.changed) parts.push(`Relisted ${res.changed} listing${res.changed === 1 ? "" : "s"} with fresh copy`);
-      if (res.skipped) parts.push(`${res.skipped} skipped`);
-      if (res.failed) parts.push(`${res.failed} failed`);
-      const results = res.results || {};
-      const lines = reasonLines(
-        [...(results.failed || []), ...(results.skipped || [])]);
-      toast([parts.join(" · ") || "Nothing to relist.", ...lines].join("\n"), {
-        kind: res.changed ? "success" : res.failed ? "error" : "info",
-        ttl: lines.length ? 12000 : undefined,
-      });
-      clearLive();
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't end and relist: ${e.message}`, { kind: "error" });
-      // Some may have gone through before the failure: show what is true.
-      loadListings({ quiet: true });
-    } finally {
-      setRunning(null);
-    }
+    await runJob({
+      verb: "Relisting", url: "/api/ebay/end-and-relist",
+      did: (c) => `Relisted ${c} listing${c === 1 ? "" : "s"} with fresh copy`,
+      empty: "Nothing to relist.", fail: "Couldn't end and relist",
+    });
   };
 
   // Lower prices: every ticked listing's price cut by one percentage and
@@ -353,43 +408,126 @@ export function ListingsView({ search = "" }) {
   // seller's call, so the cut lives here, on the listings they ticked, and
   // nowhere nags about it. The percentage is asked for in a panel under the
   // bar rather than a dialog, so the ticks stay in view while it is chosen.
-  const [loweringOpen, setLoweringOpen] = useState(false);
-  const lowerPrices = async (percent) => {
+  const lowerPrices = (percent) => runJob({
+    verb: "Lowering", url: "/api/ebay/lower-prices", body: { percent },
+    // The run's own percentage: a press that found one already going is
+    // handed that run, which may have been started at a different number.
+    did: (c, res) => `Lowered ${c} price${c === 1 ? "" : "s"} by ${res.percent ?? percent}%`,
+    fail: "Couldn't lower prices",
+  });
+
+  // Send offers to watchers: the dashboard's "Send offers", over the ticks.
+  // The listed price does not move — the discount goes privately to the
+  // buyers eBay says are interested.
+  const sendOffers = (percent) => runJob({
+    verb: "Offering", url: "/api/ebay/send-offers-ticked", body: { percent },
+    did: (c, res) => `Sent ${res.percent ?? percent}% off to the watchers of ${c} listing${c === 1 ? "" : "s"}`,
+    empty: "No offers sent.", fail: "Couldn't send offers",
+  });
+
+  // Move to store category: the ticked listings onto one shelf of the
+  // seller's eBay Store, each revised on eBay with the shelf and nothing else.
+  const moveToShelf = (shelf) => runJob({
+    verb: "Moving", url: "/api/ebay/move-store-category",
+    body: { store_category_id: String(shelf.id) },
+    did: (c, res) => `Moved ${c} listing${c === 1 ? "" : "s"} to “${res.store_category_name || shelf.name}”`,
+    fail: "Couldn't move these listings",
+  });
+
+  // End listings: the card's own End, over the ticks. What becomes of each
+  // card depends on whose work is in it (keptWhenEnded), so the dialog says
+  // which rather than promising an archive the mirrors will not get.
+  const endListings = async () => {
     const picked = selectedLive;
     if (!picked.length || running) return;
-    setLoweringOpen(false);
-    setRunning({ verb: "Lowering", done: 0, total: picked.length, title: "" });
+    const n = picked.length;
+    if (!(await confirm({
+      title: n === 1 ? "End this listing on eBay?" : `End ${n} listings on eBay?`,
+      message: endingSummary(picked, endedGraceDays(health)),
+      confirmLabel: n === 1 ? "End listing" : `End ${n} listings`,
+      danger: true,
+    }))) return;
+    await runJob({
+      verb: "Ending", url: "/api/ebay/end-listings",
+      did: (c) => `Ended ${c} listing${c === 1 ? "" : "s"}`,
+      empty: "Nothing to end.", fail: "Couldn't end these listings",
+    });
+  };
+
+  // ---- the sale actions: eBay sale events over the ticks ----------------
+  // Synchronous calls (one eBay request covers the lot), so the bar shows a
+  // "Starting the sale…" line rather than a per-listing count, and every
+  // answer carries the whole list of sales, which the store adopts.
+  const [saleDialog, setSaleDialog] = useState(false);
+  // How many ticks are already in a sale the app can move them out of — the
+  // only time the "move them" switch is worth offering.
+  const inEditableSale = selectedLive.filter((i) => saleByListing.get(i.id)?.editable);
+  const inAnySale = selectedLive.filter((i) => saleByListing.has(i.id));
+
+  const runSale = async ({ verb, url, body, did, empty, fail }) => {
+    const picked = selectedLive;
+    if (!picked.length || running) return false;
+    setOpenPanel(null);
+    setRunning({ verb, done: 0, total: picked.length, title: "", single: true });
     try {
-      const start = await postJson("/api/ebay/lower-prices",
-        { percent, listing_ids: picked.map((i) => i.id) });
-      const total = start.total || picked.length;
-      const res = await pollJob(start.job_id, {
-        onUpdate: (j) => setRunning({
-          verb: "Lowering", done: j.current || 0, total: j.total_items || total,
-          title: j.current_title || "",
-        }),
-      });
-      // The run's own percentage: a press that found one already going is
-      // handed that run, which may have been started at a different number.
-      const cut = res.percent ?? percent;
-      const parts = [];
-      if (res.changed) parts.push(`Lowered ${res.changed} price${res.changed === 1 ? "" : "s"} by ${cut}%`);
-      if (res.skipped) parts.push(`${res.skipped} skipped`);
-      if (res.failed) parts.push(`${res.failed} failed`);
-      const results = res.results || {};
-      const lines = reasonLines(
-        [...(results.failed || []), ...(results.skipped || [])]);
-      toast([parts.join(" · ") || "Nothing to change.", ...lines].join("\n"), {
-        kind: res.changed ? "success" : res.failed ? "error" : "info",
-        ttl: lines.length ? 12000 : undefined,
-      });
-      clearLive();
-      await loadListings({ quiet: true });
+      const res = await postJson(url, { ...body, listing_ids: picked.map((i) => i.id) });
+      adoptSaleEvents(res);
+      toast(...bulkToast(res.report || {}, { did: (n) => did(n, res), empty }));
+      if ((res.report || {}).changed) clearLive();
+      return true;
     } catch (e) {
-      toast(`Couldn't lower prices: ${e.message}`, { kind: "error" });
-      loadListings({ quiet: true });
+      toast(`${fail}: ${e.message}`, { kind: "error" });
+      return false;
     } finally {
       setRunning(null);
+    }
+  };
+
+  const applyDiscount = ({ percent, days, move }) => runSale({
+    verb: "Starting the sale", url: "/api/sale-events", body: { percent, days, move },
+    did: (n, res) => `${n} listing${n === 1 ? "" : "s"} on sale at ${percent}% off`
+      + (res.event ? ` — “${res.event.name}”` : ""),
+    empty: "None of those could go on sale.", fail: "Couldn't start the sale",
+  });
+
+  const addToSale = ({ event, move }) => runSale({
+    verb: "Adding to the sale", url: `/api/sale-events/${encodeURIComponent(event.id)}/listings`,
+    body: { move },
+    did: (n) => `Added ${n} listing${n === 1 ? "" : "s"} to “${event.name}”`,
+    empty: "None of those could go in that sale.", fail: "Couldn't add to the sale",
+  });
+
+  const removeFromSale = async () => {
+    const n = inAnySale.length;
+    if (!n || running) return;
+    if (!(await confirm({
+      title: n === 1 ? "Take this listing out of its sale?" : `Take ${n} listings out of their sales?`,
+      message: "They go back to full price on eBay straight away. A sale left "
+        + "with nothing in it is ended.",
+      confirmLabel: "Take out of sale",
+      danger: true,
+    }))) return;
+    await runSale({
+      verb: "Taking out of the sale", url: "/api/sale-events/remove-listings", body: {},
+      did: (c) => `Took ${c} listing${c === 1 ? "" : "s"} out of ${c === 1 ? "its sale" : "their sales"}`,
+      empty: "Nothing to take out.", fail: "Couldn't take them out of the sale",
+    });
+  };
+
+  // "New sale…" from the Add to sale panel: the full dialog, over the ticks.
+  const createSale = async (body) => {
+    try {
+      const res = await postJson("/api/sale-events", body);
+      adoptSaleEvents(res);
+      toast(...bulkToast(res.report || {}, {
+        did: (n) => `“${res.event?.name}” — ${n} listing${n === 1 ? "" : "s"} at ${res.event?.percent_off}% off`,
+        empty: "None of those could go in a sale.",
+      }));
+      if (res.event) clearLive();
+      return !!res.event;
+    } catch (e) {
+      toast(`Couldn't start the sale: ${e.message}`, { kind: "error" });
+      return false;
     }
   };
 
@@ -520,24 +658,25 @@ export function ListingsView({ search = "" }) {
           >
             <ListingCard className={list ? undefined : "h-full"} layout={listingsLayout}
               item={item} onOpen={openListing} onDelete={askDelete}
-              onEnd={(item.status === "published" || item.status === "live") ? askEnd : undefined}
+              onEnd={isLive(item) ? askEnd : undefined}
               ending={endingId === item.id}
               /* Draft and live cards: a sold record offers Relist from its
                  archive instead, and a find was never a listing to copy. */
-              onDuplicate={(isDraft(item) || item.status === "published"
-                || item.status === "live" || item.status === "ended")
+              onDuplicate={(isDraft(item) || isLive(item) || item.status === "ended")
                 ? duplicateListing : undefined}
               /* Drafts only, like the category and format controls below: a
                  live listing's photos are the copy eBay already took. */
               onRotate={isDraft(item) ? rotateListingPhoto : undefined}
               skipped={skippedDraftIds.has(item.id)}
-              stale={(item.status === "published" || item.status === "live")
-                && dayAge(item.created_at) >= STALE_DAYS}
+              stale={isLive(item)
+                && dayAge(listedAt(item)) >= STALE_DAYS}
+              meta={sortMeta(item, listingsSort)}
+              sale={saleByListing.get(item.id)}
               metrics={metricsById[item.id]}
               showEbayChip={otherMarketplaces}
               selectable={selectable && isLive(item)}
               selected={!!liveSelection[item.id]}
-              onSelect={() => toggleLive(item.id)}
+              onSelect={toggleLive}
               /* Everything the grid can still change: live listings, drafts
                  and finds. A sale or an ended listing opens the editor, as
                  it always has — eBay does not revise a finished item. */
@@ -588,6 +727,7 @@ export function ListingsView({ search = "" }) {
   }
 
   const hasItems = user && listingsState.dbConfigured && items.length > 0;
+  const needsEbay = ebay.connected ? undefined : "Connect eBay under Settings first.";
 
   // Where a listing lives — the second cut, for a seller on more than one
   // marketplace. "eBay only" is the crosspost's own shopping list. Rendered
@@ -595,26 +735,11 @@ export function ListingsView({ search = "" }) {
   // the layout toggle, with a neutral pressed state: blue is the lifecycle
   // tab's, and a second blue row made two kinds of tab look like one.
   const marketControl = otherMarketplaces && (
-    <div role="group" aria-label="Where a listing lives"
-      className="inline-flex items-center gap-0.5 rounded-full border border-line bg-card p-0.5 shrink-0">
-      {MARKET_FILTERS.map((f) => (
-        <button
-          key={f.id}
-          type="button"
-          onClick={() => setListingsMarket(f.id)}
-          aria-pressed={marketId === f.id}
-          title={view.kind === "unavailable" ? undefined : `${marketCounts[f.id]} on this tab`}
-          className={cn(
-            "h-8 px-3 rounded-full text-[12px] font-semibold cursor-pointer transition-colors duration-150",
-            marketId === f.id
-              ? "bg-bg-sunken text-ink"
-              : "text-ink-secondary hover:text-ink",
-          )}
-        >
-          {f.label}
-        </button>
-      ))}
-    </div>
+    <Segmented label="Where a listing lives" value={marketId} onChange={setListingsMarket}
+      options={MARKET_FILTERS.map((f) => ({
+        id: f.id, label: f.label,
+        title: view.kind === "unavailable" ? undefined : `${marketCounts[f.id]} on this tab`,
+      }))} />
   );
 
   // Profit framework: on the archive tab, total up what the SOLD items with a
@@ -673,6 +798,7 @@ export function ListingsView({ search = "" }) {
               </span>
             </button>
           ))}
+          <SavedViewTabs />
         </div>
         <ViewToggle value={listingsLayout} onChange={setListingsLayout} />
       </div>
@@ -685,83 +811,97 @@ export function ListingsView({ search = "" }) {
           right end, so every narrowing control is on one line. */}
       <ListingFilters shown={items.length} hasListings={listingsState.items.length > 0}
         total={view.kind === "unavailable" ? null : marketCounts[marketId]}
-        trailing={marketControl} />
+        trailing={marketControl}
+        storeOptions={storeOptions} ebayOptions={ebayOptions} showStore={showStore}
+        saleEvents={saleEvents.items} />
 
-      {/* The live listings' bulk bar: arrives with the first tick on a live
-          listing and leaves with the last. Two rows, so three or four
-          actions stay in order on a phone instead of staggering down the
-          right edge: what is ticked (and the way out) above, the actions
-          below. One primary — End & relist — and the rest bordered. */}
+      {/* The live listings' bulk bar (LiveBulkBar): arrives with the first
+          tick on a live listing and leaves with the last. The few actions a
+          seller reaches for every week are on it; the rest are under More. */}
       {selectedLive.length > 0 && (
-        <div className="sticky top-2 z-20 flex flex-col gap-2 rounded-card
-          border border-blue/35 bg-blue-soft/90 backdrop-blur px-3 py-2.5 shadow-card">
-          <div className="flex items-center gap-2 min-w-0">
-            <label className="flex items-center gap-2 text-[13px] font-semibold text-ink cursor-pointer select-none min-w-0">
-              <input
-                type="checkbox"
-                checked={allLiveSelected}
-                ref={(el) => { if (el) el.indeterminate = selectedLive.length > 0 && !allLiveSelected; }}
-                onChange={toggleAllLive}
-                className="size-4 accent-(--brand-blue) cursor-pointer"
-              />
-              Select all
-              <span className="text-ink-secondary font-medium tabular-nums">
-                ({selectedLive.length} of {liveItems.length})
-              </span>
-            </label>
-            {running && (
-              <span className="text-[13px] text-ink-secondary tabular-nums truncate min-w-0"
-                role="status" aria-live="polite">
-                {running.verb} {Math.min(running.done + 1, running.total)} of {running.total}
-                {running.title ? ` · ${running.title}` : ""}
-              </span>
-            )}
-            <Button variant="ghost" size="sm" className="ml-auto shrink-0" onClick={clearLive}>
-              <X aria-hidden /> Clear
-            </Button>
-          </div>
-          {/* Phone: an equal-width two-column grid, an odd last action
-              spanning both. From sm up: a right-aligned row. */}
-          <div className={cn(
-            "grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end",
-            "[&>*]:w-full sm:[&>*]:w-auto",
-            "[&>*:last-child:nth-child(odd)]:col-span-2 sm:[&>*:last-child:nth-child(odd)]:col-span-1",
-          )}>
-            <Button variant="primary" size="sm" onClick={endAndRelist}
-              loading={running?.verb === "Relisting"}
-              disabled={!ebay.connected || !!running}
-              title={ebay.connected ? undefined : "Connect eBay under Settings first."}>
-              <RefreshCcw aria-hidden /> End & relist ({selectedLive.length})
-            </Button>
-            <Button variant="secondary" size="sm"
-              onClick={() => setLoweringOpen((o) => !o)}
-              aria-expanded={loweringOpen}
-              loading={running?.verb === "Lowering"}
-              disabled={!ebay.connected || !!running}
-              title={ebay.connected ? undefined : "Connect eBay under Settings first."}>
-              <TrendingDown aria-hidden /> Lower prices…
-            </Button>
-            {etsy && (
-              <Button variant="secondary" size="sm" onClick={() => setCrosspostOpen(true)}
-                disabled={!etsy.connected || !!running}
-                title={etsy.connected ? undefined
-                  : etsy.access_pending
-                    ? etsy.access_pending_note
-                    : "Connect Etsy under Settings → Cross-posting marketplaces first."}>
-                <ArrowRightLeft aria-hidden /> Crosspost to Etsy ({selectedLive.length})
-              </Button>
-            )}
-          </div>
-          <AnimatePresence initial={false}>
-            {loweringOpen && !running && (
-              <BulkAmountPanel amount={LOWER_PRICES} count={selectedLive.length}
-                onSubmit={lowerPrices} onCancel={() => setLoweringOpen(false)} />
-            )}
-          </AnimatePresence>
-        </div>
+        <LiveBulkBar
+          count={selectedLive.length} total={liveItems.length}
+          allSelected={allLiveSelected} onToggleAll={toggleAllLive} onClear={clearLive}
+          filtered={!isEmptyFilters(listingFilters) || !!q}
+          running={running} busy={!!running}
+          actions={[
+            { key: "relist", place: "bar", primary: true,
+              icon: <RefreshCcw aria-hidden />,
+              label: `End & relist (${selectedLive.length})`,
+              onClick: endAndRelist, loading: running?.verb === "Relisting",
+              disabled: !ebay.connected || !!running, title: needsEbay },
+            { key: "lower", place: "bar", icon: <TrendingDown aria-hidden />,
+              label: "Lower prices…", onClick: () => togglePanel("lower"),
+              expanded: openPanel === "lower", loading: running?.verb === "Lowering",
+              disabled: !ebay.connected || !!running, title: needsEbay },
+            { key: "discount", place: "bar", icon: <BadgePercent aria-hidden />,
+              label: "Apply discount…", onClick: () => togglePanel("discount"),
+              expanded: openPanel === "discount",
+              loading: running?.verb === "Starting the sale",
+              disabled: !ebay.connected || !!running, title: needsEbay
+                || "A sale eBay runs for a few days, with your price struck through." },
+            { key: "add-sale", place: "bar-wide", icon: <Tag aria-hidden />,
+              label: "Add to sale…", onClick: () => togglePanel("add-sale"),
+              expanded: openPanel === "add-sale",
+              loading: running?.verb === "Adding to the sale",
+              disabled: !ebay.connected || !!running, title: needsEbay },
+            etsy && { key: "crosspost", place: "bar-wide",
+              icon: <ArrowRightLeft aria-hidden />,
+              label: "Crosspost to Etsy…",
+              barLabel: `Crosspost to Etsy (${selectedLive.length})`,
+              onClick: () => setCrosspostOpen(true),
+              disabled: !etsy.connected || !!running,
+              title: etsy.connected ? undefined
+                : etsy.access_pending
+                  ? etsy.access_pending_note
+                  : "Connect Etsy under Settings → Cross-posting marketplaces first." },
+            { key: "remove-sale", place: "more", icon: <BadgeX aria-hidden />,
+              label: inAnySale.length
+                ? `Remove from sale (${inAnySale.length})` : "Remove from sale",
+              onClick: removeFromSale,
+              disabled: !ebay.connected || !!running || !inAnySale.length,
+              title: inAnySale.length ? undefined : "None of these is in a sale." },
+            { key: "shelf", place: "more", icon: <FolderInput aria-hidden />,
+              label: "Move to store category…", onClick: () => togglePanel("shelf"),
+              disabled: !ebay.connected || !!running, title: needsEbay },
+            { key: "offers", place: "more", icon: <HandCoins aria-hidden />,
+              label: "Send offers to watchers…", onClick: () => togglePanel("offers"),
+              disabled: !ebay.connected || !!running, title: needsEbay },
+            { key: "end", place: "more", icon: <CircleStop aria-hidden />,
+              label: "End listings", danger: true, divider: true,
+              onClick: endListings, disabled: !ebay.connected || !!running,
+              title: needsEbay },
+          ]}
+          panel={running ? null : openPanel === "lower" ? (
+            <BulkAmountPanel key="lower" amount={LOWER_PRICES} count={selectedLive.length}
+              onSubmit={lowerPrices} onCancel={() => setOpenPanel(null)} />
+          ) : openPanel === "offers" ? (
+            <BulkAmountPanel key="offers" amount={SEND_OFFERS} count={selectedLive.length}
+              onSubmit={sendOffers} onCancel={() => setOpenPanel(null)} />
+          ) : openPanel === "discount" ? (
+            <DiscountPanel key="discount" count={selectedLive.length}
+              inOtherSales={inEditableSale.length} limits={saleEvents.limits}
+              onSubmit={applyDiscount} onCancel={() => setOpenPanel(null)} />
+          ) : openPanel === "add-sale" ? (
+            <AddToSalePanel key="add-sale" count={selectedLive.length}
+              sales={saleEvents.items} inOtherSales={inEditableSale.length}
+              onSubmit={addToSale} onCancel={() => setOpenPanel(null)}
+              onNew={() => { setOpenPanel(null); setSaleDialog(true); }} />
+          ) : openPanel === "shelf" ? (
+            <StoreCategoryPanel key="shelf" count={selectedLive.length}
+              onSubmit={moveToShelf} onCancel={() => setOpenPanel(null)} />
+          ) : null}
+        />
+      )}
+      {saleDialog && (
+        <SaleDialog open onClose={() => setSaleDialog(false)} ticked={selectedLive}
+          shelves={storeCats.categories} activeCount={liveItems.length}
+          limits={saleEvents.limits} onSubmit={createSale} />
       )}
       {crosspostOpen && (
-        <CrosspostWizard items={selectedLive} onClose={() => setCrosspostOpen(false)} />
+        <Suspense fallback={null}>
+          <CrosspostWizard items={selectedLive} onClose={() => setCrosspostOpen(false)} />
+        </Suspense>
       )}
 
       {profit && (

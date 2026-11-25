@@ -31,7 +31,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // The `?v=` an <img> actually painted, read off the element's own src. React
 // state has by then moved on to the version being fetched, and asking it
 // instead is the confusion this hook exists to avoid.
-export function loadedVersion(src) {
+function loadedVersion(src) {
   const m = /[?&]v=(\d+)/.exec(src || "");
   return m ? Number(m[1]) : null;
 }

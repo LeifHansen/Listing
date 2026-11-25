@@ -8,7 +8,9 @@ import path from "node:path";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    // import.meta.dirname, not __dirname: this file is an ES module, and
+    // Vite's native config loader (its planned default) has no __dirname.
+    alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
   server: {
     proxy: {

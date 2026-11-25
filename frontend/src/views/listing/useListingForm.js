@@ -156,7 +156,7 @@ function payloadOf(form, base) {
 export function useListingForm() {
   const {
     session, setSession, health, loadListings, invalidateListings,
-    openListings, patchListing, activeBulk,
+    openListings, patchListing, activeBulk, etsyOptions,
   } = useApp();
   const { toast } = useToast();
 
@@ -211,7 +211,6 @@ export function useListingForm() {
   // buttons still work. ("Unsaved" is not a state: it is derived from the
   // diff, see pendingChanges.)
   const [saveState, setSaveState] = useState("idle");
-  const [lastSavedAt, setLastSavedAt] = useState(null);
   // Only the seller's own edits start the timer. Opening a listing normalises
   // a few values on the way into the form (a blank row dropped, a number
   // parsed) and a diff of that against the server would save a listing
@@ -280,7 +279,6 @@ export function useListingForm() {
       retryStep.current = 0;
       if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
       setSaveState("idle");
-      setLastSavedAt(null);
     }
   }, [sessionId, session]);
 
@@ -525,58 +523,35 @@ export function useListingForm() {
   // answered with the bytes of an earlier edit, the tile's turn came off over
   // that picture, and the seller watched the photo rotate and then rotate
   // straight back while the file on the server stayed turned. A version is
-  // now the rotated file's own timestamp when the server sends one, a fresh
-  // clock reading when it does not, and the first load of an open uses a
-  // base taken when the editor opened — none of them can repeat.
+  // now a fresh clock reading (bumped when the studio saves), and the first
+  // load of an open uses a base taken when the editor opened — neither can
+  // repeat.
   const [imageBase] = useState(() => Date.now());
   const [imageVersions, setImageVersions] = useState({});
-  const bumpImageVersion = useCallback((name, version) => {
+  const bumpImageVersion = useCallback((name) => {
     if (!name) return;
-    setImageVersions((m) => {
-      const prev = m[name] || imageBase;
-      // Unique is the property, not increasing: the tile only ever asks
-      // "is this the version the turn was applied to?". The server's value
-      // is the file's own timestamp on ITS clock, which may sit behind this
-      // one, and is still a value no load of this photo has used.
-      const next = Number.isFinite(version) && version !== prev
-        ? version : Math.max(prev + 1, Date.now());
-      return { ...m, [name]: next };
-    });
+    setImageVersions((m) => ({
+      ...m, [name]: Math.max((m[name] || imageBase) + 1, Date.now()),
+    }));
   }, [imageBase]);
 
-  // One-tap 90° clockwise rotate; only the rotated tile refreshes.
-  //
-  // RETHROWS after the toast. The listing card turns its photo the moment the
-  // button is pressed and undoes that turn if the rotate fails (see
-  // useOptimisticTurn) — and
-  // swallowing the error here meant the undo never ran. The photo stayed
-  // turned on screen while the saved file was untouched, and since a failed
-  // rotate also bumps no version, nothing else came along to correct it: the
-  // seller was left looking at an orientation that did not exist, on a tile
-  // that would keep it until the editor was reopened.
-  const rotateImage = useCallback(async (name) => {
-    try {
-      const res = await postJson("/api/rotate-image", { session_id: sessionId, name });
-      bumpImageVersion(name, res?.version);
-      // The saved file changed, so every card showing this listing is now
-      // showing a photo that no longer exists. See store.invalidateListings.
-      invalidateListings();
-    } catch (e) {
-      toast(`Couldn't rotate: ${e.message}`, { kind: "error" });
-      throw e;
-    }
-  }, [sessionId, bumpImageVersion, invalidateListings, toast]);
+  // The photo list, written to the form and the session together. A form and
+  // session that disagree about the photos are what made a delete followed by
+  // a drag come back as "this listing's photos changed somewhere else" — and
+  // the session's copy is what the next full save spreads.
+  const setImages = useCallback((imgs) => {
+    setForm((f) => ({ ...f, images: imgs }));
+    setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+  }, [setSession]);
 
   // One-click by default; pass a confirmFn to gate it behind a dialog.
   // Optimistic: the tile disappears immediately and comes back only if the
   // server delete fails.
   //
-  // The SESSION is updated alongside the form, and the server's remaining
-  // list is applied on top. Both matter beyond tidiness: the delete is now
-  // persisted server-side (see /api/delete-image), so its answer is the list
-  // the next reorder is checked against — and a form and session that
-  // disagree about the photos are what made a delete followed by a drag come
-  // back as "this listing's photos changed somewhere else".
+  // The SESSION is updated alongside the form (setImages), and the server's
+  // remaining list is applied on top. Both matter beyond tidiness: the delete
+  // is now persisted server-side (see /api/delete-image), so its answer is
+  // the list the next reorder is checked against.
   const deleteImage = useCallback(async (name, confirmFn) => {
     const prev = form.images || [];
     if (prev.length <= 1) {
@@ -589,10 +564,6 @@ export function useListingForm() {
       confirmLabel: "Delete",
       danger: true,
     }))) return;
-    const setImages = (imgs) => {
-      setForm((f) => ({ ...f, images: imgs }));
-      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
-    };
     const next = prev.filter((n) => n !== name);
     setImages(next);
     try {
@@ -605,7 +576,7 @@ export function useListingForm() {
       setImages(prev);
       toast(`Couldn't delete the photo: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
+  }, [form.images, sessionId, setImages, invalidateListings, toast]);
 
   // Persist a new photo order. The FIRST image is the eBay gallery/hero photo,
   // so order matters — it must survive a reload and be what we publish. Update
@@ -619,30 +590,22 @@ export function useListingForm() {
   const reorderImages = useCallback(async (nextImages) => {
     const imgs = [...nextImages];
     const previous = form.images || [];
-    setForm((f) => ({ ...f, images: imgs }));
-    setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: imgs } } : s));
+    setImages(imgs);
     if (!sessionId) return;
     try {
-      const res = await api(`/api/listings/${sessionId}/images/order`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ images: imgs }),
-      });
+      const res = await patchJson(`/api/listings/${sessionId}/images/order`,
+        { images: imgs });
       // The server's answer wins — it is what eBay will be handed.
       const saved = res.images || imgs;
-      if (saved.join("|") !== imgs.join("|")) {
-        setForm((f) => ({ ...f, images: saved }));
-        setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: saved } } : s));
-      }
+      if (saved.join("|") !== imgs.join("|")) setImages(saved);
       // The first image is the card's thumbnail, so a reorder can change what
       // every listing card is showing.
       invalidateListings();
     } catch (e) {
-      setForm((f) => ({ ...f, images: previous }));
-      setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: previous } } : s));
+      setImages(previous);
       toast(`Photo order not saved: ${e.message}`, { kind: "error" });
     }
-  }, [form.images, sessionId, setForm, setSession, invalidateListings, toast]);
+  }, [form.images, sessionId, setImages, invalidateListings, toast]);
 
   // Upload more photos onto this listing: optimize server-side, append the new
   // files to the image order, and persist.
@@ -717,8 +680,7 @@ export function useListingForm() {
           // Still on this listing: onto its photos and fields as they are
           // now, which is also what the editor goes on showing.
           const next = append(now.images);
-          setForm((f) => ({ ...f, images: next }));
-          setSession((s) => (s ? { ...s, listing: { ...(s.listing || {}), images: next } } : s));
+          setImages(next);
           payload = { ...now.collect(), images: next };
         } else {
           // The seller has moved on to another listing, whose editor this
@@ -751,7 +713,7 @@ export function useListingForm() {
       setAddingPhotos(false);
       setAddingStatus("");
     }
-  }, [sessionId, setForm, setSession, invalidateListings, toast, rememberSaved]);
+  }, [sessionId, setImages, invalidateListings, toast, rememberSaved]);
 
   // ---------- the listing's video ----------
   // eBay takes ONE video per listing, MP4, and this is the whole of the
@@ -848,7 +810,9 @@ export function useListingForm() {
 
   // ---------- pre-publish checklist ----------
   const runPreflight = useCallback(async () => {
-    setAiBusy(["Checking everything the marketplaces require…"]);
+    setAiBusy([chipTargets && chipTargets.length > 1
+      ? "Checking everything the marketplaces require…"
+      : "Checking everything eBay requires…"]);
     try {
       // The mode the PUBLISH will actually run in: an edit to a live listing
       // is a revise, and the server checks a revise against what it resends,
@@ -1255,7 +1219,6 @@ export function useListingForm() {
           setSaved(listing);
           retryStep.current = 0;
           setSaveState("saved");
-          setLastSavedAt(Date.now());
         }
         // The card in the grid, without a refetch: a refetch per keystroke
         // re-sorts the drafts under the editor and re-reads the whole store.
@@ -1336,7 +1299,6 @@ export function useListingForm() {
   // the chips, Etsy's own rules (its category, who/when made, its three
   // profiles) join the list, judged against the shop's settings the store
   // holds — so "Ready to publish" means ready for all of them.
-  const { etsyOptions } = useApp();
   const blockers = useMemo(
     () => blockersFor(collect(), chipTargets, {
       aspects: categoryMeta.aspects.length ? categoryMeta.aspects : null,
@@ -1409,19 +1371,17 @@ export function useListingForm() {
     publish, publishResult, runPreflight, dismissPublishResult,
     fixTarget, setFixTarget, fixLevel,
     refine,
-    autofillSpecifics,
     suggestCategories, catSuggestions, chooseCategory,
     checkMarketPrice, priceData,
-    categoryMeta, loadCategoryMeta,
+    categoryMeta,
     getSpecific, getSpecificValues, upsertSpecific,
     toggleSpecificValue,
-    deleteImage, rotateImage, reorderImages, addImages, addingPhotos, addingStatus,
+    deleteImage, reorderImages, addImages, addingPhotos, addingStatus,
     videos, addVideo, removeVideo, addingVideo,
     imageVersions, imageBase, bumpImageVersion,
     completion, blockers,
-    // Autosave: the one-word status for the header, when the last save
-    // landed, whether anything on screen is unsaved, and a way to send it
-    // now (Done and the publish path use it).
-    saveStatus, lastSavedAt, dirty, flushSave, autosaveOn,
+    // Autosave: the one-word status for the header, and a way to send what
+    // is unsaved now (Done and the publish path use it).
+    saveStatus, flushSave,
   };
 }

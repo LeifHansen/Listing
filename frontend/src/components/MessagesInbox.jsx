@@ -74,18 +74,18 @@ export function ConversationRow({ conversation: c, active, showSource, onClick }
 export function inboxEmptyCopy(messages) {
   const { reason, message, sources } = messages;
   if (reason === "not_connected" || reason === "disabled") {
-    return message || "Connect a marketplace to see buyer messages here.";
+    return message || "Connect eBay to see buyer messages here.";
   }
   if (reason === "needs_reconnect") {
     return message || "Reconnect in Settings to grant message access.";
   }
   if (reason === "error") {
-    return message || "Couldn't reach your marketplaces just now.";
+    return message || "Couldn't reach eBay just now.";
   }
   const live = (sources || []).filter((s) => s.available).length;
   return live
     ? "No buyer messages yet. Questions from buyers land here — never eBay's own mail."
-    : "No marketplace is connected for messages yet.";
+    : "Connect eBay to see buyer messages here.";
 }
 
 // MessagesInbox — the TopBar inbox: unread badge, recent conversations, and a
@@ -172,7 +172,7 @@ export function MessagesInbox() {
                 {messages.reason === "not_connected" && (
                   <Button variant="soft" size="sm" className="mt-3"
                     onClick={() => { setOpen(false); setView("settings"); }}>
-                    Connect a marketplace
+                    Connect eBay
                   </Button>
                 )}
               </div>

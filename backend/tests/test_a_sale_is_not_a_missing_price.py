@@ -23,8 +23,6 @@ that was never wrong.
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from backend import ebay_errors
@@ -118,10 +116,10 @@ def test_it_reaches_the_seller_through_a_trading_error_too():
 def test_a_genuinely_missing_price_still_says_so():
     """The branch this narrows still has a job. Fails against a fix that
     simply deletes the price claim."""
-    issue = ebay_errors.from_response(json.dumps({"errors": [{
+    issue = ebay_errors.explain({
         "errorId": 25002,
         "message": "The price is missing or is not a valid amount.",
-    }]}))[0]
+    })
 
     assert issue["target"] == "price"
     assert issue["title"] == "The price is missing or invalid"

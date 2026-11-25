@@ -4,6 +4,7 @@ import { Field, Input } from "@/components/ui/fields";
 import { cn } from "@/lib/utils";
 import { useSettings } from "./context";
 import { CardSave, PrefsGate, PrefSelect, PrefToggle } from "./PrefControls";
+import { useAutosave } from "./useAutosave";
 
 /**
  * What every NEW listing starts with: whether it takes offers (and at what
@@ -160,7 +161,7 @@ function PromotedListingsCard() {
 // ------------------------------------------------------- pricing strategy
 
 // Where on the market range the AI prices every draft and comp suggestion.
-export const PRICING_STRATEGIES = [
+const PRICING_STRATEGIES = [
   { value: "quick_flip", label: "Quick Flip", blurb: "Priced at the low end of comps to sell fast." },
   { value: "median", label: "Median Pricing", blurb: "Typical middle-of-market price." },
   { value: "long_sale", label: "Long Sale", blurb: "Priced at the high end — patient, maximizes the sale." },
@@ -170,18 +171,9 @@ function PricingStrategyPicker() {
   const { prefs, savePref } = useSettings();
   const save = useCallback((value) => savePref("pricing_strategy", value), [savePref]);
   // The segmented control saves on tap; the status line under it answers.
-  const [status, setStatus] = useState({ kind: "idle" });
+  const { status, run } = useAutosave(save);
   const current = PRICING_STRATEGIES.find((s) => s.value === prefs.pricing_strategy);
-  const pick = async (value) => {
-    setStatus({ kind: "saving" });
-    try {
-      await save(value);
-      setStatus({ kind: "saved" });
-      setTimeout(() => setStatus((s) => (s.kind === "saved" ? { kind: "idle" } : s)), 2000);
-    } catch (e) {
-      setStatus({ kind: "error", message: e.message || "something went wrong" });
-    }
-  };
+  const pick = (value) => run(value).catch(() => {});
   return (
     <div className="flex flex-col gap-2 max-w-lg">
       <div role="radiogroup" aria-label="Pricing strategy"

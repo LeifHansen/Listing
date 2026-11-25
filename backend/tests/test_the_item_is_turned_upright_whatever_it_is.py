@@ -378,7 +378,7 @@ def test_past_its_budget_the_pass_stops_asking(tmp_path, model, monkeypatch):
     paths = [_photo(tmp_path, f"p{i}.jpg") for i in range(20)]
     monkeypatch.setattr(orient, "_TOTAL_BUDGET", -1.0)   # already spent
     monkeypatch.setattr(orient, "_PER_PHOTO", -1.0)
-    assert orient.detect_rotations(paths) == {}
+    assert orient.screen(paths).rotations == {}
     assert model.calls == []
 
 
@@ -394,7 +394,7 @@ def test_a_bulk_pile_gets_a_budget_that_grows_with_it():
 
 def test_a_cancelled_batch_stops_paying_for_orientation(tmp_path, model):
     paths = [_photo(tmp_path, f"p{i}.jpg") for i in range(20)]
-    assert orient.detect_rotations(paths, should_stop=lambda: True) == {}
+    assert orient.screen(paths, should_stop=lambda: True).rotations == {}
     assert model.calls == []
     # And the photo pass itself does not start on a batch already called off.
     with pytest.raises(images.Stopped):

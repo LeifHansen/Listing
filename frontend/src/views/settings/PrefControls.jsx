@@ -27,7 +27,7 @@ export function PrefsGate({ height = "h-10", children }) {
 
 /** A switch that saves itself. Off is sent as a real 0: the server merges,
  * and a key dropped instead of sent would leave the last "on" standing. */
-export function PrefToggle({ k, label, note, help }) {
+export function PrefToggle({ k, label, note }) {
   const { prefs, savePref } = useSettings();
   const save = useCallback((on) => savePref(k, on ? 1 : 0), [k, savePref]);
   const { status, run } = useAutosave(save);
@@ -46,7 +46,6 @@ export function PrefToggle({ k, label, note, help }) {
         onChange={change}
         label={label}
         note={note}
-        help={help}
         disabled={status.kind === "saving"}
       />
       <SaveStatus status={status} onRetry={() => change(checked)} className="pl-14" />
@@ -56,14 +55,14 @@ export function PrefToggle({ k, label, note, help }) {
 
 /** A select that saves itself. Not optimistic: it is disabled while the
  * answer is on its way, which a select reads naturally. */
-export function PrefSelect({ k, label, note, children, parse = (v) => v }) {
+export function PrefSelect({ k, label, note, children }) {
   const { prefs, savePref } = useSettings();
   const save = useCallback((value) => savePref(k, value), [k, savePref]);
   const { status, run } = useAutosave(save);
   const [last, setLast] = useState(null);
   const change = (value) => {
     setLast(value);
-    run(parse(value)).catch(() => {});
+    run(value).catch(() => {});
   };
   return (
     <Field label={label} note={note}>

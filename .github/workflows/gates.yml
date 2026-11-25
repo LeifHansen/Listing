@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - name: Install
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - name: Install
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
@@ -156,12 +156,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
       - name: Install
@@ -187,7 +187,7 @@ jobs:
       # real file means a new dependency cannot drift out of sync with what the
       # app actually needs to boot.
       - name: Server deps
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.txt pytest pytest-xdist
       # THE WHOLE SUITE, against the dependencies the app actually ships with.
       #
       # This is the only job with fastapi AND Pillow AND anthropic together,
@@ -212,12 +212,17 @@ jobs:
       # it — the same lesson, one step later. A test file cannot be forgotten
       # here, because nobody has to remember it.
       #
-      # ~2500 tests, about two and a half minutes.
+      # ~4350 tests. Spread over the runner's cores (-n auto): run one at a
+      # time they took over four minutes, the longest step on the way to a
+      # merge and to every deploy (deploy.yml runs these same gates). Each
+      # test still runs in a fresh fixture scope; a test that only passes in
+      # one order is a bug in the test, and the suite was cleared of the
+      # ones that leaked state between workers before this was switched on.
       - name: The whole backend suite
         shell: bash
         run: |
           set -o pipefail
-          pytest backend/tests \
+          pytest backend/tests -n auto \
                  -q -rs | tee /tmp/api-tests.log
           # NOTHING may skip here, and that is the whole guarantee. This job
           # has every dependency the app has, so a skip means a test decided

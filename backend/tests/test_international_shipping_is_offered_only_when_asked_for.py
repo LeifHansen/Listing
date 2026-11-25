@@ -219,7 +219,7 @@ def test_the_two_switches_do_not_read_each_other(monkeypatch):
     agreed to sell abroad, and vice versa."""
     monkeypatch.setattr(listing_sync.db, "get_prefs",
                         lambda _uid: {"allow_offers": 1})
-    assert listing_sync.offers_enabled("u1") is True
+    assert listing_sync.offers_terms("u1")["enabled"] is True
     assert listing_sync.international_shipping_enabled("u1") is False
 
 

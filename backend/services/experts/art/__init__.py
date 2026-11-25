@@ -33,10 +33,7 @@ name = "art"
 # claiming what is not in the photos only has teeth if something tells the
 # pass that a mat is why it cannot see them.
 #
-# Original note, still true of the first two:
-# the second is the case the first gets wrong on its own (the back of a
-# painting IS a blank canvas, and reading it as one writes a $17 listing for a
-# painting). Bound here so no stage can pick up one without the other.
+# The first two are bound here so no stage can pick up one without the other.
 _FULL = ART_RULE + BLANK_CANVAS_RULE
 # ...plus how the piece is presented, at the two stages that decide or
 # write it: the draft, and the eBay specifics fill that answers Framing

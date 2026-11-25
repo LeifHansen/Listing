@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { Loader2, Tag, TrendingUp } from "lucide-react";
-import { patchJson, postJson } from "@/lib/api";
+import { postJson } from "@/lib/api";
 import { priceView } from "@/lib/priceLookup";
 import { cn, formatMoney } from "@/lib/utils";
 import { useApp } from "@/store";
-import { useToast } from "@/components/ui/Toaster";
 import { Input } from "@/components/ui/fields";
 import {
   AUCTION, AUCTION_BIN, isAuctionFormat, listingFormat,
 } from "@/lib/listingFormat";
+import { useDraftPatch } from "./CategoryQuickPick";
 
 /* What a draft is ASKING, on the face of the card — and, for an auction, what
  * eBay's own market says it should open at.
@@ -285,24 +285,7 @@ export function PriceQuickEdit({ listing, onPick, saving, className }) {
  * the change to eBay.
  */
 export function DraftPriceEdit({ item, className }) {
-  const { loadListings } = useApp();
-  const { toast } = useToast();
-  const [saving, setSaving] = useState(false);
-  const save = async (patch) => {
-    setSaving(true);
-    try {
-      // Named fields only, never the whole listing this card happens to hold.
-      await patchJson(`/api/listings/${item.id}`, patch);
-      // The card's Publish gate reads these numbers (a draft with no price is
-      // blocked, and so is an auction with no starting bid), so the cache has
-      // to see the change too.
-      await loadListings({ quiet: true });
-    } catch (e) {
-      toast(`Couldn't save the price: ${e.message}`, { kind: "error" });
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { saving, save } = useDraftPatch(item, "the price");
   return (
     <PriceQuickEdit listing={item.listing} onPick={save} saving={saving}
       className={className} />

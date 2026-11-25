@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -160,13 +161,6 @@ def video_path(session_id: str) -> Path:
     return session_dir(session_id) / VIDEO_SUBDIR
 
 
-def list_videos(session_id: str) -> list[str]:
-    d = video_path(session_id)  # read-only — never mkdir on a lookup
-    if not d.is_dir():
-        return []
-    return sorted((p.name for p in d.glob("*") if p.is_file()), key=natural_key)
-
-
 def history_dir(session_id: str) -> Path:
     d = session_dir(session_id) / "history"
     d.mkdir(parents=True, exist_ok=True)
@@ -271,6 +265,40 @@ def load_item_notes(session_id: str) -> str:
         return (session_dir(session_id) / ITEM_NOTES_FILE).read_text().strip()
     except (OSError, InvalidSessionId):
         return ""
+
+
+LOOKUP_FILE = "google_lookup.json"
+
+
+def save_lookup(session_id: str, found: dict | None) -> None:
+    """Remember what Google image search said this item is and sells for.
+
+    Beside the item notes and for the same reason: it is an INPUT to the
+    draft — the identification the seller reviewed and approved at the
+    guidance step — so a re-run of the identify chain ("Start over", a resume
+    after a deploy) drafts from the answer the seller saw rather than asking
+    Google again and getting a different one. None clears it.
+
+    Best-effort, like the notes: a lookup that cannot be written must never
+    fail the batch the seller is waiting on.
+    """
+    try:
+        path = ensure_session(session_id) / LOOKUP_FILE
+        if found:
+            path.write_text(json.dumps(found))
+        else:
+            path.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError, InvalidSessionId) as exc:
+        log.warning(f"storage: could not save the Google lookup for {session_id}: {exc}")
+
+
+def load_lookup(session_id: str) -> dict | None:
+    """The saved Google lookup for this session, or None."""
+    try:
+        data = json.loads((session_dir(session_id) / LOOKUP_FILE).read_text())
+    except (OSError, ValueError, InvalidSessionId):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_listing(session_id: str) -> dict | None:
@@ -444,6 +472,26 @@ def earliest_snapshot(session_id: str, name: str) -> Optional[Path]:
     return min(stamped)[1] if stamped else None
 
 
+def _prune_older(directory: Path, cutoff: float):
+    """Delete each file directly inside `directory` last modified at or
+    before `cutoff`, yielding its size as it goes.
+
+    The walk the three prune_* passes below share. A file that will not stat
+    or unlink is skipped and the rest are still pruned; a directory that
+    will not list raises, and the caller decides whether that ends its pass.
+    """
+    if not directory.is_dir():
+        return
+    for p in directory.iterdir():
+        try:
+            st = p.stat()
+            if stat.S_ISREG(st.st_mode) and st.st_mtime <= cutoff:
+                p.unlink(missing_ok=True)
+                yield st.st_size
+        except Exception:  # noqa: BLE001 - keep pruning the rest
+            continue
+
+
 def prune_originals(max_age_seconds: int) -> int:
     """Delete source uploads (session original/ dirs) and the as-shot copies
     beside them, older than the cutoff.
@@ -483,15 +531,9 @@ def prune_originals(max_age_seconds: int) -> int:
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
             for sub in ("original", "as_shot", "vision"):
-                old_dir = d / sub
                 try:
-                    if not old_dir.is_dir():
-                        continue
-                    for p in old_dir.iterdir():
-                        if p.is_file() and p.stat().st_mtime <= cutoff:
-                            size = p.stat().st_size
-                            p.unlink(missing_ok=True)
-                            freed += size
+                    for size in _prune_older(d / sub, cutoff):
+                        freed += size
                 except Exception:  # noqa: BLE001 - keep pruning the rest
                     continue
     except Exception as exc:  # noqa: BLE001
@@ -510,15 +552,9 @@ def prune_history(max_age_seconds: int) -> int:
             return 0
         cutoff = time.time() - max_age_seconds
         for d in base.iterdir():
-            hist = d / "history"
             try:
-                if not hist.is_dir():
-                    continue
-                for p in hist.iterdir():
-                    if p.is_file() and p.stat().st_mtime <= cutoff:
-                        size = p.stat().st_size
-                        p.unlink(missing_ok=True)
-                        freed += size
+                for size in _prune_older(d / "history", cutoff):
+                    freed += size
             except Exception:  # noqa: BLE001
                 continue
     except Exception as exc:  # noqa: BLE001
@@ -536,15 +572,8 @@ def prune_exports(max_age_seconds: int) -> int:
         base = config.EXPORTS_DIR
         if not base.exists():
             return 0
-        cutoff = time.time() - max_age_seconds
-        for p in base.iterdir():
-            try:
-                if p.is_file() and p.stat().st_mtime <= cutoff:
-                    size = p.stat().st_size
-                    p.unlink(missing_ok=True)
-                    freed += size
-            except Exception:  # noqa: BLE001 - keep pruning the rest
-                continue
+        for size in _prune_older(base, time.time() - max_age_seconds):
+            freed += size
     except Exception as exc:  # noqa: BLE001
         log.warning(f"storage: prune_exports failed: {exc}")
     return freed

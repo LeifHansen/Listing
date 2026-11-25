@@ -1,20 +1,27 @@
 {
   "name": "thryft-frontend",
   "private": true,
-  "version": "2.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/*.test.mjs",
     "test:watch": "vitest",
     "lint": "eslint src vitest.config.js eslint.config.js",
     "smoke": "node scripts/smoke.mjs",
     "reach": "node scripts/reach.mjs",
-    "brand:assets": "node scripts/brand-icon.mjs"
+    "brand:assets": "node scripts/brand-icon.mjs",
+    "native:ios": "node scripts/native-prepare.mjs ios",
+    "native:android": "node scripts/native-prepare.mjs android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/browser": "^8.0.5",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
     "capacitor-secure-storage-plugin": "^0.13.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -25,6 +32,7 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",

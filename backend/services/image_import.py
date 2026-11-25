@@ -105,11 +105,6 @@ def read_own_media(session_id: str, name: str) -> bytes:
     raise ValueError(f"own photo {session_id}/{name} is no longer on the server")
 
 
-# The name the adoption path has always used; kept so nothing that reads it
-# by the old name (tests included) has to move on the same day.
-_read_own_media = read_own_media
-
-
 def fetch_ebay_image(url: str) -> bytes:
     """Download one image from eBay's CDN with the full guard rail: HTTPS
     only, allowlisted host (re-checked on every redirect hop), bounded
@@ -186,7 +181,7 @@ def import_listing_images(record_id: str, urls: list[str]) -> list[str]:
         i, url = job
         try:
             own = own_media_ref(url)
-            data = _read_own_media(*own) if own else fetch_ebay_image(url)
+            data = read_own_media(*own) if own else fetch_ebay_image(url)
             img = Image.open(BytesIO(data))
             img.load()
             img = ImageOps.exif_transpose(img).convert("RGB")

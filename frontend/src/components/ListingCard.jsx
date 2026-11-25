@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import {
   ImageOff, ArrowRight, Trash2, Eye, Heart, RotateCcw, RotateCw, Loader2,
   SkipForward, Undo2, Clock, AlertTriangle, Ban, HandCoins, Gavel, Pencil,
-  ChevronDown, Copy,
+  ChevronDown, Copy, Split,
 } from "lucide-react";
 import { cn, formatMoney, mediaUrl, timeUntil } from "@/lib/utils";
 import { auctionEndLabel, useAuctionCountdown } from "@/lib/auctionClock";
@@ -14,7 +14,8 @@ import { hasSalePrice, saleDiscount, salePrice } from "@/lib/sales";
 import { askingPrice, formatSummary, isAuctionFormat } from "@/lib/listingFormat";
 import { useOptimisticTurn } from "@/views/listing/useOptimisticTurn";
 import { quickEditPanelId } from "@/views/listing/QuickEdit";
-import { buyerWaiting, keptWhenEnded } from "@/lib/listingsView";
+import { buyerWaiting, isDraft, isLive, keptWhenEnded } from "@/lib/listingsView";
+import { effectiveState, salePriceFor, saleWhen } from "@/lib/saleEvents";
 
 // Views / watchers on a live listing — eBay's traffic, where we have it.
 function MetricsRow({ views, watchers, className }) {
@@ -235,6 +236,35 @@ function NeedsInfoChip({ className, title }) {
   );
 }
 
+// A live listing in one of the seller's eBay sales (lib/saleEvents): while the
+// sale runs, the asking price struck through beside what buyers pay now, and
+// how long that lasts; before it starts, when it will. The figure is worked
+// out here from the sale's percentage — eBay rounds its own (the tooltip says
+// "about"), and the listing's price itself never changes: the sale is eBay's,
+// not an edit.
+function SaleLine({ sale, listing: l, className }) {
+  const state = effectiveState(sale);
+  if (state === "ended") return null;
+  const pct = sale.percent_off;
+  const running = state === "running";
+  const title = `In “${sale.name}”${pct != null ? ` — ${pct}% off` : ""}, ${saleWhen(sale)}.`
+    + (running && pct != null ? " Buyers see about this price, with yours struck through." : "");
+  return (
+    <p className={cn("flex flex-wrap items-center gap-1.5 text-[12px] font-semibold text-ink-secondary", className)}
+      title={title}>
+      {running && pct != null && l.price > 0 && (
+        <span className="line-through text-ink-faint tabular-nums">
+          {formatMoney(l.price, l.currency)}
+        </span>
+      )}
+      <span className={cn("rounded-full px-1.5 py-0.5 text-[11px] font-bold tabular-nums",
+        running ? "bg-success-soft text-success" : "bg-blue-soft text-blue")}>
+        {pct != null ? `−${Math.round(pct)}%` : "Sale"} · {saleWhen(sale)}
+      </span>
+    </p>
+  );
+}
+
 // What it actually went for. An accepted offer settles BELOW the asking price
 // and eBay never moves the listing's own price, so a sold card showing `price`
 // was showing what was asked. The ask stays visible, struck through, with how
@@ -313,6 +343,16 @@ function turnStyle(spin, square) {
   };
 }
 
+// The round icon button every card control is drawn as, at rest. Each one
+// adds its own hover colour: blue for the working controls, red for the two
+// that take a listing away (End and Delete).
+const ROUND_BUTTON = cn(
+  "grid place-items-center size-8 rounded-full cursor-pointer",
+  "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
+);
+const HOVER_BLUE = "hover:text-blue hover:border-blue/40 transition-colors";
+const HOVER_RED = "hover:text-error hover:border-error/40 transition-colors";
+
 // ListingCard — one saved listing, as a grid tile (`layout="grid"`, the
 // default) or as a compact row (`layout="list"`). Click opens it in the
 // workflow; when onDelete is provided, a trash button removes it. The delete
@@ -321,7 +361,7 @@ function turnStyle(spin, square) {
 // `metrics` (optional) shows eBay views/watchers for a live listing, and
 // lights the card green when it carries a bid or a pending offer.
 // `selectable` puts a checkbox on the card: ticking it reports through
-// `onSelect` and shows through `selected`, which is what powers the bulk
+// `onSelect(id)` and shows through `selected`, which is what powers the bulk
 // actions in Drafts (publish / merge / delete selected). It is a tick box,
 // not a mode — the card goes on opening when the card is clicked.
 // `onRotate(id, name)` puts a rotate button on the photo: one tap turns the
@@ -339,6 +379,12 @@ function turnStyle(spin, square) {
 // toggle: the panel (views/listing/QuickEdit) is the caller's to place, under
 // the card, where the grid can make room for it without stretching the cards
 // beside it.
+// `sale` is the eBay sale this listing is in, or undefined (store
+// saleByListing): a struck-through price and a chip while it runs.
+// `meta` is one short muted line under the title — the fact the grid is
+// currently ordered by when the card does not otherwise show it ("Listed
+// Mar 12" under a date sort; lib/listingSort.sortMeta). A string, so the memo
+// below still holds.
 // memo'd, and it earns it: the app context holds the 60s notification poll, so
 // every unread-count refresh re-rendered the whole tree -- one framer-motion
 // card per listing, reconciled once a minute for a bell badge, and once every
@@ -346,14 +392,14 @@ function turnStyle(spin, square) {
 // parents already keep stable.
 export const ListingCard = memo(function ListingCard({
   item, onOpen, onDelete, onEnd, ending, onStartOver, startingOver, onSkip, skipped,
-  onDuplicate, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
+  onDuplicate, onSplit, onRotate, stale, metrics, needsInfo, needsInfoWhy, selectable, selected, onSelect,
   onQuickEdit, quickEditOpen = false,
-  showEbayChip = false,
+  showEbayChip = false, meta = "", sale,
   layout = "grid", className,
 }) {
   const list = layout === "list";
   const l = item.listing || {};
-  const draft = item.status === "draft" || item.status === "dry_run";
+  const draft = isDraft(item);
   // No "N to review" chip here any more. It counted the item specifics the
   // AI had inferred rather than read, and every one of them was already on
   // the draft and already publishable — so the number named no work, only a
@@ -364,30 +410,30 @@ export const ListingCard = memo(function ListingCard({
   // has stood behind it, and the AI's doubts about the first draft are not
   // a fact about the listing that is selling.
   const confidence = draft ? l.ai_confidence : "";
-  const isLive = item.status === "published" || item.status === "live";
-  const hasMetrics = isLive && metrics
+  const live = isLive(item);
+  const hasMetrics = live && metrics
     && (metrics.views != null || metrics.watchers != null);
   // Buyers waiting on an answer. Live listings only — an offer on anything
   // else is settled history. `> 0` is deliberately the whole test: the count
   // is ABSENT, not zero, when eBay couldn't be asked (see services/metrics),
   // so a missing number draws nothing rather than "no offers".
-  const offers = isLive && metrics && metrics.offers > 0 ? metrics.offers : 0;
+  const offers = live && metrics && metrics.offers > 0 ? metrics.offers : 0;
   // Bids on an auction, on the same terms: live only, and absent-is-unknown.
-  const bids = isLive && metrics && metrics.bids > 0 ? metrics.bids : 0;
+  const bids = live && metrics && metrics.bids > 0 ? metrics.bids : 0;
   // When that auction stops taking them, from the same read — so the same
   // rule again: live only, and a card with no answer shows no clock rather
   // than a deadline it made up. eBay reports this for auctions and nothing
   // else (backend/services/ebay_trading._auction_ends_at), which is what
   // keeps a Buy It Now from counting down to its own renewal date.
-  const endsAt = (isLive && metrics && metrics.ends_at) || "";
+  const endsAt = (live && metrics && metrics.ends_at) || "";
   // Whether eBay has COUNTED the bids, as opposed to not having been asked:
   // the chip says "No bids" for the first and nothing for the second.
-  const bidsKnown = isLive && !!metrics && metrics.bids != null;
+  const bidsKnown = live && !!metrics && metrics.bids != null;
   // A live auction carries everything the status, format and bid chips said
   // on one chip, with its clock (see AuctionChip). Its format is the usual
   // sign; a bid count or a deadline is proof enough on its own, since eBay
   // reports either for auctions and nothing else.
-  const liveAuction = isLive
+  const liveAuction = live
     && (isAuctionFormat(l.listing_format) || bids > 0 || !!endsAt);
   // What that chip reads off the overlay -- which a live auction can be
   // drawn without, before eBay has been asked.
@@ -459,7 +505,7 @@ export const ListingCard = memo(function ListingCard({
   if (thumb !== failedFor) { setFailedFor(thumb); setImgFailed(false); }
   // Origin — created here vs. imported from eBay — only where the distinction
   // matters (the listing exists on eBay). Hover for exactly what each allows.
-  const showOrigin = isLive || item.status === "ended" || item.status === "sold";
+  const showOrigin = live || item.status === "ended" || item.status === "sold";
 
   // The turn goes on a box around the <img>, not on the <img>: the image
   // animates its own transform for the hover zoom, and a turn coming off
@@ -487,12 +533,16 @@ export const ListingCard = memo(function ListingCard({
   // null -- so every auction in the store used to show "no price yet" beside
   // a starting bid it was never asked for. See lib/listingFormat.askingPrice.
   const asking = askingPrice(l);
+  // On sale right now: the card leads with what a buyer pays. Fixed-price
+  // only — an auction is never in a sale (eBay's sales are for Buy It Now).
+  const onSale = live && sale && effectiveState(sale) === "running"
+    && !isAuctionFormat(l.listing_format) ? salePriceFor(l.price, sale.percent_off) : null;
   // The chip is silent on Buy It Now (see badges.FormatBadge), so this is
   // "does this listing sell in a way the price alone doesn't explain".
   const showFormat = isAuctionFormat(l.listing_format);
   const price = (
     <PriceBadge
-      value={sold ? soldFor : asking.amount}
+      value={sold ? soldFor : onSale ?? asking.amount}
       currency={l.currency}
       prefix={sold ? undefined : asking.prefix}
       approx={inventory || (sold && !knownSale)}
@@ -524,9 +574,7 @@ export const ListingCard = memo(function ListingCard({
       aria-label="Rotate photo 90°"
       title="Rotate the photo 90° clockwise"
       className={cn(
-        "grid place-items-center size-8 rounded-full cursor-pointer",
-        "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-        "hover:text-blue hover:border-blue/40 transition-colors",
+        ROUND_BUTTON, HOVER_BLUE,
         turn.rotating && "cursor-wait text-blue",
         !list && "absolute bottom-3 right-3 pointer-events-auto",
       )}
@@ -573,11 +621,25 @@ export const ListingCard = memo(function ListingCard({
     </button>
   );
 
+  // Split: two items drafted as one (the uploader's bulk toggle left off).
+  // Drafts with photos enough to divide only.
+  const splittable = !!onSplit && draft && (l.images || []).length >= 2;
   const actions = (onDelete || onEnd || onStartOver || onSkip || onDuplicate
-    || (list && rotatable) || quickEditButton) && (
+    || splittable || (list && rotatable) || quickEditButton) && (
     <>
       {quickEditButton}
       {list && rotateButton}
+      {splittable && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onSplit(item); }}
+          aria-label="Split into two listings"
+          title="Split — two items in one draft? Move the other item's photos to a new draft the AI writes"
+          className={cn(ROUND_BUTTON, HOVER_BLUE)}
+        >
+          <Split size={15} aria-hidden />
+        </button>
+      )}
       {/* Duplicate: "sell similar". A brand-new draft copied from this one,
           photos included, with nothing of this listing's life on eBay. On
           draft and live cards alike -- the second of the same thing turns
@@ -588,11 +650,7 @@ export const ListingCard = memo(function ListingCard({
           onClick={(e) => { e.stopPropagation(); onDuplicate(item.id); }}
           aria-label="Duplicate this listing"
           title="Duplicate — start a new draft with this listing's details and photos"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-blue hover:border-blue/40 transition-colors",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_BLUE)}
         >
           <Copy size={15} aria-hidden />
         </button>
@@ -629,12 +687,7 @@ export const ListingCard = memo(function ListingCard({
           disabled={startingOver}
           aria-label="Start over — re-run the AI on these photos"
           title="Start over — re-run the AI on these photos"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-blue hover:border-blue/40 transition-colors",
-            startingOver && "cursor-wait text-blue",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_BLUE, startingOver && "cursor-wait text-blue")}
         >
           {startingOver
             ? <Loader2 size={15} className="animate-spin" aria-hidden />
@@ -657,12 +710,7 @@ export const ListingCard = memo(function ListingCard({
           title={keptWhenEnded(item)
             ? "End this listing on eBay — it moves to Inactive, where you can relist it"
             : "End this listing on eBay — its card is removed from here too"}
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-error hover:border-error/40 transition-colors",
-            ending && "cursor-wait text-error",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_RED, ending && "cursor-wait text-error")}
         >
           {ending
             ? <Loader2 size={15} className="animate-spin" aria-hidden />
@@ -674,11 +722,7 @@ export const ListingCard = memo(function ListingCard({
           onClick={(e) => { e.stopPropagation(); onDelete(item); }}
           aria-label="Delete listing"
           title="Delete listing"
-          className={cn(
-            "grid place-items-center size-8 rounded-full cursor-pointer",
-            "bg-card/85 backdrop-blur border border-line shadow-card text-ink-faint",
-            "hover:text-error hover:border-error/40 transition-colors",
-          )}
+          className={cn(ROUND_BUTTON, HOVER_RED)}
         >
           <Trash2 size={15} aria-hidden />
         </button>
@@ -755,6 +799,13 @@ export const ListingCard = memo(function ListingCard({
         <span className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </span>
+        {/* The row has the width the tile does not: where the listing sits in
+            the seller's own Store, beside whatever the grid is sorted by. */}
+        {(meta || l.store_category_name) && (
+          <span className="text-[12px] text-ink-faint truncate">
+            {[meta, l.store_category_name].filter(Boolean).join(" · ")}
+          </span>
+        )}
         <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
           {/* A live auction is one chip: status, format, bids and clock. Any
               other listing keeps its status, and — beside it, because it
@@ -790,6 +841,7 @@ export const ListingCard = memo(function ListingCard({
         {sold && (
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount} />
         )}
+        {live && sale && <SaleLine sale={sale} listing={l} />}
         {/* Phone: the price/CTA column would squeeze the badge line into one
             chip per row, so it folds into the content instead. */}
         <span className="flex sm:hidden items-center gap-2.5">
@@ -847,6 +899,7 @@ export const ListingCard = memo(function ListingCard({
         <p className="font-semibold text-sm text-ink line-clamp-2">
           {l.title || item.title || "(untitled)"}
         </p>
+        {meta && <p className="text-[12px] text-ink-faint -mt-1">{meta}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 empty:hidden">
           {(hasMetrics || watchers != null) && (
             <MetricsRow views={hasMetrics ? metrics.views : null} watchers={watchers} />
@@ -863,6 +916,7 @@ export const ListingCard = memo(function ListingCard({
           <SoldLines listing={l} soldFor={soldFor} knownSale={knownSale} discount={discount}
             className="flex-col items-start" />
         )}
+        {live && sale && <SaleLine sale={sale} listing={l} />}
         <div className="mt-auto flex items-center justify-between gap-2">
           {price}
           <CtaHint status={item.status} />
@@ -935,7 +989,7 @@ export const ListingCard = memo(function ListingCard({
           <input
             type="checkbox"
             checked={!!selected}
-            onChange={() => onSelect?.()}
+            onChange={() => onSelect?.(item.id)}
             aria-label={`Select "${l.title || item.title || "this listing"}"`}
             className="size-4 accent-(--brand-blue) cursor-pointer"
           />

@@ -13,6 +13,9 @@ import { isDraft, isLive } from "@/lib/listingsView";
 import { ConditionPicker } from "./ConditionPicker";
 import { ShippingPolicySelect, useFulfillmentPolicies } from "./ShippingPolicySelect";
 import { blockedReason, outcomeUnknown } from "./publishShared";
+// eBay's title ceiling; the server refuses anything longer rather than
+// cutting a title the seller typed (main._quick_edit_value).
+import { TITLE_MAX, marketLabel } from "./blockers";
 
 /* A listing's "Quick edit" panel — the fields a seller changes most, right
  * under the card, without opening the editor.
@@ -38,10 +41,6 @@ import { blockedReason, outcomeUnknown } from "./publishShared";
  * carries exactly the fields that were sent, and a stale one overwrites
  * whatever eBay has now.
  */
-
-// eBay's own ceiling; the server refuses anything longer rather than cutting
-// a title the seller typed (main._quick_edit_value).
-export const TITLE_MAX = 80;
 
 // The id the toggle's aria-controls points at, shared so the card and the
 // panel it opens cannot disagree about it.
@@ -76,7 +75,7 @@ export function canQuickEdit(item) {
  * size or colour variations is refused whole by eBay's revise, so the only
  * thing left to change from here is what the seller paid, which never goes
  * to eBay. */
-export function quickEditFields(item) {
+function quickEditFields(item) {
   const l = item?.listing || {};
   if (isLive(item) && l.has_variations) return ["purchase_price"];
   const fmt = listingFormat(l);
@@ -87,8 +86,6 @@ export function quickEditFields(item) {
 }
 
 const text = (v) => (v == null ? "" : String(v));
-const marketLabel = (key) => (key === "ebay"
-  ? "eBay" : key.charAt(0).toUpperCase() + key.slice(1));
 
 // A listing, in the shape the inputs hold: numbers as the strings typed.
 function valuesOf(l) {
@@ -193,11 +190,15 @@ const COMPACT = "h-9 text-[13px] px-3";
  *                Cancel / Escape, which discard what was typed.
  */
 export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
-  const { patchListing, invalidateListings } = useApp();
+  const { patchListing, invalidateListings, saleByListing, loadSaleEvents } = useApp();
   const { toast } = useToast();
   const { connected: shipsFromEbay, policies } = useFulfillmentPolicies();
   const l = item.listing || {};
   const live = isLive(item);
+  // The eBay sale this listing is in, if any. eBay takes a listing out of its
+  // sale when its price is revised, so a price typed here is warned about
+  // before it is sent — the seller may mean it, but should know.
+  const sale = live ? saleByListing?.get?.(item.id) : undefined;
   const list = layout === "list";
   const current = valuesOf(l);
   const conditions = useConditions(l.category_id);
@@ -271,6 +272,9 @@ export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
                                 ...(res.status ? { status: res.status } : {}) });
       }
       invalidateListings();
+      // A price sent on a listing in a sale took it out of the sale on eBay;
+      // read the sales again so the card stops showing a discount it lost.
+      if (sale && "price" in body) loadSaleEvents?.({ force: true, quiet: true });
       if (res.ok) {
         setRetry(null);
         toast(res.message || "Saved.", { kind: "success" });
@@ -391,6 +395,12 @@ export function QuickEditPanel({ item, layout = "grid", onClose, className }) {
             onChange={(e) => set({ price: e.target.value })}
           />
           {hint("price")}
+          {sale && "price" in patch && (
+            <span className="text-[12px] font-medium text-warning">
+              It’s in “{sale.name}”{sale.percent_off != null ? ` (−${Math.round(sale.percent_off)}%)` : ""}.
+              Changing the price takes it out of the sale on eBay.
+            </span>
+          )}
         </Field>
       )}
       {fields.includes("quantity") && (

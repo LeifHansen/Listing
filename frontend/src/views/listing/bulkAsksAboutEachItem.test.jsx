@@ -156,6 +156,9 @@ describe("a batch waiting on the seller", () => {
 
     await type(blue, BLUE);
     await type(lacoste, LACOSTE);
+    // The review step: every card approved (the box's text goes with it —
+    // there is no Google on this server to send it to first), then written.
+    await press("Approve all");
     await press("Write 2 listings");
 
     expect(sent).toHaveLength(1);
@@ -172,6 +175,9 @@ describe("a batch waiting on the seller", () => {
     const { root } = await mount(sent);
 
     await type(boxes()[1], LACOSTE);
+    // The review step: every card approved (the box's text goes with it —
+    // there is no Google on this server to send it to first), then written.
+    await press("Approve all");
     await press("Write 2 listings");
 
     expect(sent[0].body).toEqual({ notes: { 1: LACOSTE } });
@@ -182,6 +188,9 @@ describe("a batch waiting on the seller", () => {
     const sent = [];
     const { root } = await mount(sent);
 
+    // The review step: every card approved (the box's text goes with it —
+    // there is no Google on this server to send it to first), then written.
+    await press("Approve all");
     await press("Write 2 listings");
 
     expect(sent[0].body).toEqual({ notes: {} });
@@ -196,6 +205,9 @@ describe("a batch waiting on the seller", () => {
     // notes failed after they had just been accepted.
     const { root } = await mount([]);
 
+    // The review step: every card approved (the box's text goes with it —
+    // there is no Google on this server to send it to first), then written.
+    await press("Approve all");
     await press("Write 2 listings");
 
     expect(boxes()).toHaveLength(0);

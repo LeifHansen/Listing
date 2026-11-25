@@ -267,6 +267,13 @@ def test_a_token_without_the_scope_asks_for_a_reconnect(seller, monkeypatch):
     done = _finish(client, body["job_id"])
     assert "econnect" in done["error"]
     assert fake.sent == []
+    # The worker writes `done` and THEN releases its slot (in its finally),
+    # so the release is waited for, not raced: under load the assertion ran
+    # in between and failed the suite now and then.
+    for _ in range(600):
+        if uid not in main._OFFER_JOBS:
+            break
+        time.sleep(0.01)
     assert uid not in main._OFFER_JOBS, "a failed run must not block the next"
 
 

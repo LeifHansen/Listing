@@ -11,8 +11,8 @@
    ids (lib/conditions explains where they come from).
 
    Renders a FRAGMENT: the parent supplies the grid, so the same control sits
-   beside the price on a bulk card and in the editor's condition row. Step 1
-   is one cell; each second-step answer is another. */
+   in the editor's condition row and in a card's quick-edit panel. Step 1 is
+   one cell; each second-step answer is another. */
 import { Field, Input, Select } from "@/components/ui/fields";
 import { cn } from "@/lib/utils";
 import {
@@ -25,26 +25,13 @@ import {
    A controlled <select> whose value isn't among its options renders BLANK,
    and a condition that looks unset is how a seller "fixes" a field that was
    already right. */
-export function conditionOptions(conditions, current) {
+function conditionOptions(conditions, current) {
   const options = (conditions && conditions.length)
     ? conditions.map((c) => ({ value: c.enum, label: c.label || conditionLabel(c.enum) }))
     : CONDITIONS.map((c) => ({ value: c, label: conditionLabel(c) }));
   return options.some((o) => o.value === current) || !current
     ? options
     : [{ value: current, label: conditionLabel(current) }, ...options];
-}
-
-// A label above a control in the editor; a bare control with an aria-label
-// (and a placeholder that names it) on a bulk card, where labels don't fit.
-function Cell({ labels, label, hint, help, className, children }) {
-  if (labels) {
-    return (
-      <Field label={label} hint={hint} help={help} className={className}>
-        {children}
-      </Field>
-    );
-  }
-  return <div className={cn("min-w-0", className)}>{children}</div>;
 }
 
 /**
@@ -60,11 +47,11 @@ function Cell({ labels, label, hint, help, className, children }) {
  *                    control(s) get. Only the control that is actually wrong
  *                    rings: the step-1 select when the condition is missing
  *                    or refused, a second-step control when its answer is.
- * @param labels      true for the editor (Field labels), false for a card.
+ * @param cellClassName the grid placement of every cell, from the parent.
  */
 export function ConditionPicker({
-  conditions, checked = true, condition, descriptors, onChange, fixLevel, labels = true,
-  className, cellClassName,
+  conditions, checked = true, condition, descriptors, onChange, fixLevel,
+  cellClassName,
 }) {
   const list = Array.isArray(conditions) ? conditions : [];
   const current = String(condition || "");
@@ -105,25 +92,22 @@ export function ConditionPicker({
 
   return (
     <>
-      <Cell labels={labels} label="Condition" hint={question && `(${question})`}
-        help={help} className={cn(className, cellClassName)}>
+      <Field label="Condition" hint={question && `(${question})`}
+        help={help} className={cellClassName}>
         <Select
-          aria-label={labels ? undefined : (question ? `Condition — ${question}` : "Condition")}
-          title={labels ? undefined : help}
           value={current}
           needsFix={step1Fix}
           onChange={(e) => pickCondition(e.target.value)}
         >
           {options.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
         </Select>
-      </Cell>
+      </Field>
       {meta.map((d) => (
-        <Cell key={d.id} labels={labels} label={d.name}
-          hint={labels && !d.required ? "(optional)" : undefined}
-          className={cn(className, cellClassName, d.free_text && "col-span-2")}>
+        <Field key={d.id} label={d.name}
+          hint={d.required ? undefined : "(optional)"}
+          className={cn(cellClassName, d.free_text && "col-span-2")}>
           {d.free_text ? (
             <Input
-              aria-label={labels ? undefined : d.name}
               placeholder={d.required ? d.name : `${d.name} (optional)`}
               maxLength={d.max_length || undefined}
               value={valueOf(d)}
@@ -132,18 +116,17 @@ export function ConditionPicker({
             />
           ) : (
             <Select
-              aria-label={labels ? undefined : d.name}
               value={valueOf(d)}
               needsFix={fixFor(d)}
               onChange={(e) => answer(d, e.target.value)}
             >
-              <option value="">{labels ? "Choose…" : `${d.name}…`}</option>
+              <option value="">Choose…</option>
               {(d.values || []).map((v) => (
                 <option key={v.id} value={v.id}>{v.name}</option>
               ))}
             </Select>
           )}
-        </Cell>
+        </Field>
       ))}
     </>
   );

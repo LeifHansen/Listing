@@ -10,7 +10,7 @@ is a display name the seller can change, so it is not a tenancy key:
     403s on connections made before that scope was granted — so "" is common,
     and "" was treated as "matches everything".
 
-That last one is the sharp edge. `belongs_to` returned True when EITHER side
+That last one is the sharp edge. The old rule returned True when EITHER side
 was blank, so a connected account whose identity could not be read passed the
 ownership test against every record in the database. GetItem answers for any
 seller's item (item detail is public), so a status sweep would then happily
@@ -21,9 +21,7 @@ eBay's immutable `userId` is now stored and preferred. The rules:
   - both sides have an immutable id  -> equality decides, with no fallback;
   - the record has one and the caller does not -> refuse (nothing is proven);
   - neither has one (a legacy record) -> fall back to the username, which is
-    all such a record has, for READS;
-  - writes require proof either way — an unproven record is shown, not
-    published to.
+    all such a record has.
 """
 from __future__ import annotations
 
@@ -81,13 +79,6 @@ def test_an_unidentified_caller_does_not_own_an_identified_record():
     assert not listing_sync.owns(owned, UNKNOWN)
 
 
-def test_an_unidentified_caller_cannot_write_to_a_legacy_record():
-    """Reads of legacy records still work, so nothing strands. Writes need
-    proof: a revise sent to the wrong account's item is not recoverable."""
-    legacy = _rec()
-    assert not listing_sync.may_write(legacy, UNKNOWN)
-
-
 def test_a_legacy_record_still_reads_under_a_matching_username():
     """Records predating immutable ids have only the name. Refusing to show
     them would strand sellers who did nothing wrong."""
@@ -101,21 +92,6 @@ def test_an_unstamped_legacy_record_still_reads():
     assert listing_sync.owns(_rec(), SELLER_A)
 
 
-def test_a_proven_record_may_be_written():
-    owned = _rec(ebay_account_id="uid-aaa", ebay_account="lamp-shop")
-    assert listing_sync.may_write(owned, SELLER_A)
-    assert not listing_sync.may_write(owned, SELLER_B)
-
-
-def test_a_legacy_record_may_be_written_by_a_named_matching_account():
-    """A named username match is the best proof such a record can offer, and
-    refusing it would block every pre-existing listing from ever being
-    edited again."""
-    legacy = _rec(ebay_account="lamp-shop")
-    assert listing_sync.may_write(legacy, SELLER_A)
-    assert not listing_sync.may_write(legacy, SELLER_B)
-
-
 # ---------------------------------------------- a public read proves nothing
 
 def test_the_previous_account_sentinel_is_never_owned():
@@ -124,7 +100,6 @@ def test_the_previous_account_sentinel_is_never_owned():
     account's listings under the new one."""
     stamped = _rec(ebay_account=listing_sync.UNKNOWN_ACCOUNT)
     assert not listing_sync.owns(stamped, SELLER_A)
-    assert not listing_sync.may_write(stamped, SELLER_A)
 
 
 def test_identity_can_be_read_from_a_creds_bundle():

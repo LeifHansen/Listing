@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import config, storage
 from ..config import log
@@ -73,6 +73,12 @@ MIRROR_FIELDS = (
     # the mirror is the only place they live between the pause and the answer
     # — and a deploy in that window is the ordinary case, not the rare one.
     "_session_id", "_item_notes",
+    # What Google image search said about each item at the guidance step,
+    # keyed by the item's `key`. Mirrored because each answer was a paid
+    # search the seller may already have read and approved: a deploy during
+    # the pause must put the same answers back on the cards, and a deploy
+    # during drafting must still draft from them. See main._start_google_lookups.
+    "google", "google_enabled",
     # AI charges this job took UP FRONT and has not yet earned. See `update`
     # for the invariant, and main._settle_interrupted_jobs for who reads them.
     "_refunds",
@@ -225,9 +231,10 @@ def snapshot(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
         owner = job.get("_uid")
         if owner and owner != uid:
             return None
-        copy = json.loads(json.dumps(job))  # deep copy, safe to hand out
-    # Every underscore key is internal bookkeeping (_uid, _rev), not API.
-    return {k: v for k, v in copy.items() if not k.startswith("_")}
+        # Every underscore key is internal bookkeeping (_uid, _rev), not API,
+        # so it is left out before the copy rather than copied and dropped.
+        public = {k: v for k, v in job.items() if not k.startswith("_")}
+        return json.loads(json.dumps(public))  # deep copy, safe to hand out
 
 
 def internal(job_id: str, uid: Optional[str] = None) -> Optional[dict]:
@@ -334,6 +341,44 @@ def revise(job_id: str, expect_phase: str, uid: Optional[str] = None,
     return now
 
 
+def annotate(job_id: str, field: str, key: str, value,
+             expect_phase: Optional[str] = None,
+             when: Optional[Callable[[Optional[dict]], bool]] = None) -> bool:
+    """Set one entry of a dict-valued field, WITHOUT moving the job's revision.
+
+    For results that arrive on their own clock while a job is paused — a
+    Google lookup finishing for one item of the guidance step — and that
+    nothing derives anything from. `revise` callers write against `_rev`
+    (main.delete_pending_photo and the merge both do), so a lookup that
+    bumped it would turn the seller's delete, landing a moment later, into a
+    "this batch moved on" refusal over nothing they did. The served status is
+    still refreshed: its caches are dropped here rather than keyed off a
+    revision that did not move.
+
+    `when`, if given, is asked about the entry as it stands, under the lock,
+    and nothing is written unless it says yes — how a lookup started for a
+    photo the seller has since removed is kept from landing over the one
+    started for the photo that replaced it. False when nothing was written:
+    no such job, finished, not in `expect_phase`, or `when` said no.
+    """
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job is None or job.get("done"):
+            return False
+        if expect_phase and job.get("phase") != expect_phase:
+            return False
+        current = dict(job.get(field) or {})
+        if when is not None and not when(current.get(key)):
+            return False
+        current[key] = value
+        job[field] = current
+        _SNAPSHOTS.pop(job_id, None)
+        _BRIEFS.pop(job_id, None)
+        record = _record(job)
+    _write_mirror(job_id, record)
+    return True
+
+
 def snapshot_json(job_id: str, uid: Optional[str] = None) -> Optional[str]:
     """`snapshot` as a ready-to-serve JSON body, cached until the job changes.
     Same None semantics (unknown job or not yours)."""
@@ -385,6 +430,14 @@ def _record(job: dict) -> dict:
     return {k: job[k] for k in MIRROR_FIELDS if k in job}
 
 
+def _progress(record: dict, unit: str) -> str:
+    """" (3 of 10 <unit>)" from a mirrored record's counters, or "" when it
+    never recorded a total."""
+    total = record.get("total_items") or 0
+    current = record.get("current") or 0
+    return f" ({min(current, total)} of {total} {unit})" if total else ""
+
+
 def interrupted_message(record: dict) -> str:
     """Why a mirrored job that was still running has no result: the process it
     ran in went away. Names the phase and count it reached, so the answer is
@@ -392,9 +445,7 @@ def interrupted_message(record: dict) -> str:
     if record.get("kind") == "ebay-import":
         # The store mirror, not a photo batch: nothing was drafted, and what it
         # did import is already in Listings.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} listings in)" if total else ""
+        where = _progress(record, "listings in")
         return ("The server restarted while mirroring your eBay store"
                 f"{where}, so the sync stopped early. Whatever it imported is "
                 "in Listings — run Sync with eBay again to finish.")
@@ -404,9 +455,7 @@ def interrupted_message(record: dict) -> str:
         return ("The server restarted before the AI finished this item, so no "
                 "draft was saved. Please try again.")
     if record.get("kind") == "crosspost-etsy":
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} sent)" if total else ""
+        where = _progress(record, "sent")
         return ("The server restarted while crossposting to Etsy"
                 f"{where}, so the run stopped early. What it sent is on Etsy — "
                 "check your shop's drafts for the one it was sending, then run "
@@ -416,9 +465,7 @@ def interrupted_message(record: dict) -> str:
         # pushed to eBay) as it finishes, so an interrupted run leaves real
         # work behind — and pointing the seller at Drafts, as the photo-batch
         # wording below does, would send them somewhere their listings aren't.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while filling in your listings"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "filled in — run it again for the rest.")
@@ -426,19 +473,34 @@ def interrupted_message(record: dict) -> str:
         # The Manage tab's "Lower prices…". Each cut reaches eBay as it is
         # made, so the ones that finished are not to be cut again: the seller
         # ticks the rest and runs it for those.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while lowering your prices"
                 f"{where}, so the run stopped early. The ones it finished are "
                 "lowered on eBay — tick the rest and run it again for those.")
+    if record.get("kind") == "end-and-relist":
+        # Each listing is ended and its copy published before the next is
+        # started, so a stop leaves at most one between the two: ended, with
+        # its fresh copy saved as a draft one Publish away.
+        where = _progress(record, "done")
+        return ("The server restarted while ending and relisting"
+                f"{where}, so the run stopped early. The ones it relisted are "
+                "live — check Active for those and Inactive for the rest, and "
+                "look in Drafts for one that was ended but not yet put back.")
+    if record.get("kind") == "end-listings":
+        where = _progress(record, "done")
+        return ("The server restarted while ending your listings"
+                f"{where}, so the run stopped early. The ones it ended are off "
+                "eBay — tick the rest on Active and run it again for those.")
+    if record.get("kind") == "store-category":
+        where = _progress(record, "done")
+        return ("The server restarted while moving your listings"
+                f"{where}, so the run stopped early. The ones it moved are on "
+                "their new shelf on eBay — tick the rest and run it again.")
     if record.get("kind") == "offers":
         # "Send offers…". Each offer is stamped on its listing as it goes out,
         # which takes it out of the group — so running it again reaches only
         # the listings this run never got to, never the same watchers twice.
-        total = record.get("total_items") or 0
-        current = record.get("current") or 0
-        where = f" ({min(current, total)} of {total} done)" if total else ""
+        where = _progress(record, "done")
         return ("The server restarted while sending your offers"
                 f"{where}, so the run stopped early. The offers it sent are "
                 "with your buyers — run it again for the rest.")
@@ -505,7 +567,11 @@ def adopt_mirrors() -> list[dict]:
     safe to re-derive on the next restart — and what stops this pass from
     rewriting a job that some other process is still working on."""
     try:
-        files = sorted(_mirror_dir().glob("*.json"), key=lambda p: p.stat().st_mtime)
+        # (mtime, path), oldest first. Each file is stat'ed once, here: the
+        # age split below reuses it rather than asking the disk again.
+        files = sorted(((p.stat().st_mtime, p)
+                        for p in _mirror_dir().glob("*.json")),
+                       key=lambda pair: pair[0])
         # Half-written mirrors from the crash we're recovering from: os.replace
         # never got to rename them, and nothing else ever will.
         strays = list(_mirror_dir().glob("*.tmp"))
@@ -513,8 +579,9 @@ def adopt_mirrors() -> list[dict]:
         log.debug("jobstore: no job mirrors to load (%s)", exc)
         return []
     cutoff = time.time() - MIRROR_TTL
-    fresh = [p for p in files if p.stat().st_mtime > cutoff]
-    for path in strays + [p for p in files if p not in fresh] + fresh[:-MIRROR_MAX]:
+    fresh = [p for mtime, p in files if mtime > cutoff]
+    stale = [p for mtime, p in files if mtime <= cutoff]
+    for path in strays + stale + fresh[:-MIRROR_MAX]:
         path.unlink(missing_ok=True)
     interrupted: list[dict] = []
     for path in fresh[-JOBS_MAX:]:

@@ -81,3 +81,33 @@ def test_notify_sold_never_raises(dbmod, monkeypatch):
     notifications.notify_sold(None, "x", {})       # anonymous — no-op
     notifications.notify_sold("u-1", "", {})       # no record — no-op
     notifications.notify_sold("u-1", "x", {"price": "not-a-number"})
+
+
+def _commit_raising(dbmod, monkeypatch, exc):
+    def commit(self):
+        raise exc
+    monkeypatch.setattr(dbmod.Session, "commit", commit)
+
+
+def test_losing_the_dedupe_race_is_quiet(dbmod, uid, monkeypatch, caplog):
+    """Another writer recorded the same event between the read and the
+    commit: the unique constraint says so, and that is the expected case."""
+    from sqlalchemy.exc import IntegrityError
+
+    _commit_raising(dbmod, monkeypatch, IntegrityError("INSERT", {}, Exception("unique")))
+    with caplog.at_level("WARNING"):
+        assert dbmod.add_notification(uid, "sold", "Sold", dedupe_key="sold:y:1") is None
+    assert "add_notification" not in caplog.text
+
+
+def test_a_failed_write_is_logged_not_taken_for_a_duplicate(
+        dbmod, uid, monkeypatch, caplog):
+    """A dropped connection at commit used to be read as "lost the dedupe
+    race" and return without a word, so a sale's notification could vanish
+    with nothing in the log to say it had."""
+    from sqlalchemy.exc import OperationalError
+
+    _commit_raising(dbmod, monkeypatch, OperationalError("COMMIT", {}, Exception("gone")))
+    with caplog.at_level("WARNING"):
+        assert dbmod.add_notification(uid, "sold", "Sold", dedupe_key="sold:z:1") is None
+    assert "add_notification failed" in caplog.text

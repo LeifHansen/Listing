@@ -40,6 +40,20 @@ def enabled() -> bool:
     return config.serpapi_ready() and not _key_refused
 
 
+def refuse_key(status) -> None:
+    """Latch the SerpAPI key off for this process. One key serves every
+    SerpAPI engine this app calls (Google Lens here, Google AI Mode in
+    services/google_lookup), so a refusal from either one turns both off."""
+    global _key_refused
+    if _key_refused:
+        return
+    _key_refused = True
+    # Once, loudly: the operator's only sign the key needs replacing.
+    log.warning("image search: SerpAPI refused the key (%s) -- Google image "
+                "search lookups are off until it is replaced and the app "
+                "restarted", status)
+
+
 def reverse_image(url: str) -> list[dict]:
     """Visual matches for the image at `url`, best first, as
     [{"title", "source", "link"}]. [] when off, unreachable, or unmatched."""
@@ -66,12 +80,7 @@ def reverse_image(url: str) -> list[dict]:
         # without it the row could not tell an operator which one they had.
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status in (401, 403):
-            global _key_refused
-            _key_refused = True
-            # Once, loudly: the operator's only sign the key needs replacing.
-            log.warning("image search: SerpAPI refused the key (%s) -- "
-                        "reverse-image leads are off until it is replaced "
-                        "and the app restarted", status)
+            refuse_key(status)
             return []
         log.warning("image search: lookup failed (%s%s)",
                     type(exc).__name__, f" {status}" if status else "")

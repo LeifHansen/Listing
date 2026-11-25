@@ -909,13 +909,17 @@ def match_selection_value(value: str, allowed: list[str],
     nv = _norm_value(v)
     if not nv:
         return None
+    # Each allowed value normalized once, not up to four times: a Country/
+    # Region list is ~250 values and every one runs four size-pair regexes.
+    normed = []
     for a in allowed:
-        if _norm_value(a) == nv:
+        na = _norm_value(a)
+        if na == nv:
             return a
+        normed.append((a, na))
     if not allow_partial:
         return None
-    hits = [a for a in allowed
-            if _norm_value(a) and (_norm_value(a) in nv or nv in _norm_value(a))]
+    hits = [a for a, na in normed if na and (na in nv or nv in na)]
     return hits[0] if len(hits) == 1 else None
 
 

@@ -6,7 +6,7 @@
  * capacitor://localhost, so the API lives on a different origin and every
  * request needs an absolute base.
  *
- * API_BASE is baked in at build time: scripts/ios-prepare.sh builds with
+ * API_BASE is baked in at build time: `npm run native:*` builds with
  * VITE_API_BASE=https://<the server>, while the web deploy builds without it,
  * so the web bundle keeps today's relative URLs exactly.
  */
@@ -148,24 +148,80 @@ export function storeToken(token) {
   return Promise.resolve();
 }
 
+// "ios", "android", or "web" (the browser, and the tests).
+export function nativePlatform() {
+  try {
+    return isNative() ? window.Capacitor.getPlatform?.() || "web" : "web";
+  } catch (e) {
+    return "web";
+  }
+}
+
 // --- external browser -------------------------------------------------------
-// Purchases MUST leave the app on iOS: completing a non-Apple checkout inside
-// the webview is a guideline 3.1.1 rejection, while a link out to the system
-// browser is allowed (US storefront). Try the Capacitor Browser plugin, then
-// window.open. Returns false when neither could open — the caller says so
-// instead of silently falling back to in-webview navigation, which would
-// trade an error message for an App Store rejection.
-export async function openExternal(url) {
-  try {
-    const browser = window.Capacitor?.Plugins?.Browser;
-    if (browser?.open) {
-      await browser.open({ url });
+// Two ways out of the app, for two reasons:
+//
+// * A page the seller is shown (an eBay listing, Seller Hub, the privacy
+//   policy) opens in the in-app browser — Safari's view controller on iOS, a
+//   Custom Tab on Android — via the Browser plugin. Closing it is back in the
+//   app. Never the app's own webview: on Android a link to an allowed host
+//   (*.ebay.com, which the OAuth flow needs) would REPLACE the app.
+//
+// * A purchase (`{ system: true }`) leaves for the SYSTEM browser. Completing
+//   a non-Apple checkout inside the app is a guideline 3.1.1 rejection; a link
+//   out is allowed on the US storefront. window.open is that link in the
+//   shell: iOS hands it to Safari, and Android to the default browser because
+//   the checkout host is not one the webview may load.
+//
+// Returns false when nothing could open, so the caller says so instead of
+// falling back to in-webview navigation — an error message beats a rejected
+// binary.
+
+// window.open as the platform made it. The native shell routes app calls to
+// window.open through openExternal (see nativeShell.js) and keeps the
+// original here, so a purchase can still reach the system browser.
+function systemOpen() {
+  return window.open?.native || window.open;
+}
+
+export async function openExternal(url, { system = false } = {}) {
+  const open = systemOpen();
+  if (system && isNative()) {
+    try {
+      // The shell answers window.open with no window even when Safari or the
+      // default browser opened, so null is not a failure here; a throw is.
+      open.call(window, url, "_blank");
       return true;
+    } catch (e) {
+      return false;
     }
-  } catch (e) { /* fall through */ }
+  }
+  if (!system) {
+    try {
+      const browser = window.Capacitor?.Plugins?.Browser;
+      if (browser?.open) {
+        await browser.open({ url });
+        return true;
+      }
+    } catch (e) { /* fall through */ }
+  }
   try {
-    const w = window.open(url, "_blank");
+    const w = open.call(window, url, "_blank");
     if (w) return true;
   } catch (e) { /* fall through */ }
   return false;
+}
+
+// Whether this build may offer token packs. Tokens are digital goods used in
+// the app, which the stores normally require to be sold through their own
+// billing; the app sells them through Stripe on the web instead.
+//   iOS: allowed as a link out on the US storefront (App Store availability
+//        is set to the US for this — see MOBILE.md).
+//   Android: Google Play allows a link out only under its external-content-
+//        links program, so the Android build offers no purchase at all unless
+//        it was built for that (VITE_ANDROID_EXTERNAL_PURCHASES=1).
+// Billing itself is a server flag; this is decided in the binary so that
+// switching billing on cannot change what an approved build shows.
+export function tokenPurchasesAllowed() {
+  if (nativePlatform() !== "android") return true;
+  return import.meta.env.VITE_ANDROID_EXTERNAL_PURCHASES === "1";
 }

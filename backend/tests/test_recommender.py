@@ -1,5 +1,5 @@
-"""Recommendation ranking: the one-rec-per-listing dedupe and the limit that
-the grouped dashboard view depends on (pure module, CI-safe)."""
+"""Recommendation ranking: the one-rec-per-listing dedupe and the uncapped
+membership the grouped dashboard view depends on (pure module, CI-safe)."""
 from backend.services import recommender
 
 
@@ -10,14 +10,9 @@ def _published(i: int, **item) -> dict:
             "listing": {"title": f"Item {i}", "images": []}, **item}
 
 
-def test_default_limit_caps_at_eight():
+def test_the_ranking_returns_full_membership():
     items = [_published(i) for i in range(20)]
-    assert len(recommender.recommendations(items)) == 8
-
-
-def test_raised_limit_returns_full_membership():
-    items = [_published(i) for i in range(20)]
-    recs = recommender.recommendations(items, limit=50)
+    recs = recommender.ranked(items)
     assert len(recs) == 20
 
 
@@ -25,7 +20,7 @@ def test_one_rec_per_listing_keeps_strongest():
     # Somebody is watching each one: each also earns "Send an offer" (95).
     items = [_published(i) for i in range(20)]
     watched = {it["id"]: {"watchers": 2} for it in items}
-    recs = recommender.recommendations(items, metrics_by_id=watched, limit=50)
+    recs = recommender.ranked(items, metrics_by_id=watched)
     ids = [r["listing_id"] for r in recs]
     assert len(ids) == len(set(ids))
     # Every item's specifics rec (priority 45) lost to its offer rec (95).
@@ -46,7 +41,7 @@ def test_sorted_by_priority_desc():
     # single-element list and an assertion that cannot fail.
     items = [_published(0), {"id": "d1", "status": "unlisted", "title": "Draft",
                              "listing": {"title": "Draft"}}]
-    recs = recommender.recommendations(items, limit=50)
+    recs = recommender.ranked(items)
     priorities = [r["priority"] for r in recs]
     assert len(priorities) == 2, "the ordering is only tested if both items rank"
     assert priorities == sorted(priorities, reverse=True)

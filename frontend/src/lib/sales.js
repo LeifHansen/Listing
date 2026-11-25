@@ -73,7 +73,7 @@ export function saleProceeds(listing) {
   return each == null ? null : each * soldUnits(listing);
 }
 
-export function saleTime(item) {
+function saleTime(item) {
   const at = Date.parse((item?.listing || {}).sold_at || "");
   return Number.isNaN(at) ? null : at;
 }

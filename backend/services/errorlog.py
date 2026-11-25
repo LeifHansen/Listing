@@ -407,11 +407,10 @@ class CaptureHandler(logging.Handler):
                 # traceback, so require that logging itself was not the cause.
                 if live is not None and not isinstance(live, KeyboardInterrupt):
                     exc = live
-            ctx = _request.get() or {}
             # The template, not the formatted line: it is identical across
             # occurrences whenever the call site used %-style args.
             template = record.msg if record.args else record.getMessage()
-            _record_from_log(record, exc, template, ctx)
+            _record_from_log(record, exc, template)
         except Exception:  # noqa: BLE001
             pass
 
@@ -419,7 +418,8 @@ class CaptureHandler(logging.Handler):
         return
 
 
-def _record_from_log(rec: logging.LogRecord, exc, template, ctx: dict) -> None:
+def _record_from_log(rec: logging.LogRecord, exc, template) -> None:
+    # No route or method: record() takes both from the request context.
     record(kind="backend",
            level=rec.levelname,
            message=rec.getMessage(),
@@ -428,9 +428,7 @@ def _record_from_log(rec: logging.LogRecord, exc, template, ctx: dict) -> None:
            logger=rec.name,
            module=getattr(rec, "module", "") or "",
            lineno=rec.lineno,
-           func=rec.funcName,
-           route=ctx.get("path") or "",
-           method=ctx.get("method") or "")
+           func=rec.funcName)
 
 
 def _drain(block_for: float) -> list[dict]:

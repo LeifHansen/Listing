@@ -1,6 +1,4 @@
-import { useEffect } from "react";
-import { api } from "@/lib/api";
-import { useApp } from "@/store";
+import { useStoreCategories } from "@/lib/useStoreCategories";
 import { Field, Select } from "@/components/ui/fields";
 
 /* Where this listing sits in the seller's OWN eBay Store.
@@ -20,24 +18,6 @@ import { Field, Select } from "@/components/ui/fields";
  * could not run at all, that is a different thing from an empty store and it
  * says so rather than hiding — the same distinction lib/priceLookup draws.
  */
-
-export function useStoreCategories() {
-  const { ebay, storeCategoriesData, setStoreCategoriesData } = useApp();
-  useEffect(() => {
-    if (!ebay.connected || storeCategoriesData) return;
-    api("/api/ebay/store-categories")
-      .then(setStoreCategoriesData)
-      .catch(() => setStoreCategoriesData({ store: false, checked: false, categories: [] }));
-  }, [ebay.connected, storeCategoriesData, setStoreCategoriesData]);
-  return {
-    connected: ebay.connected,
-    categories: storeCategoriesData?.categories || [],
-    hasStore: !!storeCategoriesData?.store,
-    // undefined while the first request is still out — which is not the same
-    // as "we asked and could not reach eBay".
-    checked: storeCategoriesData ? storeCategoriesData.checked !== false : undefined,
-  };
-}
 
 /* `value` is the listing's store_category_id ("" = the store's top level).
  * `onChange` receives (id, name) — the name rides along so the listing can

@@ -167,8 +167,16 @@ def tokens_db(monkeypatch, tmp_path):
     db._engine = None
     db._initialized = False
     yield db
+    if db._engine is not None:
+        db._engine.dispose()
     db._engine = None
     db._initialized = False
+    # Restore the environment BEFORE reloading config: monkeypatch was set up
+    # first, so it would otherwise undo the env only after this reload, and
+    # config would keep this test's DATABASE_URL (and DATA_DIR) for every
+    # later test on the worker -- a scratch database leaking into tests that
+    # assume none, such as the sweep cooldown's.
+    monkeypatch.undo()
     importlib.reload(config)
 
 
@@ -460,3 +468,18 @@ def test_a_full_refund_is_still_replay_safe(tokens_db):
     assert tokens_db.token_status(uid, period, 0)["purchased"] == 10
     assert tokens_db.token_refund(uid, spend["entry_id"]) is False
     assert tokens_db.token_status(uid, period, 0)["purchased"] == 10
+
+
+def test_the_invitation_to_buy_is_one_clause_the_android_build_can_drop():
+    """An Android build that may not sell tokens shows this sentence without
+    its "— or buy a token pack…" clause (frontend lib/api.withoutPurchasePrompt
+    removes it with this same pattern). Reword the sentence and that clause
+    must still be one piece the pattern finds, or the build tells a seller to
+    buy something it cannot sell."""
+    import re
+
+    msg = tokens.insufficient_message({"free_remaining": 0, "purchased": 0})
+    trimmed = re.sub(r"\s*[—-]+\s*or buy\b[^.]*\.", ".", msg, flags=re.I)
+    assert trimmed != msg
+    assert "buy" not in trimmed.lower() and "pack" not in trimmed.lower()
+    assert "token" in trimmed.lower(), "the 402 must still name tokens (api.js keys on it)"

@@ -132,29 +132,15 @@ _verified: dict[str, float] = {}
 _verified_lock = threading.Lock()
 
 
-def verify_due(uid: str, now: Optional[float] = None,
-               ttl: float = VERIFY_TTL) -> bool:
-    """Has this user's account gone long enough without a check?
-
-    Deliberately a plain time gate rather than anything cleverer: the cost of
-    checking too often is three cheap API calls, and the cost of checking too
-    rarely is every publish rejected by eBay for a reason no field on screen
-    explains.
-    """
-    now = time.time() if now is None else now
-    with _verified_lock:
-        return (now - _verified.get(uid, 0.0)) >= ttl
-
-
 def note_verified(uid: str, now: Optional[float] = None) -> None:
     now = time.time() if now is None else now
     with _verified_lock:
         _verified[uid] = now
 
 
-# Accounts with a check in flight right now. verify_due only reads the clock,
-# so once the TTL lapsed every request that built creds at the same moment
-# ran its own check: the dashboard's insights, metrics, inbox poll and orders
+# Accounts with a check in flight right now. A gate that only read the clock
+# let every request that built creds at the same moment, once the TTL lapsed,
+# run its own check: the dashboard's insights, metrics, inbox poll and orders
 # fire together, each check is four sequential eBay calls at a 30s timeout,
 # and each held a threadpool slot for the whole of it. One of them checking
 # is the same answer for all of them.
@@ -163,11 +149,18 @@ _verifying: set[str] = set()
 
 def claim_verify(uid: str, now: Optional[float] = None,
                  ttl: float = VERIFY_TTL) -> bool:
-    """verify_due, and the right to run the check: True for ONE caller at a
-    time. Everyone else goes on with the stored settings, exactly as they
-    would inside the TTL. The winner must release_verify() however the check
-    ends -- an inconclusive pass does not start the clock (note_verified is
-    only for a pass eBay answered), so the next request tries again."""
+    """Has this user's account gone long enough without a check -- and the
+    right to run it: True for ONE caller at a time. Everyone else goes on
+    with the stored settings, exactly as they would inside the TTL.
+
+    Deliberately a plain time gate rather than anything cleverer: the cost of
+    checking too often is three cheap API calls, and the cost of checking too
+    rarely is every publish rejected by eBay for a reason no field on screen
+    explains.
+
+    The winner must release_verify() however the check ends -- an
+    inconclusive pass does not start the clock (note_verified is only for a
+    pass eBay answered), so the next request tries again."""
     now = time.time() if now is None else now
     with _verified_lock:
         if uid in _verifying or (now - _verified.get(uid, 0.0)) < ttl:

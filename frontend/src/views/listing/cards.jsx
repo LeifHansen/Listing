@@ -17,7 +17,7 @@ import {
 import { useToast } from "@/components/ui/Toaster";
 import { useApp } from "@/store";
 import { Button } from "@/components/ui/Button";
-import { Field, Input, Textarea, Select } from "@/components/ui/fields";
+import { Field, InfoTip, Input, Textarea, Select } from "@/components/ui/fields";
 import { AIStatusInline } from "@/components/ui/AIStatus";
 import { Section } from "./Section";
 import { PhotoTile } from "./PhotoTile";
@@ -29,7 +29,7 @@ import { StoreCategorySelect } from "./StoreCategorySelect";
 import { ConditionPicker } from "./ConditionPicker";
 import { CategorySuggestList } from "./CategorySuggestList";
 import { TITLE_MAX, MAX_PHOTOS, MAX_VIDEOS } from "./blockers";
-import { issuesFor } from "./publishShared";
+import { RefusalNotes, issuesFor } from "./publishShared";
 import { riskyWords, riskyWordSummary } from "@/lib/riskyWords";
 
 /* The workflow cards. Each is presentational; all state lives in
@@ -537,25 +537,14 @@ export function TitleCard({ w }) {
       expand={refused.length > 0}
     >
       <div className="flex flex-col gap-4">
-        {refused.length > 0 && (
-          <div className="flex flex-col gap-2.5 rounded-input border border-error/45 bg-error-soft px-3.5 py-3">
-            {refused.map((issue, i) => (
-              <div key={`${issue.title}-${i}`} className="flex items-start gap-2.5">
-                <AlertTriangle size={16} className="text-error shrink-0 mt-0.5" aria-hidden />
-                <span className="text-[13px] text-ink flex-1 min-w-0">
-                  <strong className="font-bold">{issue.title}</strong>
-                  {issue.fix && <span className="block mt-0.5 text-ink-secondary">{issue.fix}</span>}
-                </span>
-              </div>
-            ))}
-            {culprit && (
-              <p className="text-[13px] text-ink border-t border-error/25 pt-2.5">
-                <strong className="font-bold">Most likely: </strong>{culprit}
-                {" "}See the note under the title for what to write instead.
-              </p>
-            )}
-          </div>
-        )}
+        <RefusalNotes issues={refused}>
+          {culprit && (
+            <p className="text-[13px] text-ink border-t border-error/25 pt-2.5">
+              <strong className="font-bold">Most likely: </strong>{culprit}
+              {" "}See the note under the title for what to write instead.
+            </p>
+          )}
+        </RefusalNotes>
         <Field
           label="Title"
           hint={
@@ -889,9 +878,19 @@ export function PricingCard({ w }) {
       <div className="flex flex-col gap-4">
         {/* The same three the draft cards offer, with the same names (see
             lib/listingFormat). "Both" is an auction carrying a Buy It Now
-            price; the ⓘ says so, because the label alone cannot. */}
-        <Field label="Selling format" help={settled ? settledWhy : FORMAT_HELP[fmt]}>
-          <div className={cn(
+            price; the ⓘ says so, because the label alone cannot.
+
+            Not wrapped in <Field>: that renders a <label>, and a label
+            hands every click inside it to its first control -- so tapping
+            the heading, or the ⓘ to read what "Both" means, switched the
+            listing to Buy It Now. The heading is drawn the way Field draws
+            one, over a named group. */}
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <span className="text-[13px] font-semibold text-ink flex items-center gap-1.5">
+            Selling format
+            <InfoTip text={settled ? settledWhy : FORMAT_HELP[fmt]} />
+          </span>
+          <div role="group" aria-label="Selling format" className={cn(
             "inline-flex w-full sm:w-auto rounded-input border border-line p-0.5 bg-bg-sunken",
             settled && "opacity-60",
           )}>
@@ -913,7 +912,7 @@ export function PricingCard({ w }) {
               </button>
             ))}
           </div>
-        </Field>
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
           {isAuction && (

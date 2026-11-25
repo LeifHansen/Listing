@@ -81,9 +81,7 @@ def auth_logout_everywhere(request: Request, response: Response) -> dict:
     never landed is the worst outcome available: they stop looking, and
     whoever holds the token keeps it.
     """
-    user = auth.current_user(request)
-    if not user:
-        raise HTTPException(401, "Log in first.")
+    user = deps.signed_in_user(request)
     db.revoke_sessions(user["id"])
     # This browser too. Anything else would leave the seller looking at a
     # screen that says everything is signed out while it demonstrably is not.

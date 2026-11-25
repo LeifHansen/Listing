@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { MoreHorizontal } from "lucide-react";
+import { Check, MoreHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "./Button";
+import { usePopover } from "./Popover";
 
 /* Menu — a button that opens a short list of actions beneath it.
  *
@@ -22,44 +23,47 @@ import { Button } from "./Button";
  *  - arrow keys move between items, Home/End jump, and focus lands on the
  *    first item when the menu opens from the keyboard.
  *
- * `items`: [{ label, icon, onSelect, danger, disabled, hint, divider }].
+ * `items`: [{ label, icon, onSelect, danger, disabled, hint, divider,
+ * checked, className }].
  * An item with `divider` draws a rule above itself. `hint` is a short
- * right-aligned note (a shortcut, a consequence). */
-export function Menu({ items, label = "More actions", align = "right", className,
-                      size = "icon", variant = "ghost", children }) {
+ * right-aligned note (a shortcut, a consequence). `checked` (true/false)
+ * makes the item one of a radio set — a sort order, say — read as
+ * `menuitemradio` with a tick on the chosen one. `className` lands on the
+ * item's <li>, so a menu can hold entries that only exist at one screen size
+ * (the Manage bulk bar folds its overflow into More on a phone). */
+const ITEM_SELECTOR = '[role="menuitem"]:not([disabled]), [role="menuitemradio"]:not([disabled])';
+
+/* The enabled items actually on screen. An item can be in the DOM and hidden
+   at this screen size (its `className`), and focus must skip it. */
+function visibleItems(list) {
+  return [...(list?.querySelectorAll(ITEM_SELECTOR) || [])].filter((el) => {
+    const li = el.closest("li");
+    return !li || window.getComputedStyle(li).display !== "none";
+  });
+}
+
+export function Menu({ items, label = "More actions", className,
+                      size = "icon", variant = "ghost", children, disabled,
+                      triggerClassName, align = "right" }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const listRef = useRef(null);
   const id = useId();
 
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (e) => {
-      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
-    };
-    const onKey = (e) => {
-      if (e.key === "Escape") { e.stopPropagation(); setOpen(false); }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("touchstart", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("touchstart", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  usePopover(open, setOpen, rootRef);
 
   // Focus the first item once the list is on screen, so the keyboard path
   // (Enter on the trigger) lands somewhere useful.
   useEffect(() => {
     if (!open) return;
-    const first = listRef.current?.querySelector('[role="menuitem"]:not([disabled])');
+    const first = visibleItems(listRef.current)[0];
     first?.focus();
   }, [open]);
 
   const moveFocus = (e) => {
-    const items_ = [...(listRef.current?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])];
+    // Visible ones only: an item hidden at this screen size (`className`)
+    // is in the DOM but must not take the focus.
+    const items_ = visibleItems(listRef.current);
     if (!items_.length) return;
     const i = items_.indexOf(document.activeElement);
     const go = (n) => { e.preventDefault(); items_[(n + items_.length) % items_.length].focus(); };
@@ -80,6 +84,8 @@ export function Menu({ items, label = "More actions", align = "right", className
         variant={variant}
         size={size}
         onClick={() => setOpen((o) => !o)}
+        disabled={disabled}
+        className={triggerClassName}
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -101,15 +107,17 @@ export function Menu({ items, label = "More actions", align = "right", className
             className={cn(
               "absolute top-full mt-1.5 z-40 min-w-56 py-1.5",
               "bg-card border border-line rounded-card shadow-float",
-              align === "right" ? "right-0" : "left-0",
+              align === "left" ? "left-0" : "right-0",
             )}
           >
             {items.filter(Boolean).map((item, i) => (
               <li key={item.key || item.label} role="none"
-                className={cn(item.divider && i > 0 && "border-t border-line mt-1.5 pt-1.5")}>
+                className={cn(item.divider && i > 0 && "border-t border-line mt-1.5 pt-1.5",
+                  item.className)}>
                 <button
                   type="button"
-                  role="menuitem"
+                  role={item.checked == null ? "menuitem" : "menuitemradio"}
+                  aria-checked={item.checked == null ? undefined : !!item.checked}
                   disabled={item.disabled}
                   title={item.title}
                   onClick={() => choose(item)}
@@ -126,6 +134,9 @@ export function Menu({ items, label = "More actions", align = "right", className
                   <span className="flex-1 min-w-0 truncate">{item.label}</span>
                   {item.hint && (
                     <span className="shrink-0 text-[11.5px] font-medium text-ink-faint">{item.hint}</span>
+                  )}
+                  {item.checked != null && (
+                    <Check aria-hidden className={cn("text-blue", !item.checked && "invisible")} />
                   )}
                 </button>
               </li>

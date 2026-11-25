@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertCircle, Circle, Gavel, Sparkles } from "lucide-react";
+import { Gavel, Sparkles } from "lucide-react";
 import { cn, formatMoney } from "@/lib/utils";
 import {
   formatChipLabel, formatSummary, isAuctionFormat, listingFormat,
@@ -95,35 +95,6 @@ export function StatusBadge({ status, className }) {
   return <TagPill tone={meta.tone} className={className}>{meta.label}</TagPill>;
 }
 
-// ProgressChip — the state chip on each workflow card, in exactly three
-// meanings. The amber one is the load-bearing distinction: it says eBay
-// refuses this listing until the card is dealt with, so it may only appear on
-// a card holding a real blocker (see blockers.js). "Needs attention" is what
-// it used to say, and it sat on merely-unfinished cards too — which is how a
-// seller ended up unable to tell a rejection from a suggestion.
-export function ProgressChip({ state = "todo", className }) {
-  if (state === "complete") {
-    return (
-      <TagPill tone="green" className={className}>
-        <CheckCircle2 size={13} strokeWidth={2.5} aria-hidden /> Complete
-      </TagPill>
-    );
-  }
-  if (state === "attention") {
-    return (
-      <TagPill tone="yellow" className={className}
-        title="eBay won't accept the listing until this is fixed">
-        <AlertCircle size={13} strokeWidth={2.5} aria-hidden /> Blocks publish
-      </TagPill>
-    );
-  }
-  return (
-    <TagPill className={className}>
-      <Circle size={11} strokeWidth={2.5} aria-hidden /> Optional
-    </TagPill>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Listing origin — created here vs. published on eBay and imported — and what
 // that means for editing. The record id is the reliable tell: imported
@@ -132,12 +103,12 @@ export function ProgressChip({ state = "todo", className }) {
 // published through the Trading API set that too.)
 // ---------------------------------------------------------------------------
 
-export function originOf(item) {
+function originOf(item) {
   if (String(item.id || "").startsWith("ebay-")) return "imported";
   return "app";
 }
 
-export const ORIGIN_META = {
+const ORIGIN_META = {
   app: {
     label: "Thryft",
     tone: "blue",
@@ -152,7 +123,7 @@ export const ORIGIN_META = {
 
 // The eBay wordmark, per-letter brand colors — instantly readable as "this
 // lives on eBay" without spelling it out.
-export function EbayMark({ className }) {
+function EbayMark({ className }) {
   return (
     <span aria-label="eBay"
       /* font-sans is explicit: this sits inside a TagPill, which is font-display,
@@ -168,7 +139,7 @@ export function EbayMark({ className }) {
 
 // One origin chip, used on cards and in the legend. Hover/long-press shows
 // the rules. Imported listings show the eBay mark instead of a text label.
-export function OriginChip({ kind, className }) {
+function OriginChip({ kind, className }) {
   const meta = ORIGIN_META[kind] || ORIGIN_META.app;
   return (
     <span title={meta.tip} className={cn("cursor-help", className)}>

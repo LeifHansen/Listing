@@ -1,0 +1,125 @@
+name: Native builds
+
+# Builds the iOS and Android shells from a clean checkout, the way a release
+# is built: `npm run native:<platform>` and then the platform's own compiler.
+# The Gates prove the web bundle; this proves the bundle still becomes an app
+# — that the Capacitor packages, the plugins' Swift packages and Gradle
+# modules, and the project edits in frontend/scripts/native-prepare.mjs all
+# still line up. It runs when one of those inputs changes, and on demand.
+#
+# Android: an App Bundle, SIGNED when the upload key is configured as
+# repository secrets (see MOBILE.md, "Android signing"), unsigned otherwise.
+# The signed bundle is the artifact to upload to the Play Console, so
+# nobody needs Android Studio to ship it.
+#
+# iOS: a simulator build with signing off. It proves the project compiles;
+# the signed store build is the iOS → TestFlight workflow (testflight.yml),
+# run on demand, or an archive made in Xcode on a Mac (MOBILE.md).
+#
+# macOS minutes are billed at ten times Linux ones on private repositories,
+# which is why this is path-filtered rather than run on every pull request.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - frontend/package.json
+      - frontend/package-lock.json
+      - frontend/capacitor.config.json
+      - frontend/assets/**
+      - frontend/scripts/native-prepare.mjs
+      - .github/workflows/native.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # Capacitor 8's Gradle plugin needs JDK 21. The runner image carries the
+      # Android SDK already (ANDROID_HOME), so there is nothing else to fetch.
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      # The upload key arrives base64-encoded in a secret and is written to the
+      # runner's temp directory, which is wiped with the job. Pull requests
+      # from forks get no secrets and build unsigned.
+      - name: Upload key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            echo "THRYFT_ANDROID_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+          else
+            echo "::notice::No ANDROID_UPLOAD_KEYSTORE_BASE64 secret: building an unsigned bundle."
+          fi
+      - name: Build
+        run: npm run native:android -- --bundle
+        working-directory: frontend
+        env:
+          THRYFT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          THRYFT_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          THRYFT_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-app-bundle
+          path: frontend/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
+  ios:
+    name: iOS compile
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # Build with the newest Xcode on the image: App Store Connect only takes
+      # uploads made with a current SDK, so that is the one worth proving.
+      - name: Newest Xcode
+        run: |
+          xcode=$(printf "%s\n" /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+      - name: Install
+        run: npm ci
+        working-directory: frontend
+      - name: Prepare
+        run: npm run native:ios
+        working-directory: frontend
+      - name: Compile
+        working-directory: frontend/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build | tail -40
+          status=${PIPESTATUS[0]}
+          [ "$status" = 0 ] || exit "$status"
+          # The manifest only counts if it is IN the app; on disk beside the
+          # project it is nothing. The prepare script wires it into the target.
+          app="$RUNNER_TEMP/dd/Build/Products/Release-iphonesimulator/App.app"
+          test -f "$app/PrivacyInfo.xcprivacy" \
+            || { echo "::error::PrivacyInfo.xcprivacy is missing from App.app"; exit 1; }
+          plutil -lint "$app/PrivacyInfo.xcprivacy" "$app/Info.plist"
