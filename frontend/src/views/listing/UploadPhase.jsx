@@ -173,6 +173,10 @@ export function UploadPhase({ defaultOpen = false }) {
   // see AiNotesStep: a failed submit has to come back to the words they
   // wrote, not to an empty box.
   const [itemNotes, setItemNotes] = useState({});
+  // The approval on the review card, held here for the same reason.
+  // Scoped to the job they were given on: an approval belongs to one
+  // question, and must never show up on the next upload's card.
+  const [approvals, setApprovals] = useState({ jobId: null, map: {} });
   // Answering it. Separate from `busy` because the two render differently:
   // `busy` is the wait before the question, this is the wait after it.
   const [notesBusy, setNotesBusy] = useState(false);
@@ -234,7 +238,8 @@ export function UploadPhase({ defaultOpen = false }) {
         if (!live) return;
         if (!j.done && j.phase === "awaiting_notes") {
           setPending({ sessionId: saved.sessionId, jobId: saved.jobId,
-                       items: j.pending_items || [] });
+                       items: j.pending_items || [], google: j.google || {},
+                       googleEnabled: !!j.google_enabled });
           return;
         }
       } catch (e) { /* 404, or not ours: no question left to put back */ }
@@ -246,6 +251,37 @@ export function UploadPhase({ defaultOpen = false }) {
     return () => { live = false; };
     // Once, on mount: this is a restore, not a subscription.
   }, []);
+
+  // Google's answer arrives on the job's status while the question is up —
+  // the paused job runs the lookup on its own clock — so the card is polled
+  // until it has one. Only while an answer is still coming: a settled card
+  // has nothing more to learn from the server until the seller acts.
+  const googleWaiting = !!pending && !notesBusy && pending.googleEnabled
+    && (pending.items || []).some((it) => {
+      const entry = (pending.google || {})[String(it.key ?? it.gi)];
+      return !entry || entry.status === "pending";
+    });
+  useEffect(() => {
+    if (!googleWaiting || !pending?.jobId) return undefined;
+    const jobId = pending.jobId;
+    let live = true;
+    let timer;
+    const tick = async () => {
+      try {
+        const j = await api(`/api/bulk/status/${jobId}`);
+        if (!live) return;
+        if (!j.done && j.phase === "awaiting_notes") {
+          setPending((cur) => (cur && cur.jobId === jobId
+            ? { ...cur, google: { ...(cur.google || {}), ...(j.google || {}) },
+                googleEnabled: !!j.google_enabled }
+            : cur));
+        }
+      } catch { /* the next tick asks again */ }
+      if (live) timer = setTimeout(tick, 2000);
+    };
+    timer = setTimeout(tick, 1500);
+    return () => { live = false; clearTimeout(timer); };
+  }, [googleWaiting, pending?.jobId]);
   // Past the single-listing cap the pile can only be a bulk batch.
   const forceBulk = files.length > MAX_SINGLE_FILES;
   const bulkOn = bulk || forceBulk;
@@ -444,7 +480,9 @@ export function UploadPhase({ defaultOpen = false }) {
         stopWhen: (j) => j.phase === "awaiting_notes",
       });
       if (out?.split_error) {
-        setPending({ ...pending, items: out.pending_items || pending.items });
+        setPending({ ...pending, items: out.pending_items || pending.items,
+                     google: out.google || pending.google || {},
+                     googleEnabled: !!out.google_enabled });
         toast(out.split_error, { kind: "warning", ttl: 12000 });
         return;
       }
@@ -473,6 +511,25 @@ export function UploadPhase({ defaultOpen = false }) {
                             { gi, photo });
     } catch (e) {
       toast(`Couldn't remove that photo: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  };
+
+  // "Submit Changes": ask Google about the item again with what the seller
+  // typed. The card goes to "asking" at once, and the poll above picks up
+  // the answer. Throws on failure so the card keeps its button.
+  const askGoogle = async (gi, photo, text) => {
+    if (!pending) return undefined;
+    try {
+      const res = await postJson(`/api/bulk/notes/${pending.jobId}/google`,
+                                 { gi, photo, notes: text });
+      if (res?.google) {
+        setPending((cur) => (cur ? { ...cur, google: { ...(cur.google || {}),
+                                                         ...res.google } } : cur));
+      }
+      return res;
+    } catch (e) {
+      toast(`Couldn't ask Google again: ${e.message}`, { kind: "error" });
       throw e;
     }
   };
@@ -536,7 +593,8 @@ export function UploadPhase({ defaultOpen = false }) {
         writeLocal(ASK_KEY, JSON.stringify({ sessionId: up.session_id,
                                              jobId: up.job_id }));
         setPending({ sessionId: up.session_id, jobId: up.job_id,
-                     items: out.pending_items || [] });
+                     items: out.pending_items || [], google: out.google || {},
+                     googleEnabled: !!out.google_enabled });
         return;
       }
       finish(up.session_id, out);
@@ -557,7 +615,8 @@ export function UploadPhase({ defaultOpen = false }) {
       : stage.phase === "optimizing"
         ? `${cutMode === "cloud" ? "Cleaning up" : "Optimizing"} photo ${doneCount} of ${total}…`
         : stage.phase === "grouping" ? "Sorting your photos into items…"
-        : stage.phase === "identifying" ? "Identifying your item…"
+        : stage.phase === "google" ? "Looking it up on Google…"
+        : stage.phase === "identifying" ? "Writing your listing…"
           : stage.phase === "category" ? "Finding the right eBay category…"
             : stage.phase === "specifics" ? "Filling item specifics from your photos…"
               : stage.phase === "maker" ? "Double-checking the brand…"
@@ -598,6 +657,11 @@ export function UploadPhase({ defaultOpen = false }) {
           onSubmit={submitNotes}
           onDeletePhoto={deletePhoto}
           onSplit={splitPending}
+          google={pending.google}
+          googleEnabled={pending.googleEnabled}
+          onAskGoogle={askGoogle}
+          approved={approvals.jobId === pending.jobId ? approvals.map : {}}
+          onApprovedChange={(map) => setApprovals({ jobId: pending.jobId, map })}
         />
       </div>
     );

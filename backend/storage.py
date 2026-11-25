@@ -267,6 +267,40 @@ def load_item_notes(session_id: str) -> str:
         return ""
 
 
+LOOKUP_FILE = "google_lookup.json"
+
+
+def save_lookup(session_id: str, found: dict | None) -> None:
+    """Remember what Google image search said this item is and sells for.
+
+    Beside the item notes and for the same reason: it is an INPUT to the
+    draft — the identification the seller reviewed and approved at the
+    guidance step — so a re-run of the identify chain ("Start over", a resume
+    after a deploy) drafts from the answer the seller saw rather than asking
+    Google again and getting a different one. None clears it.
+
+    Best-effort, like the notes: a lookup that cannot be written must never
+    fail the batch the seller is waiting on.
+    """
+    try:
+        path = ensure_session(session_id) / LOOKUP_FILE
+        if found:
+            path.write_text(json.dumps(found))
+        else:
+            path.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError, InvalidSessionId) as exc:
+        log.warning(f"storage: could not save the Google lookup for {session_id}: {exc}")
+
+
+def load_lookup(session_id: str) -> dict | None:
+    """The saved Google lookup for this session, or None."""
+    try:
+        data = json.loads((session_dir(session_id) / LOOKUP_FILE).read_text())
+    except (OSError, ValueError, InvalidSessionId):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def load_listing(session_id: str) -> dict | None:
     """The saved draft as a plain dict, or None when this session has none.
 

@@ -157,6 +157,10 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // the answer is sent — see AiNotesStep: a failed submit has to come back to
   // forty boxes still full of what they wrote, not to forty empty ones.
   const [itemNotes, setItemNotes] = useState({});
+  // The approvals on the review cards, held here for the same reason.
+  // Scoped to the job they were given on: an approval belongs to one
+  // question, and must never show up on the next upload's card.
+  const [approvals, setApprovals] = useState({ jobId: null, map: {} });
   const stopped = useRef(false);
   const fails = useRef(0);
   // When the polls started failing. A deploy restarts the only server and
@@ -352,6 +356,18 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     }
   }, [jobId, toast]);
 
+  // "Submit Changes" on one card: Google is asked about that item again
+  // with what the seller typed, and the new answer arrives on the next polls.
+  // Throws like the others, which keeps the card's button for another try.
+  const askGoogle = useCallback(async (gi, photo, notes) => {
+    try {
+      return await postJson(`/api/bulk/notes/${jobId}/google`, { gi, photo, notes });
+    } catch (e) {
+      toast(`Couldn't ask Google again: ${e.message}`, { kind: "error" });
+      throw e;
+    }
+  }, [jobId, toast]);
+
   // Take a whole item out of the batch at the same moment, for the same
   // price: nothing. `photo` is one of its own, which is how the server knows
   // the slot still holds the item the seller tapped. Throws like the above,
@@ -503,6 +519,11 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
             onDeletePhoto={deletePhoto}
             onDeleteItem={deleteItem}
             onMergeItems={mergeItems}
+            google={job.google}
+            googleEnabled={!!job.google_enabled}
+            onAskGoogle={askGoogle}
+            approved={approvals.jobId === jobId ? approvals.map : {}}
+            onApprovedChange={(map) => setApprovals({ jobId: jobId, map })}
           />
           {/* Still the way off a batch the seller has changed their mind
               about. Nothing has been drafted at this point, so stopping here

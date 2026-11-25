@@ -58,6 +58,10 @@ _SCRUBBED = (
     # shell these would decide it for tests that are about something else.
     "GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
     "IDENTIFY_PROVIDER", "GOOGLE_VISION_MODEL",
+    # The primary identifier (Google image search in AI Mode): on whenever a
+    # SerpApi key is set, so one inherited from a shell would send every
+    # draft-chain test off to ask Google first.
+    "SERPAPI_KEY", "GOOGLE_AI_MODE",
     # The limited-release eBay scope flag. Inherited from a developer's shell
     # it would decide what EBAY_OAUTH_SCOPES contains, so the scope tests
     # would pass or fail for reasons unrelated to the code.

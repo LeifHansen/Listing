@@ -50,14 +50,15 @@ from .marketplaces.state import STICKY_STATUSES
 from .money import charm_price
 from .models import (LISTING_FORMATS, MAX_VIDEOS, TITLE_MAX_CHARS,
                      ImageOrderRequest, ItemNotesRequest, ItemSpecific, Listing,
-                     MarketplaceState, PendingItemRequest, PendingMergeRequest,
-                     PendingPhotoRequest, PendingSplitRequest, PublishRequest,
+                     MarketplaceState, PendingItemRequest, PendingLookupRequest,
+                     PendingMergeRequest, PendingPhotoRequest,
+                     PendingSplitRequest, PublishRequest,
                      RefineRequest, SessionOnlyRequest, SplitListingRequest)
 from .services import (barcodes, beanie, bg_removal, bulk_actions, claude_ai,
                        dirty_fields, duplicates, ebay,
                        ebay_account, ebay_deletion, ebay_notify, ebay_offers,
-                       ebay_trading, ebay_video, image_import, images,
-                       imagesearch, jobstore,
+                       ebay_trading, ebay_video, google_lookup, image_import,
+                       images, imagesearch, jobstore,
                        listing_export, listing_merge, listing_prompt,
                        listing_sync, metrics, notifications,
                        owed_refunds, preflight, pricing,
@@ -4076,6 +4077,151 @@ def _artwork_named(listing: Listing) -> bool:
     return artist.split()[-1].lower() in title
 
 
+# --- the primary identifier: Google image search in AI Mode ----------------
+#
+# What the item IS and what it SELLS for are Google's to say now, not a
+# vision model's. A seller pointing the Google app at the thing in their hand
+# got the right name and a higher, truer price every time, while the drafts
+# here went out cheap: the photos-only pass names a lookalike and prices the
+# lookalike, and nothing downstream could fix a name it never had.
+#
+# So the order is Google first (services/google_lookup): it runs at the
+# guidance step, the seller approves its answer per item or corrects it, and
+# the draft is written ABOUT that answer and priced FROM it. The passes that
+# used to carry this — the grounded research pass, the eBay keyword comps —
+# run only when Google could not answer.
+
+# How long an approved answer stands for a re-draft of the same item. "Start
+# over" a day later should write from what the seller approved; a month later
+# the market has moved, and the price should be asked for again.
+GOOGLE_LOOKUP_MAX_AGE = config.env_float("GOOGLE_LOOKUP_MAX_AGE_DAYS", 14.0) * 86400
+
+
+def _google_on() -> bool:
+    """The lookup is configured AND Google can be handed a photo URL (R2)."""
+    return google_lookup.enabled() and objstore.enabled()
+
+
+def _google_lookup_photo(session_id: str, path: Path, hint: str = "",
+                         temporary: bool = False) -> dict:
+    """Ask Google about one of `session_id`'s photos. Never raises.
+
+    Google fetches the photo itself, so it needs a URL it can reach: the copy
+    in the bucket. A per-item session is already mirrored there; a batch's
+    staging pile never is (see delete_pending_photo), so for that one the
+    photo goes up for the length of the call and comes straight back down —
+    `temporary` — rather than leaving a copy of every pile in the bucket.
+    """
+    if not _google_on():
+        return google_lookup.failed(
+            "Google image search isn't set up on this server.", hint)
+    key, uploaded = "", False
+    try:
+        key = objstore.key_for(session_id, path.name)
+        if not objstore.exists(key):
+            if objstore.upload(path, key) is None:
+                return google_lookup.failed("Couldn't hand Google this photo.", hint)
+            uploaded = True
+        url = objstore.url_for(key) or ""
+    except Exception as exc:  # noqa: BLE001 - the draft is worth more
+        log.info("google lookup: no fetchable URL for %s: %s", path.name, exc)
+        return google_lookup.failed("Couldn't hand Google this photo.", hint)
+    try:
+        return google_lookup.lookup(url, hint)
+    finally:
+        if uploaded and temporary:
+            try:
+                objstore.delete(key)
+            except Exception as exc:  # noqa: BLE001 - tidiness, not the work
+                log.info("google lookup: couldn't drop the temporary copy of "
+                         "%s: %s", path.name, exc)
+
+
+def _google_for_draft(session_id: str, paths: list,
+                      hint: str = "") -> Optional[dict]:
+    """The Google answer this draft is written from, or None.
+
+    The one the seller approved at the guidance step when there is one (saved
+    beside the item's notes), so the draft is about the item they said yes
+    to. Otherwise — Shop Mode, a stale answer, a lookup that failed at the
+    question — Google is asked now, with the seller's last correction or
+    their line about this item. None when Google is off or had no answer,
+    which is the fallbacks' cue.
+    """
+    found = storage.load_lookup(session_id)
+    try:
+        age = time.time() - float((found or {}).get("at") or 0)
+    except (TypeError, ValueError):
+        age = GOOGLE_LOOKUP_MAX_AGE
+    if found and age < GOOGLE_LOOKUP_MAX_AGE and google_lookup.usable(found):
+        return found
+    paths = [p for p in paths if p.is_file()]
+    if not _google_on() or not paths:
+        return None
+    found = _google_lookup_photo(session_id, paths[0],
+                                 (found or {}).get("hint") or hint)
+    storage.save_lookup(session_id, found)
+    return found if google_lookup.usable(found) else None
+
+
+def _lookup_kwarg(found: Optional[dict]) -> dict:
+    """`lookup=` for claude_ai.identify, only when Google answered — a draft
+    without one is identified exactly as it always was."""
+    return {"lookup": found} if found else {}
+
+
+def _price_from_google(listing: Listing, found: Optional[dict],
+                       strategy: str = "") -> Optional[dict]:
+    """Price a fresh draft from Google's range, in place. The PRIMARY price.
+
+    The range for the item's condition — used, or new when the draft is
+    graded new (see google_lookup.price_range) — at the point of it the
+    account's strategy picks, on a .99. It replaces whatever the model wrote,
+    in either direction: the model's number is a guess from the photos, and
+    Google's is what the item it identified actually sells for, which the
+    seller has usually just reviewed. Also fills an empty brand from Google.
+
+    Returns {"price", "low", "high"} when it priced, None when Google had no
+    price for this condition — the eBay comps' cue.
+    """
+    if not google_lookup.usable(found):
+        return None
+    brand = str(found.get("brand") or "").strip()
+    if brand and not (listing.brand or "").strip() \
+            and brand.lower() not in ("none", "unknown", "n/a", "unbranded"):
+        listing.brand = brand[:65]
+    new = taxonomy.CONDITION_FAMILY.get(
+        (listing.condition or "").strip().upper()) == "new"
+    span = google_lookup.price_range(found, new=new)
+    if not span:
+        return None
+    low, high = span
+    price = charm_price(google_lookup.pick(low, high, strategy))
+    if price is None:
+        return None
+    was = listing.price
+    listing.price = price
+    log.info("draft price: google %s -> %.2f (%s $%.2f-$%.2f, strategy %s)",
+             "none" if was is None else f"{float(was):.2f}", price,
+             "new" if new else "used", low, high, strategy or "median")
+    return {"price": price, "low": low, "high": high}
+
+
+def _price_draft(listing: Listing, found: Optional[dict], uid: Optional[str],
+                 prefs: Optional[dict] = None) -> None:
+    """Price a fresh draft, in place: Google first, the eBay comps only when
+    Google had no price, and the retail-tag floor after either — capped by
+    whichever market answered, so a fraction of a tag never prices an item
+    above what it actually sells for."""
+    market: dict = {}
+    priced = _price_from_google(listing, found, _pricing_strategy(uid, prefs))
+    if priced:
+        market = {"price": priced["price"], "high": priced["high"]}
+    else:
+        _price_against_comps(listing, uid, prefs, market_out=market)
+    _price_against_retail(listing, market)
+
+
 def _reverse_image_leads(session_id: str, path) -> list[dict]:
     """What a reverse image search says about one photo, as leads for the
     lookup. The engine fetches the image itself, so it needs a URL it can
@@ -6568,11 +6714,17 @@ def identify(session_id: str, request: Request) -> dict:
         raise HTTPException(404, "No optimized images found for this session.")
     paths = [opt_dir / n for n in names]
     spent = deps.charge_ai(request, "identify")
+    item_notes = storage.load_item_notes(session_id)
+    # Google first: what the item is and what it sells for. Shop Mode has no
+    # review step, so it is asked here, inside the scan — the seller standing
+    # in a shop deciding whether to buy needs Google's number most of all.
+    google = _google_for_draft(session_id, paths, item_notes)
     try:
         result = claude_ai.identify(paths, names,
                                     strategy=_pricing_strategy(deps.uid(request)),
                                     notes=storage.load_notes(session_id),
-                                    item_notes=storage.load_item_notes(session_id))
+                                    item_notes=item_notes,
+                                    **_lookup_kwarg(google))
     except errors.StorageUnavailable:
         # Refund first, then let it keep its own name: an AI error message
         # sends the seller to retry the model or re-shoot their photos, and
@@ -6596,22 +6748,19 @@ def identify(session_id: str, request: Request) -> dict:
     barcodes.apply_to_listing(result.listing, result.identifiers)
     _resolve_category(result.listing)
     _assign_store_category(result.listing, deps.uid(request))
-    # Research BEFORE comps: it can rewrite a hedged title into the real one,
-    # and the comp search is only as good as the title it searches for.
-    _research_draft(result.listing, paths, result.raw_observations,
-                    result.confidence)
+    # The research pass is the FALLBACK identifier now: it runs only when
+    # Google had no answer. Before comps, because it can rewrite a hedged
+    # title into the real one and the comp search is only as good as the title.
+    if not google:
+        _research_draft(result.listing, paths, result.raw_observations,
+                        result.confidence)
     # Research may have replaced a hedged title with the real one; if the
     # first attempt left this draft without a category NUMBER, the better
     # title gets it one now.
     _resolve_category_after_research(result.listing)
-    # After the category: comps are sharper filtered to it. See
-    # _price_against_comps — the photos alone never see a comparable listing.
-    market: dict = {}
-    _price_against_comps(result.listing, deps.uid(request), market_out=market)
-    # ...and then the item's own tag, which the comps' order-of-magnitude bar
-    # cannot act on and which is the only evidence at all when they were
-    # silent. Capped by what that same market said it is worth.
-    _price_against_retail(result.listing, market)
+    # Google's price first; the eBay comps only when it had none; then the
+    # item's own tag, capped by whichever market answered. See _price_draft.
+    _price_draft(result.listing, google, deps.uid(request))
     storage.save_listing(session_id, result.listing)
     # A SCAN, not a draft. This route is Shop Mode's alone (the pipeline
     # drafts through /api/identify-async), and the seller who triggered it is
@@ -8373,10 +8522,16 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 # question rather than have the batch give up on them.
                 "_resumes": resumes,
                 "_names": names, "_groups": groups, "_done": [], "_inflight": [],
+                # Google's answers the seller may already have read, put
+                # back on the same cards; any the restart cut off mid-search
+                # are asked again just below.
+                "google": record.get("google") or {},
+                "google_enabled": _google_on(),
             }, uid=uid)
             resumed.add(job_id)
             log.info("bulk %s: still waiting on the seller's notes for %d "
                      "item(s) after a restart", job_id, len(groups))
+            _start_google_lookups(job_id, uid, restart=True)
             continue
         if drafting:
             plan = _drafting_plan(record, staging)
@@ -8404,11 +8559,18 @@ def _resume_interrupted_batches(records: list[dict]) -> set[str]:
                 # it here would finish the batch without the one thing they
                 # stopped it to say.
                 "_item_notes": record.get("_item_notes") or {},
+                # ...and the Google answers they approved, for the same
+                # reason: the items still to draft are drafted from them.
+                "google": record.get("google") or {},
             }, uid=uid)
             threading.Thread(
                 target=_run_bulk_job, args=(job_id, staging, strip_bg, uid),
                 kwargs={"resumed": True, "resume_from": plan,
-                        "item_notes": _mirrored_item_notes(record)},
+                        "item_notes": _mirrored_item_notes(record),
+                        **_lookups_kwarg(_approved_lookups(
+                            {**record, "_staging_id": staging,
+                             "_names": plan["names"],
+                             "_groups": plan["groups"]}))},
                 daemon=True,
             ).start()
             resumed.add(job_id)
@@ -8502,6 +8664,11 @@ class _BulkContext:
     # written before it existed), and missing keys are simply items the seller
     # left blank -- both mean the same thing to the prompt as no step at all.
     item_notes: dict = field(default_factory=dict)
+    # {group index: the Google image search answer the seller approved for
+    # THAT item at the review step}. Saved into each item's session before it
+    # is drafted, so the draft — and any later "Start over" — is written from
+    # the answer the seller said yes to. See _approved_lookups.
+    lookups: dict = field(default_factory=dict)
     # The ad rate the account's auto-promote runs at, or None for eBay's
     # suggestion per listing. Read once with `auto_promote`, same as prefs.
     auto_promote_rate: Optional[float] = None
@@ -8636,6 +8803,8 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
         # is exactly what precharged means), so the item would otherwise be
         # finished without the one thing the seller stopped to type.
         storage.save_item_notes(sid, ctx.item_notes.get(gi, ""))
+        if gi in ctx.lookups:
+            storage.save_lookup(sid, ctx.lookups[gi])
         # Same for the device queue's rows: the attempt that made this
         # session may have died before it copied them. Idempotent.
         if ctx.staging_id:
@@ -8666,6 +8835,10 @@ def _bulk_item_session(gi: int, ctx: _BulkContext) -> tuple[str, list[str], bool
     # reason as the pile's -- a "Start over" months from now must not forget
     # the one thing the seller stopped the batch to say.
     storage.save_item_notes(sid, ctx.item_notes.get(gi, ""))
+    # ...and the Google answer the seller approved for it, which the draft is
+    # written about (see _google_for_draft).
+    if gi in ctx.lookups:
+        storage.save_lookup(sid, ctx.lookups[gi])
     return sid, item_names, False
 
 
@@ -8720,9 +8893,14 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
     item_dir = storage.optimized_dir(sid)
     paths = [item_dir / n for n in item_names]
     try:
+        # Google first: the answer the seller approved at the guidance step
+        # (saved into this item's session by _bulk_item_session), or one
+        # asked for now when there was none.
+        google = _google_for_draft(sid, paths, ctx.item_notes.get(gi, ""))
         result = claude_ai.identify(paths, item_names, strategy=ctx.strategy,
                                     notes=ctx.notes,
-                                    item_notes=ctx.item_notes.get(gi, ""))
+                                    item_notes=ctx.item_notes.get(gi, ""),
+                                    **_lookup_kwarg(google))
         # Each item's confidence onto its own draft: the queue card
         # is where a seller decides which of forty to open first.
         result.listing.ai_confidence = result.confidence
@@ -8750,8 +8928,10 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         _drop_answered_missing_info(listing)
         _lookup_artwork(listing, paths, sid, result.raw_observations,
                         tags=result.tags, uid=ctx.uid or "")
-        _research_draft(listing, paths, result.raw_observations,
-                        result.confidence)
+        # The fallback identifier: only when Google had no answer.
+        if not google:
+            _research_draft(listing, paths, result.raw_observations,
+                            result.confidence)
         # Research may have replaced a hedged title with the real one; if the
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
@@ -8761,9 +8941,8 @@ def _draft_one_bulk_item(job_id: str, gi: int, ctx: _BulkContext,
         # this draft its item specifics, and forty drafts the seller has to
         # finish one by one is forty times the reason not to leave them.
         _fill_what_is_left(listing, paths, uid=ctx.uid, tags=result.tags)
-        market: dict = {}
-        _price_against_comps(listing, ctx.uid, ctx.prefs, market_out=market)
-        _price_against_retail(listing, market)
+        # Google's price first; the eBay comps only when it had none.
+        _price_draft(listing, google, ctx.uid, ctx.prefs)
         storage.save_listing(sid, listing)
         db.upsert_listing(sid, listing.model_dump(), status="draft",
                           user_id=ctx.uid)
@@ -8890,7 +9069,8 @@ def _group_pile(job_id: str, opt_dir: Path, names: list[str],
 def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                   uid: Optional[str], resumed: bool = False,
                   resume_from: Optional[dict] = None,
-                  item_notes: Optional[dict] = None) -> None:
+                  item_notes: Optional[dict] = None,
+                  lookups: Optional[dict] = None) -> None:
     """Background worker: optimize -> group -> ask -> per-item identify. Every
     item lands as a draft for review; publishing is always an explicit choice.
 
@@ -9086,9 +9266,14 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                 paused = True
                 delivered = True
                 _bulk_set(job_id, phase=_AWAITING_NOTES, current=0,
-                          pending_items=_pending_items(staging_id, names, groups))
+                          pending_items=_pending_items(staging_id, names, groups),
+                          google_enabled=_google_on())
                 log.info("bulk %s: %d photo(s) -> %d item(s); waiting on the "
                          "seller's notes", job_id, len(names), len(groups))
+                # Google's answer for each item, onto its card as it lands:
+                # the review step shows what each one is and sells for
+                # before the seller approves anything.
+                _start_google_lookups(job_id, uid)
                 return
 
         ctx = _BulkContext(uid=uid, prefs=prefs, strategy=strategy,
@@ -9097,6 +9282,7 @@ def _run_bulk_job(job_id: str, staging_id: str, strip_bg: bool,
                            notes=notes, names=names, groups=groups,
                            opt_dir=opt_dir, precharged=precharged,
                            item_notes=item_notes or {},
+                           lookups=lookups or {},
                            staging_id=staging_id)
         _bulk_set(job_id, phase="identifying")
         _draft_bulk_items(job_id, remaining, ctx, progress)
@@ -9332,6 +9518,235 @@ def _photos_gone(job_id: str, verb: str, reason: str) -> HTTPException:
                               f"please {verb}.")
 
 
+# --- the review step: Google's answer for every item, before any draft -----
+#
+# The guidance step used to ask one thing — "anything the photos don't show?"
+# — and then let a vision model guess at the rest. It now SHOWS the seller what
+# Google image search says each item is and what it sells for, the moment the
+# pile is sorted, and asks them to approve it or correct it. A correction
+# ("it's the 403, not the 404") is asked of Google again with the photo, so
+# what the seller approves is Google's answer for the item they described.
+#
+# The answers live on the job's public `google` field, keyed by the item's
+# `key` (which survives the renumbering a removed item causes), and arrive on
+# the client's normal status poll. They are written through jobstore.annotate,
+# which does NOT move the job's revision: the seller's deletes and merges are
+# written against it, and a lookup landing between their read and their write
+# must not turn their tap into a refusal.
+
+# Searches in flight at once, across every seller. Each one is a paid SerpApi
+# call holding a connection open for several seconds, and a 40-item batch
+# should fill its cards in order rather than open forty connections at once.
+_GOOGLE_POOL = ThreadPoolExecutor(
+    max_workers=max(1, int(os.getenv("GOOGLE_LOOKUP_WORKERS", "4") or 4)),
+    thread_name_prefix="google-lookup")
+# How many times one item may be asked about again. Each ask is a paid search;
+# a seller still correcting after this many is better served by approving and
+# fixing the draft in the editor.
+GOOGLE_ASKS_PER_ITEM = 6
+# What a lookup entry carries that the drafting run has no use for.
+_LOOKUP_BOOKKEEPING = ("ticket", "photo", "asks")
+
+
+def _photo_on_disk(url: str) -> Optional[tuple[str, Path]]:
+    """(session id, path) for a pending item's photo URL, as _pending_items
+    built it: /media/<session>/optimized/<name>. None for anything else."""
+    parts = str(url or "").split("?", 1)[0].strip("/").split("/")
+    if len(parts) != 4 or parts[0] != "media" or parts[2] != "optimized":
+        return None
+    try:
+        sid = storage.safe_session_name(parts[1])
+    except Exception:  # noqa: BLE001 - not one of ours
+        return None
+    name = Path(parts[3]).name
+    if not name or name != parts[3]:
+        return None
+    return sid, storage.optimized_path(sid) / name
+
+
+def _google_item_worker(job_id: str, key: str, photo: str, hint: str,
+                        asks: int, ticket: str, temporary: bool) -> None:
+    """Run one item's lookup and put the answer on its card. Never raises."""
+    try:
+        where = _photo_on_disk(photo)
+        if where and where[1].is_file():
+            found = _google_lookup_photo(where[0], where[1], hint,
+                                         temporary=temporary)
+        else:
+            found = google_lookup.failed(
+                "That photo is no longer on the server.", hint)
+        entry = {**found, "photo": photo, "hint": hint, "asks": asks,
+                 "ticket": ticket}
+        # Only over the lookup it was started as: a photo removed or a newer
+        # "Submit Changes" since has started another, and that one's answer
+        # is the one the card is waiting for.
+        jobstore.annotate(job_id, "google", key, entry,
+                          expect_phase=_AWAITING_NOTES,
+                          when=lambda cur: (cur or {}).get("ticket") == ticket)
+    except Exception as exc:  # noqa: BLE001 - a pool thread must not die loud
+        log.warning("google lookup: job %s item %s failed: %s", job_id, key, exc)
+        jobstore.annotate(
+            job_id, "google", key,
+            {**google_lookup.failed("Couldn't reach Google — try again in a "
+                                    "moment.", hint),
+             "photo": photo, "asks": asks, "ticket": ticket},
+            expect_phase=_AWAITING_NOTES,
+            when=lambda cur: (cur or {}).get("ticket") == ticket)
+
+
+def _ask_google_for_item(job_id: str, key: str, photo: str, hint: str = "",
+                         asks: int = 0, temporary: bool = True) -> Optional[dict]:
+    """Put one item's card into "asking Google" and start the lookup.
+
+    Returns the pending entry, or None when the job is no longer paused."""
+    ticket = secrets.token_hex(12)
+    pending = {"status": "pending", "photo": photo, "hint": hint,
+               "asks": asks, "ticket": ticket}
+    if not jobstore.annotate(job_id, "google", key, pending,
+                             expect_phase=_AWAITING_NOTES):
+        return None
+    _GOOGLE_POOL.submit(_google_item_worker, job_id, key, photo, hint, asks,
+                        ticket, temporary)
+    return pending
+
+
+def _start_google_lookups(job_id: str, uid: Optional[str],
+                          restart: bool = False) -> int:
+    """Ask Google about every item of a paused job that has no answer for the
+    photo it now leads with. Returns how many lookups it started.
+
+    Called whenever the guidance step's items change — the pause itself, a
+    photo removed, items merged, a single upload sorted into a batch — and
+    idempotent across all of them: an item whose answer is for its current
+    first photo keeps it. `restart` re-asks the ones a dead process left
+    "pending", whose worker died with it.
+
+    A batch's photos are in the staging pile, which is never mirrored to the
+    bucket, so each goes up only for the length of its own call
+    (`temporary`); a single upload's session is mirrored already.
+    """
+    if not _google_on():
+        return 0
+    job = jobstore.internal(job_id, uid)
+    if not job or job.get("done") or job.get("phase") != _AWAITING_NOTES:
+        return 0
+    temporary = job.get("kind") != "pipeline"
+    current = job.get("google") or {}
+    started = 0
+    for row in job.get("pending_items") or []:
+        photos = row.get("photos") or []
+        if not photos:
+            continue
+        key = str(row.get("key", row.get("gi")))
+        entry = current.get(key) or {}
+        same_photo = entry.get("photo") == photos[0]
+        if same_photo and entry.get("status") in ("done", "failed"):
+            continue
+        if same_photo and entry.get("status") == "pending" and not restart:
+            continue
+        if _ask_google_for_item(job_id, key, photos[0],
+                                hint=str(entry.get("hint") or ""),
+                                asks=int(entry.get("asks") or 0),
+                                temporary=temporary):
+            started += 1
+    if started:
+        log.info("job %s: asking Google about %d item(s)", job_id, started)
+    return started
+
+
+def _approved_lookups(job: dict) -> dict[int, dict]:
+    """{group index: the Google answer its card showed}, off a paused job.
+
+    Only answers for the photo each item still leads with — anything else is
+    about a photo that has since been removed — and stripped of the card's
+    bookkeeping. A failed lookup is carried too, so the draft knows it was
+    tried; _google_for_draft asks again rather than drafting from it.
+    """
+    google = job.get("google") or {}
+    if not google:
+        return {}
+    if job.get("kind") == "pipeline":
+        sid = str(job.get("_session_id") or "")
+        names = storage.list_optimized(sid) if sid else []
+        firsts = {0: (f"/media/{sid}/optimized/{names[0]}" if names else "", 0)}
+    else:
+        staging = str(job.get("_staging_id") or "")
+        names = [n for n in (job.get("_names") or []) if isinstance(n, str)]
+        firsts = {}
+        for gi, group in enumerate(job.get("_groups") or []):
+            idx = [i for i in (group.get("indices") or []) if 0 <= i < len(names)]
+            firsts[gi] = (f"/media/{staging}/optimized/{names[idx[0]]}"
+                          if idx else "", group.get("key", gi))
+    out: dict[int, dict] = {}
+    for gi, (photo, key) in firsts.items():
+        entry = google.get(str(key))
+        if not isinstance(entry, dict) or not photo:
+            continue
+        if entry.get("photo") != photo or entry.get("status") not in ("done", "failed"):
+            continue
+        out[gi] = {k: v for k, v in entry.items() if k not in _LOOKUP_BOOKKEEPING}
+    return out
+
+
+def _lookups_kwarg(lookups: dict) -> dict:
+    """`lookups=` for _run_bulk_job, only when there are any — a batch on a
+    server without Google starts its drafting run exactly as it always has."""
+    return {"lookups": lookups} if lookups else {}
+
+
+@app.post("/api/bulk/notes/{job_id}/google")
+def ask_google_again(job_id: str, req: PendingLookupRequest,
+                     request: Request) -> dict:
+    """The review step's "Submit Changes": ask Google about one item again,
+    with what the seller typed.
+
+    The seller has read Google's answer for this item and it is wrong, or not
+    specific enough — "it's the 2.5 qt one", "these are the 1990s reissue".
+    Their line goes to Google WITH the photo, so the answer that comes back is
+    Google's reading of the item they described, priced as that item, and it
+    is that answer they then approve. The line is also the item's note for
+    the draft, exactly as it was before this step learned to ask Google.
+
+    Answers at once, with the card in "asking Google"; the result arrives on
+    the job's status like every other lookup. Nothing is charged for it.
+    """
+    uid = deps.uid(request)
+    seen = jobstore.internal(job_id, uid)
+    if seen is None:
+        raise HTTPException(404, "Unknown job.")
+    if seen.get("done") or seen.get("phase") != _AWAITING_NOTES:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    if not _google_on():
+        raise HTTPException(
+            400, "Google image search isn't set up on this server — approve "
+                 "the item and your note goes to the AI with the photos.")
+    photo = (req.photo or "").strip()
+    row = next((r for r in seen.get("pending_items") or []
+                if r.get("gi") == req.gi), None)
+    if row is None or photo not in (row.get("photos") or []):
+        raise _pending_photo_gone()
+    key = str(row.get("key", row.get("gi")))
+    entry = (seen.get("google") or {}).get(key) or {}
+    asks = int(entry.get("asks") or 0)
+    if asks >= GOOGLE_ASKS_PER_ITEM:
+        raise HTTPException(
+            429, "That's as many times as Google can be asked about one item. "
+                 "Approve it, and fix anything left in the listing editor.")
+    first = (row.get("photos") or [photo])[0]
+    pending = _ask_google_for_item(
+        job_id, key, first, hint=listing_prompt.clean_item_notes(req.notes),
+        asks=asks + 1, temporary=seen.get("kind") != "pipeline")
+    if pending is None:
+        raise HTTPException(
+            409, "This job isn't waiting for notes — it has already moved on. "
+                 "Reload to see where it got to.")
+    log.info("job %s: seller asked Google again about item %s (ask %d)",
+             job_id, key, asks + 1)
+    return {"ok": True, "google": {key: pending}}
+
+
 @app.post("/api/bulk/notes/{job_id}")
 def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
     """Answer the guidance step, and let the job get on with it.
@@ -9407,6 +9822,11 @@ def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
                 "cleared while this waited for your notes. Please upload "
                 "them again.")
         storage.save_item_notes(session_id, cleaned.get(0, ""))
+        # The Google answer the seller just approved, beside the note, so the
+        # chain drafts from it rather than asking Google again.
+        approved = _approved_lookups(job)
+        if 0 in approved:
+            storage.save_lookup(session_id, approved[0])
         receipts = job.get("_refunds") or []
         threading.Thread(
             target=_run_identify_job,
@@ -9434,7 +9854,8 @@ def bulk_notes(job_id: str, req: ItemNotesRequest, request: Request) -> dict:
         args=(job_id, staging_id, bool(job.get("_strip_bg")), uid),
         # resumed: the background-removal tokens were taken by the run that
         # optimized the pile, and must not be taken again here.
-        kwargs={"resumed": True, "resume_from": plan, "item_notes": cleaned},
+        kwargs={"resumed": True, "resume_from": plan, "item_notes": cleaned,
+                **_lookups_kwarg(_approved_lookups(job))},
         daemon=True,
     ).start()
     log.info("bulk %s: notes in for %d of %d item(s); drafting",
@@ -9536,6 +9957,8 @@ def delete_pending_photo(job_id: str, req: PendingPhotoRequest,
                      "reload to see where it got to.")
         log.info("pipeline %s: seller dropped a photo at the question "
                  "(%d left)", job_id, len(left))
+        # The photo Google was shown may be the one that went.
+        _start_google_lookups(job_id, uid)
         return {"ok": True, "pending_items": pending}
 
     staging = str(seen.get("_staging_id") or "")
@@ -9604,6 +10027,8 @@ def delete_pending_photo(job_id: str, req: PendingPhotoRequest,
     log.info("bulk %s: seller dropped a photo from item %d (%d left on it, "
              "%d in the pile)", job_id, req.gi,
              len(regrouped[req.gi]["indices"]), len(left))
+    # The photo Google was shown may be the one that went.
+    _start_google_lookups(job_id, uid)
     return {"ok": True, "pending_items": pending}
 
 
@@ -9799,6 +10224,8 @@ def merge_pending_items(job_id: str, req: PendingMergeRequest,
                  "what it's working from.")
     log.info("bulk %s: seller merged items %s into one (%d photo(s)); %d "
              "item(s) left", job_id, picked, len(combined), len(regrouped))
+    # The merged item may now lead with a photo Google has not seen.
+    _start_google_lookups(job_id, uid)
     return {"ok": True, "pending_items": pending, "merged": into}
 
 
@@ -9904,6 +10331,7 @@ def _run_split_job(job_id: str, session_id: str, uid: Optional[str],
         # touches a job in "grouping".
         _bulk_set(job_id, phase=_AWAITING_NOTES, pending_items=single,
                   split_error=why, kind="pipeline", beat=time.time())
+        _start_google_lookups(job_id, uid)
 
     if not names:
         back_to_one("Those photos are no longer on the server.")
@@ -9953,6 +10381,9 @@ def _run_split_job(job_id: str, session_id: str, uid: Optional[str],
     log.info("pipeline %s: sorted %d photo(s) into %d item(s); now a batch "
              "waiting on the seller's notes", job_id, len(readable),
              len(groups))
+    # One question became several: each new item gets its own answer (the
+    # first keeps the one it had, when it still leads with the same photo).
+    _start_google_lookups(job_id, uid)
 
 
 @app.get("/api/bulk/status/{job_id}/brief")
@@ -9993,17 +10424,25 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
             _bulk_set(job_id, phase=phase, beat=time.time())
 
         prefs = _load_prefs(uid)  # once — strategy and defaults both read it
-        _beat("identifying")
         # The seller's hints were saved with the session -- the pile's at
         # upload time, this item's at the guidance step -- so they are read
         # here rather than passed in: this worker also runs "Start over",
         # which re-drafts months later with no request to carry them, and a
         # re-run that has forgotten what the seller told it makes exactly the
         # mistake they typed the note to prevent.
+        item_notes = storage.load_item_notes(session_id)
+        # Google first, for the same reason and from the same place: the
+        # answer the seller approved at the guidance step is saved with the
+        # session, and only a missing or stale one is asked for again.
+        _beat("google")
+        google = _google_for_draft(session_id, [opt_dir / n for n in names],
+                                   item_notes)
+        _beat("identifying")
         result = claude_ai.identify([opt_dir / n for n in names], names,
                                     strategy=_pricing_strategy(uid, prefs),
                                     notes=storage.load_notes(session_id),
-                                    item_notes=storage.load_item_notes(session_id))
+                                    item_notes=item_notes,
+                                    **_lookup_kwarg(google))
         # Onto the draft itself, not only the job's answer: the editor reads
         # the job, the cards read the record (see Listing.ai_confidence).
         result.listing.ai_confidence = result.confidence
@@ -10029,9 +10468,11 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         _lookup_artwork(result.listing, [opt_dir / n for n in names],
                         session_id, result.raw_observations, tags=result.tags,
                         uid=uid or "")
-        _beat("research")
-        _research_draft(result.listing, [opt_dir / n for n in names],
-                        result.raw_observations, result.confidence)
+        if not google:
+            # The fallback identifier: only when Google had no answer.
+            _beat("research")
+            _research_draft(result.listing, [opt_dir / n for n in names],
+                            result.raw_observations, result.confidence)
         # Research may have replaced a hedged title with the real one; if the
         # first attempt left this draft without a category NUMBER, the better
         # title gets it one now.
@@ -10056,9 +10497,8 @@ def _run_identify_job(job_id: str, session_id: str, uid: Optional[str],
         # filled and stood the fallback down over a draft with every required
         # specific still blank.
         result.specifics_autofilled = _specifics_were_filled(added)
-        market: dict = {}
-        _price_against_comps(result.listing, uid, prefs, market_out=market)
-        _price_against_retail(result.listing, market)
+        # Google's price first; the eBay comps only when it had none.
+        _price_draft(result.listing, google, uid, prefs)
         storage.save_listing(session_id, result.listing)
         db.upsert_listing(session_id, result.listing.model_dump(), status="draft", user_id=uid)
         _bulk_set(job_id, done=True, phase="done", result=result.model_dump())
@@ -10168,8 +10608,10 @@ def _run_pipeline_job(job_id: str, session_id: str, uid: Optional[str],
     _bulk_set(job_id, phase=_AWAITING_NOTES, beat=time.time(),
               pending_items=_pending_items(
                   session_id, optimized,
-                  [{"name": "", "indices": list(range(len(optimized)))}]))
+                  [{"name": "", "indices": list(range(len(optimized)))}]),
+              google_enabled=_google_on())
     log.info("pipeline %s: photos ready; waiting on the seller's notes", job_id)
+    _start_google_lookups(job_id, uid)
 
 
 @app.post("/api/identify-async/{session_id}")

@@ -783,6 +783,22 @@ class ItemNotesRequest(BaseModel):
     notes: dict[str, str] = Field(default_factory=dict)
 
 
+class PendingLookupRequest(BaseModel):
+    """Ask Google about one item again, with the seller's correction — the
+    review step's "Submit Changes". See POST /api/bulk/notes/{job_id}/google.
+
+    `gi` and `photo` identify the item the way the other guidance-step edits
+    do: a slot, and one of that slot's own photo URLs, so a request aimed at a
+    slot a removal has since renumbered names nothing rather than the wrong
+    item. `notes` is what the seller typed; it rides the question to Google
+    and becomes the item's line for the draft.
+    """
+
+    gi: int
+    photo: str
+    notes: str = Field(default="", max_length=4000)
+
+
 class PendingPhotoRequest(BaseModel):
     """One photo to take off one item at the guidance step — see POST
     /api/bulk/notes/{job_id}/delete-photo.
