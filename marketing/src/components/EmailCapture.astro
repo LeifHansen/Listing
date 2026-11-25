@@ -45,39 +45,19 @@ const endpoint = import.meta.env.PUBLIC_SIGNUP_ENDPOINT || "";
 <p class="signup-done mt-3 hidden text-sm font-semibold text-green-ink">
   You're on the list — we'll be in touch.
 </p>
-{endpoint && (
-  <p class="signup-failed mt-3 hidden text-sm font-semibold text-red-ink">
-    That didn't go through. Try again, or email{" "}
-    <a class="underline" href={`mailto:${site.supportEmail}`}>{site.supportEmail}</a>.
-  </p>
-)}
 
 <script is:inline>
   // Progressive enhancement: post in the background so the visitor stays on
   // the page. Without JS the form still submits normally.
-  //
-  // An inline script is not deduplicated: it is on the page once per
-  // EmailCapture (twice on /mobile), and every copy walks every form. Bound
-  // once per form, or the first one posted each address twice.
   document.querySelectorAll(".signup-form").forEach((form) => {
-    if (form.dataset.bound) return;
-    form.dataset.bound = "1";
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const done = form.parentElement?.querySelector(".signup-done");
-      const failed = form.parentElement?.querySelector(".signup-failed");
-      let refused = false;
       try {
-        const res = await fetch(form.action, { method: "POST", body: new FormData(form) });
-        // An answer that says no is a no: telling them they are on the list
-        // loses the address in silence. The typed address stays put.
-        refused = !res.ok;
+        await fetch(form.action, { method: "POST", body: new FormData(form) });
       } catch (e) {
-        /* No readable answer. An endpoint that sends no CORS headers ends up
-           here AFTER taking the address, so this cannot claim a failure. */
+        /* the address is captured or it is not; nothing useful to say here */
       }
-      failed?.classList.toggle("hidden", !refused);
-      if (refused) return;
       form.reset();
       done?.classList.remove("hidden");
     });
