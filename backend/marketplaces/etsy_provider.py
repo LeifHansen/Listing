@@ -22,7 +22,8 @@ from ..config import log
 from ..models import Listing
 from ..services import etsy, image_import
 from . import register
-from .base import PublishContext, PublishOutcome
+from .base import (PublishContext, PublishOutcome, connection_changed,
+                   make_room)
 from . import mapping_etsy
 
 _ACCESS_CACHE: dict[str, tuple[float, str]] = {}   # uid -> (expiry, token)
@@ -232,6 +233,16 @@ class EtsyProvider:
                     # connection permanently unrecoverable, with the next
                     # publish quietly falling through to a dry run. Better to
                     # fail now, loudly, while the seller is still here.
+                    #
+                    # Unless the row moved while the refresh was out: a
+                    # disconnect cleared it, or a reconnect replaced it. Saving
+                    # then reconnects a shop the seller just let go of, or puts
+                    # the old connection's token over the new one's.
+                    if connection_changed(db.get_marketplace_account(uid, "etsy"),
+                                          acct["refresh_token"]):
+                        log.info("etsy: connection for user %s changed during a "
+                                 "token refresh; not storing the rotation", uid)
+                        return None
                     if fresh.get("refresh_token") and not db.save_marketplace_account(
                             uid, "etsy", refresh_token=fresh["refresh_token"]):
                         log.error(
@@ -239,8 +250,7 @@ class EtsyProvider:
                             "user %s — the connection would break silently, so "
                             "treating this as a failed refresh.", uid)
                         return None
-                    if len(_ACCESS_CACHE) > 50:
-                        _ACCESS_CACHE.clear()
+                    make_room(_ACCESS_CACHE)
                     access = fresh["access_token"]
                     _ACCESS_CACHE[uid] = (
                         max(time.time() + 60, fresh["expires_at"] - 90), access)

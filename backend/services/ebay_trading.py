@@ -31,7 +31,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from .. import config
+from .. import config, ebay_errors
 from ..config import log
 from ..models import (MAX_VIDEOS, SUBTITLE_MAX_CHARS, TITLE_MAX_CHARS,
                       ItemSpecific, Listing)
@@ -285,8 +285,21 @@ def _headers(call: str, token: str) -> dict[str, str]:
     }
 
 
+# Characters XML 1.0 does not allow ANYWHERE -- escaping does nothing for
+# them and CDATA does not either. Text pasted from Word, a PDF or a
+# spreadsheet carries them (Word's soft line break is a vertical tab), and a
+# request containing one is refused whole by eBay's parser. The two that are
+# whitespace become a space; the rest are dropped.
+_XML_SPACE = re.compile("[\x0b\x0c]")
+_XML_FORBIDDEN = re.compile("[\x00-\x08\x0e-\x1f\ufffe\uffff]")
+
+
+def _xml_text(value: Any) -> str:
+    return _XML_FORBIDDEN.sub("", _XML_SPACE.sub(" ", str(value)))
+
+
 def _esc(value: Any) -> str:
-    return html.escape(str(value if value is not None else ""), quote=False)
+    return html.escape(_xml_text(value if value is not None else ""), quote=False)
 
 
 # Any tag at all. eBay renders <Description> as HTML, so a description that
@@ -321,7 +334,8 @@ def _cdata(value: str) -> str:
     make the rest of the description parse as markup — eBay rejects the call at
     best, and at worst the description injects elements into the request. The
     standard fix is to split the sequence across two CDATA sections."""
-    return "<![CDATA[" + str(value or "").replace("]]>", "]]]]><![CDATA[>") + "]]>"
+    return ("<![CDATA[" + _xml_text(value or "").replace("]]>", "]]]]><![CDATA[>")
+            + "]]>")
 
 
 def _call(call: str, token: str, body: str) -> ET.Element:
@@ -1509,10 +1523,15 @@ def _whole_inches(value) -> int:
 
 def _package_details(listing: Listing) -> str:
     """ShippingPackageDetails — eBay needs a weight for calculated shipping."""
-    lb = int(listing.package_weight_lb or 0)
-    oz = float(listing.package_weight_oz or 0)
-    if not (lb or oz):
+    # One total in ounces, then split -- the way preflight weighs it.
+    # int(package_weight_lb) dropped a fraction of a pound: 1.5 lb went out as
+    # 1 lb 0 oz, half a pound under the box, on calculated postage.
+    total_oz = round(float(listing.package_weight_lb or 0) * 16
+                     + float(listing.package_weight_oz or 0), 1)
+    if total_oz <= 0:
         return ""
+    lb, oz = divmod(total_oz, 16)
+    lb, oz = int(lb), round(oz, 1)
     # Rounded FIRST, then gated on the rounded values. Gating on the raw ones
     # let a nonsense entry through as a zero dimension: -5 is truthy, so the
     # container was emitted and the floor turned it into
@@ -2016,17 +2035,17 @@ SPECIFICS_LOCKED_FIELDS = frozenset({"item_specifics", "brand"})
 # touches <ItemSpecifics> replaces the whole set, so eBay re-validates it
 # against today's rules, and a jeans listing made before Inseam became
 # required is refused however small the edit. The refusal names the aspect.
-_MISSING_REQUIRED_RE = re.compile(
-    r"item specific\s+(?P<name>[A-Za-z][^.\n]{0,40}?)\s+is missing", re.IGNORECASE)
-
-
 def missing_required_specific(exc: Exception) -> str:
     """The aspect eBay says this listing must carry before it will take a
-    change to its specifics, or "" when that is not what it said."""
-    hay = f"{exc} {getattr(exc, 'detail', '') or ''} " \
-          f"{getattr(exc, 'said', '') or ''}"
-    m = _MISSING_REQUIRED_RE.search(hay)
-    return m.group("name").strip(" '\u2019\"\u201d") if m else ""
+    change to its specifics, or "" when that is not what it said.
+
+    Read by ebay_errors.missing_aspect_named, the same reading the seller's
+    message is written from. A private regex here missed "Missing required
+    item specific: X" and the quoted 'Type' form, so on those wordings the
+    rest of the edit was refused with the specifics on every save."""
+    return ebay_errors.missing_aspect_named(
+        f"{exc}. {getattr(exc, 'detail', '') or ''}. "
+        f"{getattr(exc, 'said', '') or ''}")
 
 
 def specifics_locked(exc: Exception) -> bool:

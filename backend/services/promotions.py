@@ -36,7 +36,10 @@ DEFAULT_AD_RATE = 10.0
 
 # Resolve the campaign id once per (marketplace, token) instead of listing
 # campaigns on every publish. Keyed by a short, non-sensitive token suffix.
+# Bounded: access tokens are replaced about every two hours, so each
+# promoting seller adds a key that often, and nothing else ever removes one.
 _CAMPAIGN_CACHE: dict[str, str] = {}
+_CAMPAIGN_CACHE_MAX = 200
 # eBay's recommended ad rate per listing, cached briefly.
 _RATE_CACHE: dict[str, tuple[float, dict]] = {}
 _RATE_TTL = 300
@@ -144,6 +147,15 @@ def _remember_rule_based(cache_key: str, name: str) -> None:
     _CAMPAIGN_CACHE.pop(cache_key, None)
 
 
+def _remember_campaign(cache_key: str, campaign_id: str) -> None:
+    """Cache a campaign id, dropping the OLDEST entries past the cap -- the
+    ones whose token has long since been replaced."""
+    _CAMPAIGN_CACHE.pop(cache_key, None)
+    while len(_CAMPAIGN_CACHE) >= _CAMPAIGN_CACHE_MAX:
+        _CAMPAIGN_CACHE.pop(next(iter(_CAMPAIGN_CACHE)), None)
+    _CAMPAIGN_CACHE[cache_key] = campaign_id
+
+
 def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: str) -> str:
     cache_key = _cache_key(marketplace, token)
     if cache_key in _CAMPAIGN_CACHE:
@@ -157,7 +169,7 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
     if r.status_code == 200:
         for c in (r.json().get("campaigns") or []):
             if c.get("campaignName") == CAMPAIGN_NAME and c.get("campaignId"):
-                _CAMPAIGN_CACHE[cache_key] = c["campaignId"]
+                _remember_campaign(cache_key, c["campaignId"])
                 return c["campaignId"]
     elif is_scope_error(r):
         raise _ScopeError()
@@ -175,7 +187,7 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
         loc = r.headers.get("Location", "")
         cid = loc.rstrip("/").split("/")[-1] if loc else (r.json() or {}).get("campaignId", "")
         if cid:
-            _CAMPAIGN_CACHE[cache_key] = cid
+            _remember_campaign(cache_key, cid)
             return cid
     if is_scope_error(r):
         raise _ScopeError()
@@ -189,7 +201,7 @@ def _ensure_campaign(client: httpx.Client, base: str, token: str, marketplace: s
                 raise _NoCampaign(_rule_based_message(rule_based_name))
             raise _NoCampaign(_NO_CAMPAIGN_MESSAGE)
         log.info("promoting into the account's single campaign %s", cid)
-        _CAMPAIGN_CACHE[cache_key] = cid
+        _remember_campaign(cache_key, cid)
         return cid
     raise RuntimeError(f"campaign create failed ({r.status_code}): {r.text[:200]}")
 

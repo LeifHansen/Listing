@@ -46,6 +46,7 @@ from .. import db, ebay_auth, objstore, storage
 from ..config import log
 from ..errors import StorageUnavailable
 from ..models import Listing
+from .dirty_fields import TRACKED
 from . import (ebay_account, ebay_trading, ebay_video, inventory_mirror,
                notifications,
                publish_guard, recommender, sync_merge, taxonomy)
@@ -268,6 +269,37 @@ def _reconcile(prior: Optional[dict], merged: dict, fresh: dict) -> dict:
     return out
 
 
+def _as_stored_now(record: dict) -> dict:
+    """`record` as the database holds it NOW, not as this pass first read it.
+
+    A sync reads the store once and then spends minutes asking eBay about one
+    listing at a time -- and the app starts one by itself when it opens, so
+    the seller is usually editing while it runs. Merging eBay's answer into
+    the copy read at the start and writing THAT back put the early copy over
+    whatever was saved since: a new title, a cost price, an edit waiting for
+    "Update on eBay" (and its dirty marks). Re-reading right before the write
+    shrinks that window from minutes to the write itself. Closing it outright
+    needs a locked merge that can also keep the row's eBay start time as its
+    updated_at, which db.mutate_listing_data does not offer.
+
+    Falls back to `record` -- what this wrote from before -- when the store
+    cannot answer, has no such row any more, or cannot read one row at all.
+    A failed read is never a reason to skip a sync write.
+    """
+    read = getattr(db, "get_listing_strict", None)
+    rid = str(record.get("id") or "")
+    if not callable(read) or not rid:
+        return record
+    try:
+        now = read(rid)
+    except Exception as exc:  # noqa: BLE001 - the snapshot is the fallback
+        log.info("sync: couldn't re-read %s before writing it: %s", rid, exc)
+        return record
+    if isinstance(now, dict) and isinstance(now.get("listing"), dict):
+        return now
+    return record
+
+
 def _merge(existing: Optional[dict], fresh: dict, *, own_source: bool = False) -> dict:
     """Fresh eBay data merged over an existing record.
 
@@ -283,8 +315,16 @@ def _merge(existing: Optional[dict], fresh: dict, *, own_source: bool = False) -
     if not existing:
         return fresh
     merged = dict(existing)
+    # Once there is a shadow, the TRACKED live fields (price, quantity,
+    # image_urls) are the three-way merge's to decide (see _reconcile).
+    # Copied from eBay here, a price saved for the next revise was replaced
+    # with eBay's while its dirty mark stayed -- so that revise sent eBay its
+    # own old price -- and a price changed on both sides never became a
+    # conflict. With no shadow the merge reconciles nothing, so eBay's copy
+    # still wins there, as before.
+    reconciled = TRACKED if existing.get("remote_shadow") else ()
     for key in _LIVE_FIELDS:
-        if key in fresh:
+        if key in fresh and key not in reconciled:
             merged[key] = fresh[key]
     for key, value in fresh.items():
         if key in _LIVE_FIELDS:
@@ -479,11 +519,22 @@ def keeps_grace(record: dict) -> bool:
       serving an ended item's photos within weeks. False: remove it now.
     * Unless the seller added PHOTOS to it here. Then it holds the only copy
       of those, and it is theirs like any other listing.
+    * Or if it is still FOR SALE on another marketplace (a crosspost). It is
+      then the only record of that listing, and removing it leaves the copy
+      live with nothing here able to end it or take it down when it sells.
     * Anything else is a listing this app created. True.
     """
     if not _is_mirror(record):
         return True
-    return bool((record.get("listing") or {}).get("images"))
+    return (bool((record.get("listing") or {}).get("images"))
+            or _live_elsewhere(record))
+
+
+def _live_elsewhere(record: dict) -> bool:
+    """Is this record's item still listed on a marketplace other than eBay?"""
+    markets = (record.get("listing") or {}).get("marketplaces") or {}
+    return any(key != "ebay" and (state or {}).get("status") == "published"
+               for key, state in markets.items() if isinstance(state, dict))
 
 
 def _utc_instant(raw) -> Optional[datetime]:
@@ -610,6 +661,9 @@ def sweep_ended_records(records, user_id: str,
     for rec in records:
         rid = str(rec.get("id") or "").strip()
         if not rid or (rec.get("status") or "") != "ended":
+            continue
+        if _live_elsewhere(rec):
+            # Never on a clock: see keeps_grace.
             continue
         if keeps_grace(rec):
             if not grace_expired(rec, now):
@@ -1079,6 +1133,9 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
                      "another listing this run — importing it separately",
                      item_id, prior["id"])
             prior = None
+        if prior is not None:
+            # Matched on the snapshot; merged against the row as it is now.
+            prior = _as_stored_now(prior)
         if status == "ended":
             # eBay says this listing is over and sold nothing. An ending is
             # never mirrored in (see the module note), so there is nothing here
@@ -1172,7 +1229,8 @@ def import_active(token: str, user_id: str, limit: int = ACTIVE_LIMIT,
             # A live listing claimed this record in the loop above, which means
             # it is not the archive record this pass took it for.
             continue
-        data = (known.get(rid) or {}).get("listing") or {}
+        data = (_as_stored_now(known[rid]) if rid in known
+                else {}).get("listing") or {}
         # Only what eBay actually reported, and only if it differs — an upsert
         # of an unchanged record is a no-op, but comparing here keeps `updated`
         # honest about what really moved. mark_now is NEVER right on this path:
@@ -1267,6 +1325,9 @@ def refresh_statuses(token: str, user_id: str, records: list[dict],
         status, sold, watch = result
         if status is None:
             continue
+        # The probes took a while; write over the row as it is now, so only
+        # the fields this sweep owns change (see _as_stored_now).
+        rec = _as_stored_now(rec)
         if status == "ended":
             # eBay's own answer about THIS item (GetItem, via listing_status),
             # which is the definitive ending both halves below require — a
@@ -1743,8 +1804,13 @@ def create_on_ebay(token: str, listing: Listing, image_urls: list[str],
     listing.ebay_listing_id = res["listing_id"]
     listing.view_url = res.get("view_url", "")
     # Which account it landed on, so a later account switch can tell this
-    # listing apart from one made on the next account.
+    # listing apart from one made on the next account. Both halves, and both
+    # overwritten: this item was minted on THIS account, so an id the record
+    # carried from an earlier one is history -- kept, it made `owns` refuse
+    # the account that had just listed it. "" (identity unreadable) means
+    # unknown, which `owns` reads by name.
     listing.ebay_account = (c.get("ebay_username") or "").strip()
+    listing.ebay_account_id = (c.get("ebay_user_id") or "").strip()
     return res
 
 

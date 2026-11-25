@@ -31,9 +31,12 @@ def _clip(text: str, limit: int = 160) -> str:
 # "The item specific Unit Quantity is missing", "Missing required item
 # specific: Country/Region of Manufacture", "the required item specific
 # 'Type'". Pull the name out of any of those, so the editor can ring the
-# field instead of listing three examples that are already filled.
+# field instead of listing three examples that are already filled. The lead
+# words are matched in any case ("Item specific Brand is missing." starts a
+# sentence); the NAME still has to start with a capital, which is what keeps
+# "the item specific is missing" from yielding "is".
 _ASPECT_IN_TEXT = re.compile(
-    r"""(?:item\s+specifics?|aspect|required\s+attribute)   # what eBay called it
+    r"""(?i:item\s+specifics?|aspect|required\s+attribute)  # what eBay called it
         \s*[:\-]?\s*                                       # optional punctuation
         ["'\u201c\u2018]?                                  # optional quote
         ([A-Z][A-Za-z0-9]*(?:[ /&\-][A-Za-z0-9()][A-Za-z0-9()]*){0,4})
@@ -69,6 +72,26 @@ def _aspect_from_text(text: str) -> str:
             continue
         if len(name) <= 40:
             return name
+    return ""
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def missing_aspect_named(text: str) -> str:
+    """The aspect eBay says is MISSING, or "" when that is not what it said.
+
+    The one reading of that sentence: ebay_trading's revise uses it to decide
+    whether the rest of an edit can go without the specifics, and the two
+    used to parse it separately and disagree on half of eBay's wordings.
+    Per sentence, so a "missing" in one error cannot attach to an aspect
+    another one named for a different reason.
+    """
+    for sentence in _SENTENCE_END.split(" ".join((text or "").split())):
+        if "missing" in sentence.lower():
+            name = _aspect_from_text(sentence)
+            if name:
+                return name
     return ""
 
 

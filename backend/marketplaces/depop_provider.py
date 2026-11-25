@@ -17,7 +17,8 @@ from ..config import log
 from ..models import Listing
 from ..services import depop, ebay
 from . import register
-from .base import PublishContext, PublishOutcome
+from .base import (PublishContext, PublishOutcome, connection_changed,
+                   make_room)
 from . import mapping_depop
 
 _ACCESS_CACHE: dict[str, tuple[float, str]] = {}   # uid -> (expiry, token)
@@ -115,6 +116,13 @@ class DepopProvider:
             # later on a publish, far from anything the seller can connect it
             # to. Better to fail now, loudly, while they are still here. Same
             # rule the Etsy provider already applies.
+            # Unless the row moved while the refresh was out -- see the Etsy
+            # provider: a disconnect or a reconnect is not ours to overwrite.
+            if connection_changed(db.get_marketplace_account(uid, "depop"),
+                                  acct["refresh_token"]):
+                log.info("depop: connection for user %s changed during a "
+                         "token refresh; not storing the rotation", uid)
+                return None
             if (fresh.get("refresh_token")
                     and fresh["refresh_token"] != acct["refresh_token"]
                     and not db.save_marketplace_account(
@@ -123,8 +131,7 @@ class DepopProvider:
                           "for user %s — the connection would break silently, "
                           "so treating this as a failed refresh.", uid)
                 return None
-            if len(_ACCESS_CACHE) > 50:
-                _ACCESS_CACHE.clear()
+            make_room(_ACCESS_CACHE)
             _ACCESS_CACHE[uid] = (max(time.time() + 60, fresh["expires_at"] - 90),
                                   fresh["access_token"])
             return {"access_token": fresh["access_token"], "_uid": uid}
