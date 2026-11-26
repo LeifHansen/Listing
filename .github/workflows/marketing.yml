@@ -133,6 +133,17 @@ jobs:
           code=$(curl -s -o /dev/null -H 'Host: www.thryftshop.com' -w '%{http_code}' http://127.0.0.1:8099/pricing)
           [ "$code" = "301" ] || { echo "::error::www did not redirect (got $code)"; fail=1; }
 
+          # A trailing slash goes to the clean URL as a PATH. Built absolute
+          # (nginx's default), the Location named what the container sees --
+          # http on 8080, behind Fly's TLS -- and /pricing/ sent visitors to a
+          # port nothing answers. Read raw: curl's redirect_url would resolve
+          # a path against this test's own host and hide the difference.
+          head=$(curl -sI http://127.0.0.1:8099/pricing/)
+          code=$(printf '%s' "$head" | awk 'NR==1 {print $2}')
+          loc=$(printf '%s' "$head" | awk 'tolower($1)=="location:" {print $2}' | tr -d '\r')
+          [ "$code" = "301" ] && [ "$loc" = "/pricing" ] \
+            || { echo "::error::/pricing/ answered $code to '$loc', expected 301 to /pricing"; fail=1; }
+
           # Security headers, including on a hashed asset — nginx's add_header
           # does not inherit into a location that sets its own, so this is a
           # real regression risk rather than a formality.
