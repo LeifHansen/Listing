@@ -49,6 +49,13 @@ jobs:
   deploy:
     name: Deploy app
     needs: gates
+    # workflow_dispatch lets anyone pick ANY branch from the "Use workflow
+    # from" menu, and this job used to ship whichever was picked: unreviewed
+    # work to sellers, the thing deploy.sh refuses outright. Only main
+    # deploys. (A branch can still edit this line in its own copy; the
+    # durable guard is a `production` environment restricted to main that
+    # holds FLY_API_TOKEN -- a repository setting, not a file.)
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

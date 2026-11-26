@@ -378,6 +378,7 @@ export function PublishBar({ w }) {
           : "Changes since the last save are discarded — the listing stays in Drafts exactly as last saved.",
         confirmLabel: "Close",
       }))) return;
+      w.discardUnsaved();   // as the dialog just promised
     } else {
       await w.flushSave();
     }

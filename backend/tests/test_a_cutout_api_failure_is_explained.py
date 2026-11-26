@@ -148,8 +148,8 @@ def test_one_multipart_post_to_segment_with_the_key_in_the_header(photoroom):
     name, payload, mime = kw["files"]["image_file"]
     assert mime == "image/jpeg"
     assert Image.open(BytesIO(payload)).format == "JPEG"
-    # The matte alone: the white and the shadow are ours (images
-    # ._compose_on_white), not the Image Editing plan's at five times the price.
+    # The matte alone: the white and the shadow are ours (images.compose),
+    # not the Image Editing plan's at five times the price.
     assert kw["data"] == {"format": "png"}
 
 

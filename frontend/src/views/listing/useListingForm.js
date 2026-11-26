@@ -150,6 +150,13 @@ function payloadOf(form, base) {
     })(),
     images: form.images || [],
     currency: form.currency || "USD",
+    // Written by their own routes (the video upload and removal, the
+    // conflict answer), never by a field here: the session's copy is kept
+    // current and the form's is whatever the listing held when it opened.
+    // A full save carrying the form's dropped a just-added video (the server
+    // reads an omitted one as deleted) and re-asked an answered conflict.
+    ...(base && "videos" in base ? { videos: base.videos } : {}),
+    ...(base && "conflicts" in base ? { conflicts: base.conflicts } : {}),
   };
 }
 
@@ -220,6 +227,16 @@ export function useListingForm() {
   const pendingSave = useRef(null);   // the in-flight PATCH, awaited by publish
   const retryStep = useRef(0);
   const publishingRef = useRef(false);
+  // The latest flushSave (written in an effect further down), and whether
+  // this editor has gone: see "leaving the editor" below.
+  const flushRef = useRef(null);
+  const gone = useRef(false);
+  // Set when the seller confirmed "Close" on a dialog that says unsaved edits
+  // are DISCARDED (a draft whose last save failed): the automatic flushes on
+  // the way out must not then send them after all. See discardUnsaved.
+  const discarding = useRef(false);
+  // The newest category lookup: only its answer may land (loadCategoryMeta).
+  const metaRequest = useRef(0);
 
   // ---------- marketplace targets ----------
   // Which marketplaces the Publish buttons hit — the shared remembered
@@ -261,6 +278,11 @@ export function useListingForm() {
   const seededFor = useRef(sessionId);
   useEffect(() => {
     if (seededFor.current !== sessionId) {
+      // An edit to the listing being left that the debounce had not sent:
+      // the switch cancelled its timer, so it goes now. flushRef still holds
+      // the last render's flush, which closes over that listing's id and form.
+      if (!discarding.current) flushRef.current?.();
+      discarding.current = false;
       seededFor.current = sessionId;
       setForm(fromListing(session?.listing));
       // Re-seeded with everything else, or opening a second listing would
@@ -272,6 +294,7 @@ export function useListingForm() {
       setCatSuggestions(null);
       setPriceData(null);
       setCategoryMeta({ conditions: [], aspects: [], conditionsChecked: true });
+      metaRequest.current += 1;   // the last listing's lookup is not this one's
       // A different listing: what the server holds is what it was opened on,
       // and nothing has been typed into it yet.
       setSaved(session?.listing || null);
@@ -287,6 +310,17 @@ export function useListingForm() {
   const rememberSaved = useCallback((listing) => {
     if (listing) setSaved(listing);
   }, []);
+
+  // A conflict answered with eBay's value: the server has written it, and
+  // the form, seeded once on open, still shows the value the seller turned
+  // down -- which the next full save would send straight back to eBay. Only
+  // eBay's side is taken over: "keep mine" leaves whatever is in the box,
+  // which may be newer than the copy the conflict recorded.
+  const adoptConflictAnswer = useCallback((field, choice, listing) => {
+    if (choice !== "ebay" || !field || !listing) return;
+    setForm((f) => ({ ...f, [field]: fromListing(listing)[field] }));
+    rememberSaved(listing);
+  }, [rememberSaved]);
 
   const set = useCallback((key, value) => {
     setTouched(true);
@@ -357,7 +391,12 @@ export function useListingForm() {
   // ---------- category-driven fields ----------
   // Fetch the category's valid conditions + required/recommended aspects so
   // the seller completes everything without leaving.
+  //
+  // Only the newest lookup's answer lands. Two picks in quick succession (or
+  // a listing switched to mid-lookup) otherwise took whichever came back
+  // last: the abandoned category's specifics, and the condition fitted to it.
   const loadCategoryMeta = useCallback(async (categoryId) => {
+    const seq = ++metaRequest.current;
     const cid = (categoryId ?? form.category_id ?? "").trim();
     if (!health.taxonomy_configured || !cid) {
       setCategoryMeta({ conditions: [], aspects: [], conditionsChecked: true });
@@ -373,6 +412,7 @@ export function useListingForm() {
         .catch(() => ({ conditions: [], checked: false })),
       postJson("/api/item-aspects", { category_id: cid }).catch(() => ({ aspects: [] })),
     ]);
+    if (seq !== metaRequest.current) return;
     const conditions = cond.conditions || [];
     setCategoryMeta({ conditions, aspects: asp.aspects || [],
                       conditionsChecked: cond.checked !== false });
@@ -893,8 +933,11 @@ export function useListingForm() {
       // The editor is not allowed its own publish path.
       const result = await publishListing(sessionId, listing, chipTargets, mode);
       // publishListing saves before it publishes, so whatever else happened
-      // the server holds `listing` now.
+      // the server holds `listing` now. The mirror too, at once: a clean draft
+      // save closes the editor below, and its last flush on the way out must
+      // diff against this save rather than send the same edits again.
       rememberSaved(listing);
+      savedRef.current = listing;
       setPublishResult(result);
       // A clean draft save is "done editing" — hand the seller back the screen
       // they opened this listing from, instead of leaving them parked in the
@@ -1200,20 +1243,21 @@ export function useListingForm() {
 
   // Send what differs, now. Returns once the server has answered (or refused).
   // Publish and Done await it; the timer below calls it.
-  const flushRef = useRef(null);
   const flushSave = useCallback(async () => {
     if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
     if (!autosaveOn || !sessionId) return;
+    const id = sessionId;
+    const before = savedRef.current;
     // One PATCH at a time. One already out is waited for, and then whatever
     // was typed meanwhile is diffed against the baseline IT moved -- so a
     // Done pressed mid-flight sends the keystrokes after the flight too,
-    // rather than closing the editor on them.
+    // rather than closing the editor on them. (Unless another listing has
+    // opened meanwhile: the mirror describes that one now.)
     if (pendingSave.current) await pendingSave.current.catch(() => {});
-    const base = savedRef.current;
+    const base = seededFor.current === id ? savedRef.current : before;
     const changes = changedFields(collect(), payloadOf(fromListing(base), base));
     if (!Object.keys(changes).length) return;
-    const id = sessionId;
-    setSaveState("saving");
+    if (seededFor.current === id) setSaveState("saving");
     const run = (async () => {
       try {
         const res = await patchJson(`/api/listings/${id}`, changes);
@@ -1235,7 +1279,9 @@ export function useListingForm() {
         // re-sorts the drafts under the editor and re-reads the whole store.
         patchListing(id, { listing });
       } catch (e) {
-        if (seededFor.current !== id) return;
+        // Gone: nothing left to say "retrying", and a retry timer would
+        // knock on the server from a closed editor until a reload.
+        if (seededFor.current !== id || gone.current) return;
         if (e?.status === 409) {
           // The server's own rule: this listing is eBay's to update, not a
           // timer's. The gate above should have said so first; if it did
@@ -1265,6 +1311,28 @@ export function useListingForm() {
     await run;
   }, [autosaveOn, sessionId, collect, patchListing, toast]);
   useEffect(() => { flushRef.current = flushSave; });
+
+  // Leaving the editor. Done, Back and the menu's exits await flushSave; the
+  // other ways out -- a tab in the nav, another screen -- unmount this hook,
+  // and the debounce's cleanup below cancels the timer that would have sent
+  // the last edit. So whatever is unsent goes now (once: see `gone`).
+  useEffect(() => {
+    gone.current = false;
+    return () => {
+      gone.current = true;
+      if (!discarding.current) flushRef.current?.();
+    };
+  }, []);
+
+  // The seller chose to discard: no flush on the way out, and no retry left
+  // armed to send the edits a moment later.
+  const discardUnsaved = useCallback(() => {
+    discarding.current = true;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+  }, []);
 
   // The debounce. Every edit re-runs this; the cleanup of the previous run
   // cancels its timer, so the PATCH goes AUTOSAVE_DELAY_MS after the LAST
@@ -1374,7 +1442,7 @@ export function useListingForm() {
   }, [form, blockers]);
 
   return {
-    sessionId, form, set, collect,
+    sessionId, form, set, collect, adoptConflictAnswer, discardUnsaved,
     isLive, isSold, ebayListingId, endListing,
     saveSaleFigures, relist,
     aiBusy,

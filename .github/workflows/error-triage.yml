@@ -157,13 +157,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # A pull request opened with the default GITHUB_TOKEN does NOT
-          # trigger `pull_request` workflows, so ci.yml would never run and the
-          # four required "Gates / ..." checks would sit unstarted forever —
-          # an autofix PR that looks green because nothing ran is worse than no
-          # autofix at all. A PAT or GitHub App token is the only fix; there is
-          # no workaround.
-          token: ${{ secrets.AUTOFIX_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          # NOT left in .git/config for the agent. It reads text from
+          # production -- some of it typed into a browser by whoever was using
+          # one -- and it runs code (its own tests), so a token on disk is a
+          # token that text can ask it to send somewhere, or to push to main
+          # with. The agent commits locally; the step after it pushes, holding
+          # the token for exactly those commands.
+          persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -201,34 +201,41 @@ jobs:
                files, or it needs a product decision: do not guess. Write what
                you found and move on to the next one.
 
-            Open ONE DRAFT pull request per bug you fixed, on a branch named
-            `autofix/<fingerprint>`. Before creating a branch, check whether
-            one already exists (`git ls-remote --exit-code --heads origin
-            autofix/<fingerprint>`) and skip if it does — a bug that already
-            has a PR, open or closed, must never get a second one. Put the line
-            `error-fingerprint: <fingerprint>` in the PR body.
+            Commit each bug you fixed on its OWN LOCAL branch, started from
+            the commit checked out here:
+            `git checkout -b autofix/<fingerprint> ${{ github.sha }}`. Write
+            its pull request to /tmp/triage/pr-<fingerprint>.md: the title on
+            the first line, the body after it, with the line
+            `error-fingerprint: <fingerprint>` in the body. Do NOT push and do
+            not open the pull request — you have no credentials for either.
+            The next step pushes each branch and opens it as a DRAFT, and skips
+            any fingerprint that already has a branch on GitHub, so a bug that
+            already has a PR, open or closed, never gets a second one.
 
             Finally, write /tmp/triage/result.json:
-            {"fixed": [{"fingerprint": "...", "pr": "<url>"}], "skipped":
+            {"fixed": [{"fingerprint": "..."}], "skipped":
             [{"fingerprint": "...", "why": "..."}]}
 
-            If nothing was worth fixing, open nothing and say so. An unnecessary
-            pull request costs a person's review; a missed bug is in tomorrow's
-            feed. Those are not the same size of mistake.
+            If nothing was worth fixing, commit nothing and say so. An
+            unnecessary pull request costs a person's review; a missed bug is
+            in tomorrow's feed. Those are not the same size of mistake.
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(gh pr:*),Bash(python3 -m pytest:*),Bash(ruff check:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(git checkout:*),Bash(git switch:*),Bash(git add:*),Bash(git commit:*),Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(python3 -m pytest:*),Bash(ruff check:*)"
 
-      # Done here rather than by the agent, on purpose: it keeps curl and the
-      # feed token out of the agent's tool list, so nothing in that error text
-      # can reach the app's API however it is worded.
-      - name: Record which bugs now have a fix proposed
+      # The token is handed to git for these commands only, as a header on
+      # the command line rather than in .git/config, and only after the agent
+      # has exited. A PAT or GitHub App token (AUTOFIX_GITHUB_TOKEN) is what
+      # makes the draft PR trigger ci.yml: one opened with the default
+      # GITHUB_TOKEN does NOT trigger `pull_request` workflows, so the four
+      # required "Gates / ..." checks would sit unstarted forever.
+      - name: Push the fixes and open them as draft pull requests
         if: always()
-        continue-on-error: true
         env:
-          ERROR_FEED_TOKEN: ${{ secrets.ERROR_FEED_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
+          : > /tmp/triage/pushed.txt
           [ -f /tmp/triage/result.json ] || exit 0
-          python3 - <<'PY' > /tmp/fixed.txt
+          python3 - <<'PY' > /tmp/fixes.txt
           import json
           try:
               d = json.load(open("/tmp/triage/result.json"))
@@ -236,16 +243,49 @@ jobs:
               d = {}
           for item in (d.get("fixed") or []):
               fp = str(item.get("fingerprint") or "").strip()
-              pr = str(item.get("pr") or "").strip()
               if fp.isalnum():
-                  print(f"{fp} {pr}")
+                  print(fp)
           PY
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          while read -r fp; do
+            branch="autofix/$fp"
+            git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null || continue
+            if git -c "http.https://github.com/.extraheader=$header" \
+                 ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "$branch is already on GitHub - not opening a second pull request"
+              continue
+            fi
+            git -c "http.https://github.com/.extraheader=$header" \
+              push origin "refs/heads/$branch:refs/heads/$branch"
+            body="/tmp/triage/pr-$fp.md"
+            title=$(head -n 1 "$body" 2>/dev/null || true)
+            tail -n +2 "$body" > "/tmp/body-$fp.md" 2>/dev/null || true
+            grep -q "error-fingerprint: $fp" "/tmp/body-$fp.md" \
+              || echo "error-fingerprint: $fp" >> "/tmp/body-$fp.md"
+            url=$(gh pr create --draft --head "$branch" \
+                    --title "${title:-Fix production error $fp}" \
+                    --body-file "/tmp/body-$fp.md")
+            echo "$fp $url" >> /tmp/triage/pushed.txt
+          done < /tmp/fixes.txt
+
+      # Done here rather than by the agent, on purpose: it keeps curl and the
+      # feed token out of the agent's tool list, so nothing in that error text
+      # can reach the app's API however it is worded. Reads what the step
+      # above actually opened, not what the agent said it did.
+      - name: Record which bugs now have a fix proposed
+        if: always()
+        continue-on-error: true
+        env:
+          ERROR_FEED_TOKEN: ${{ secrets.ERROR_FEED_TOKEN }}
+        run: |
+          [ -f /tmp/triage/pushed.txt ] || exit 0
           while read -r fp pr; do
             [ -n "$fp" ] || continue
             curl -sS -m 30 -X POST \
               -H "x-error-feed-token: $ERROR_FEED_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"pr\": \"$pr\"}" \
+              -d "$(python3 -c 'import json,sys;print(json.dumps({"pr": sys.argv[1]}))' "$pr")" \
               "$SITE/api/ops/errors/$fp/fixed" >/dev/null || true
             echo "marked $fp as having a fix proposed"
-          done < /tmp/fixed.txt
+          done < /tmp/triage/pushed.txt

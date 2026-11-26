@@ -101,7 +101,7 @@ def test_a_search_that_genuinely_found_nothing_is_none():
 def test_an_unapproved_scope_raises_rather_than_reporting_an_empty_market(
         monkeypatch):
     monkeypatch.setattr(pricing.config, "taxonomy_ready", lambda: True)
-    monkeypatch.setattr(pricing, "_app_token", lambda: "t")
+    monkeypatch.setattr(pricing, "_app_token", lambda *a, **k: "t")
     monkeypatch.setattr(pricing.httpx, "get", lambda *a, **k: _Resp(403))
     with pytest.raises(pricing.InsightsNotApproved):
         pricing.sold_comps("chagall lithograph")
@@ -113,7 +113,7 @@ def test_a_failed_sold_lookup_still_leaves_checked_true_through_suggest(
     and the seller gets asking prices plus an honest `checked` -- never "no
     comparable listings found"."""
     monkeypatch.setattr(pricing.config, "taxonomy_ready", lambda: True)
-    monkeypatch.setattr(pricing, "_app_token", lambda: "t")
+    monkeypatch.setattr(pricing, "_app_token", lambda *a, **k: "t")
 
     def _denied(*a, **k):
         raise pricing.InsightsNotApproved("nope")
@@ -149,7 +149,7 @@ def test_the_denial_latches_so_it_does_not_cost_a_request_per_item(monkeypatch):
     """Approval is per application and indefinite, so without a latch every
     draft in every batch pays a round trip to be refused."""
     monkeypatch.setattr(pricing.config, "taxonomy_ready", lambda: True)
-    monkeypatch.setattr(pricing, "_app_token", lambda: "t")
+    monkeypatch.setattr(pricing, "_app_token", lambda *a, **k: "t")
     calls = []
 
     def _get(*a, **k):
@@ -171,7 +171,7 @@ def test_a_granted_approval_is_picked_up_after_a_restart(monkeypatch):
     """The latch is process-level, which is when a newly granted scope would
     be picked up anyway."""
     monkeypatch.setattr(pricing.config, "taxonomy_ready", lambda: True)
-    monkeypatch.setattr(pricing, "_app_token", lambda: "t")
+    monkeypatch.setattr(pricing, "_app_token", lambda *a, **k: "t")
     monkeypatch.setattr(pricing.httpx, "get", lambda *a, **k: _Resp(403))
     with pytest.raises(pricing.InsightsNotApproved):
         pricing.sold_comps("x")

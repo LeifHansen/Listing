@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import threading
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from cryptography.exceptions import InvalidSignature
@@ -72,7 +74,8 @@ def _app_token() -> str:
 def _fetch_public_key(kid: str):
     """eBay's public key for this key id, as a cryptography key object."""
     resp = httpx.get(
-        f"{config.EBAY_API_BASE}/commerce/notification/v1/public_key/{kid}",
+        f"{config.EBAY_API_BASE}/commerce/notification/v1/public_key/"
+        f"{quote(kid, safe='')}",
         headers={"Authorization": f"Bearer {_app_token()}",
                  "Accept": "application/json"},
         timeout=30,
@@ -105,6 +108,11 @@ def public_key_for(kid: str):
     return key
 
 
+# What an eBay key id looks like: letters, digits, '-' and '_' (a UUID or a
+# hex string). Checked before any fetch -- see verify.
+_KID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def _parse_header(signature_header: str) -> Optional[dict]:
     try:
         decoded = base64.b64decode(signature_header, validate=True)
@@ -134,6 +142,12 @@ def verify(raw_body: bytes, signature_header: str) -> bool:
     kid = str(header.get("kid") or "")
     signature_b64 = str(header.get("signature") or "")
     if not kid or not signature_b64:
+        return False
+    if not _KID.fullmatch(kid):
+        # The kid comes from the header being checked, on a public endpoint,
+        # and is fetched before anything is verified. A plain token is all
+        # eBay sends; anything else ("../", "?", a slash) would steer that
+        # app-token request elsewhere on eBay's API, so it is not eBay's.
         return False
     try:
         signature = base64.b64decode(signature_b64, validate=True)

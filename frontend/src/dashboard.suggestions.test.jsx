@@ -38,6 +38,11 @@ import { Dashboard } from "@/views/Dashboard";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+// "Finish all" reads every listing's photos into the AI, so it goes through
+// the consent gate (lib/api) like an upload does. These cases are about the
+// run itself, so the seller here has already agreed.
+const agreeToTheAi = () => localStorage.setItem("thryft-ai-consent", "yes");
+
 // The fill half: listings the AI has never read.
 const RECS = [
   { listing_id: "a", listing_title: "Nike hoodie", type: "specifics",
@@ -197,7 +202,7 @@ describe("finishing a listing's details is one group", () => {
                  groupTotals: { specifics: 70 },
                  finishAll: { total: 70, enrich: 70, accept: 0 } };
 
-  beforeEach(() => { localStorage.clear(); });
+  beforeEach(() => { localStorage.clear(); agreeToTheAi(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("shows one row, and no second list beside it", async () => {
@@ -261,7 +266,7 @@ describe("the group's button takes the whole list", () => {
                  finishAll: { total: 131, enrich: 131, accept: 0 },
                  groupTotals: { specifics: 131 } };
 
-  beforeEach(() => { localStorage.clear(); });
+  beforeEach(() => { localStorage.clear(); agreeToTheAi(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("sends no ids, and never the capped route", async () => {
@@ -411,7 +416,7 @@ describe("the group's button takes the whole list", () => {
  * server counts the group before cutting it (group_totals) and the screen
  * reads THAT. */
 describe("a group bigger than the rows it was sent", () => {
-  beforeEach(() => { localStorage.clear(); });
+  beforeEach(() => { localStorage.clear(); agreeToTheAi(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("shows what the store holds, not what the payload carried", async () => {
@@ -463,7 +468,7 @@ describe("a group bigger than the rows it was sent", () => {
  * the count stops being a number with silent subtractions in it.
  */
 describe("nothing on the list is hidden any more", () => {
-  beforeEach(() => { localStorage.clear(); });
+  beforeEach(() => { localStorage.clear(); agreeToTheAi(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
 
   it("gives a row no way to be waved away", async () => {

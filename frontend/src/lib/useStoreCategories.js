@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { api } from "@/lib/api";
 import { useApp } from "@/store";
 
@@ -14,8 +14,16 @@ import { useApp } from "@/store";
  * no store", and the pickers say different things for each. */
 export function useStoreCategories() {
   const { ebay, storeCategoriesData, setStoreCategoriesData } = useApp();
+  // A failed read is not an answer to keep for the session -- the pickers
+  // tell the seller to try again in a moment. Each reader that mounts onto
+  // one asks once more (reopening the panel is the retry); one already
+  // showing the failure does not ask again, which would be a loop.
+  const asked = useRef(false);
   useEffect(() => {
-    if (!ebay.connected || storeCategoriesData) return;
+    if (!ebay.connected) return;
+    if (storeCategoriesData
+        && (storeCategoriesData.checked !== false || asked.current)) return;
+    asked.current = true;
     api("/api/ebay/store-categories")
       .then(setStoreCategoriesData)
       .catch(() => setStoreCategoriesData({ store: false, checked: false, categories: [] }));

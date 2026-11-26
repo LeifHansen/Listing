@@ -29,12 +29,22 @@ export function mediaUrl(sessionId, name, bust) {
   return apiUrl(`/media/${sessionId}/optimized/${name}${v}`);
 }
 
+// One formatter per currency: building one is the expensive part of
+// formatting, and every card on a grid of thousands formats two or three
+// amounts per render.
+const moneyFormats = new Map();
+
 export function formatMoney(n, currency = "USD") {
   if (n == null || n === "" || Number.isNaN(Number(n))) return null;
   try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency", currency, maximumFractionDigits: 2,
-    }).format(Number(n));
+    let fmt = moneyFormats.get(currency);
+    if (!fmt) {
+      fmt = new Intl.NumberFormat("en-US", {
+        style: "currency", currency, maximumFractionDigits: 2,
+      });
+      moneyFormats.set(currency, fmt);
+    }
+    return fmt.format(Number(n));
   } catch (e) {
     return `$${Number(n).toFixed(2)}`;
   }

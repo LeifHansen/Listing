@@ -19,7 +19,7 @@ backgrounds stopped coming off.
 THE WHITE CANVAS IS STILL OURS. Photoroom can composite onto a colour and
 draw a shadow itself, but those are Image Editing API ("Plus") features at
 about five times the price. We ask for the matte alone and put it on white
-with our own contact shadow (images._compose_on_white), the same as every
+with our own contact shadow (images.compose), the same as every
 engine before this one did.
 
 SANDBOX KEYS. A key that starts with `sandbox_` is free and works, but every
@@ -112,7 +112,7 @@ class PhotoroomError(CutoutApiError):
 class NothingFound(PhotoroomError):
     """Photoroom answered, and kept nothing. Not a fault in the account or
     the network: a statement about the photo, which is why the photo pass may
-    still try the item's own rectangular outline (images._rectangle_cutout)
+    still try the item's own rectangular outline (images._rectangle_cut)
     where it would not for an outage."""
 
 

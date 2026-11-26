@@ -287,21 +287,37 @@ def settings_were_dropped(save_kwargs: dict, existing: dict) -> bool:
                for f in ACCOUNT_SCOPED)
 
 
-def releasable(data: dict, connected: str,
+def releasable(data: dict, connected,
                include_unowned: bool = False) -> bool:
     """Should release-foreign-listings unlink this record?
 
-    A record STAMPED with some other account (the previous-account sentinel
-    included) always releases: its item id belongs to another store. A record
-    with NO owner recorded is the hard case — it predates ownership stamping,
-    so after a switch the app cannot tell it from the connected account's own
-    imports. Only the seller knows whether the store behind it is still the
-    one connected, so those release only on their explicit say-so
-    (`include_unowned`), and only when the record actually carries an eBay
-    identity — a plain local draft has nothing to unlink.
+    `connected` is the connected account -- the account row or creds, so its
+    immutable `ebay_user_id` can decide -- or, as before, a bare username.
+
+    When the record and the connection both carry an immutable account id,
+    that settles it, exactly as listing_sync.owns does: the same id is the
+    same seller under any name (a renamed handle released the seller's own
+    sold archive), and a different id is another seller whatever the name.
+
+    Otherwise a record STAMPED with some other account (the previous-account
+    sentinel included) always releases: its item id belongs to another store.
+    A record with NO owner recorded is the hard case — it predates ownership
+    stamping, so after a switch the app cannot tell it from the connected
+    account's own imports. Only the seller knows whether the store behind it
+    is still the one connected, so those release only on their explicit
+    say-so (`include_unowned`), and only when the record actually carries an
+    eBay identity — a plain local draft has nothing to unlink.
     """
+    if isinstance(connected, dict):
+        connected_id = (connected.get("ebay_user_id") or "").strip()
+        connected_name = (connected.get("ebay_username") or "").strip()
+    else:
+        connected_id, connected_name = "", (connected or "").strip()
+    owner_id = (data.get("ebay_account_id") or "").strip()
+    if owner_id and connected_id:
+        return owner_id != connected_id
     owner = (data.get("ebay_account") or "").strip()
-    if owner and owner != (connected or "").strip():
+    if owner and owner != connected_name:
         return True
     if owner or not include_unowned:
         return False
@@ -311,9 +327,11 @@ def releasable(data: dict, connected: str,
 
 # The top-level fields that mirror eBay's entry in `marketplaces`. Cleared
 # alongside it, because `source` is what routes a later edit down the Trading
-# path and `ebay_listing_id` is what it would aim at.
-_EBAY_PROJECTION = ("ebay_account", "ebay_listing_id", "source", "view_url",
-                    "sku")
+# path and `ebay_listing_id` is what it would aim at. `ebay_account_id` goes
+# with the name: it is what ownership is decided on (listing_sync.owns), and
+# left behind it made a republish on the new account belong to the old one.
+_EBAY_PROJECTION = ("ebay_account", "ebay_account_id", "ebay_listing_id",
+                    "source", "view_url", "sku")
 
 
 def unlink_ebay(data: dict) -> dict:

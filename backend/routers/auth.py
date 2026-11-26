@@ -51,8 +51,13 @@ def auth_login(request: Request, response: Response, payload: dict) -> dict:
     # seconds: for the gap after an outage began a right password was
     # "wrong", and for the gap after it ended a wrong one was "the database
     # is down". None from auth.login now means exactly refused.
+    #
+    # The per-client limit above is no ceiling for an attacker with a pool of
+    # addresses, so the address typed gets its own, counting failures only.
+    deps.refuse_if_account_resting("login", email)
     user = auth.login(email, password)
     if not user:
+        deps.note_account_failure("login", email)
         raise HTTPException(401, "Invalid email or password")
     auth.set_session_cookie(response, user["id"], secure=request.url.scheme == "https")
     return {"user": user, "token": auth.make_token(user["id"])}

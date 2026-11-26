@@ -57,15 +57,11 @@ export async function imageFromBlob(blob) {
   }
 }
 
-/** The photo as a drawable <img> whose pixels can be read back. Falls back
-    to the public /media URL when the bytes route is unreachable from here
-    (an older server, or an environment with no object URLs) -- the photo
-    still shows, exactly as it always did. */
-export async function loadPhotoImage(sessionId, name) {
-  return (await loadPhoto(sessionId, name)).img;
-}
-
-/** loadPhotoImage, plus what the screen said about the photo ({img, kind}). */
+/** The photo as a drawable <img> whose pixels can be read back, plus what
+    the screen said about it ({img, kind}). Falls back to the public /media
+    URL when the bytes route is unreachable from here (an older server, or
+    an environment with no object URLs) -- the photo still shows, exactly as
+    it always did. */
 export async function loadPhoto(sessionId, name) {
   try {
     const { blob, kind } = await fetchPhoto(sessionId, name);

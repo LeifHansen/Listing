@@ -81,6 +81,36 @@ except Exception:  # noqa: BLE001
 
 TARGET_SIZE = 1600  # px, longest side per eBay's zoom recommendation
 
+# The most pixels a photo may be DECODED at. A PNG, HEIC or WebP has no
+# reduced-scale decode the way a JPEG has (`draft`), so its full size is what
+# lands in memory: a 480KB PNG of one colour claiming 12500x12500 decoded to
+# 1.3GB here, on a 2GB machine, from an anonymous upload. Pillow's own bomb
+# guard only refuses past ~179MP. 60MP clears every phone's output (a 48MP
+# HEIC is 48.8MP) and is checked AFTER `draft`, so a 200MP JPEG that decodes
+# at an eighth still goes through.
+MAX_PIXELS = int(os.getenv("PHOTO_MAX_PIXELS", "60000000") or 60_000_000)
+
+# Modes a LANCZOS shrink handles as-is. A palette or bilevel image would be
+# resampled NEAREST, so those are shrunk after _flatten instead, as before.
+_SHRINK_EARLY = ("RGB", "RGBA", "L", "LA", "CMYK")
+
+
+class TooLarge(ValueError):
+    """A photo with more pixels than MAX_PIXELS, refused from its header
+    before a pixel is decoded. A ValueError, so a route that maps those to a
+    422 shows the seller the sentence."""
+
+
+def check_pixels(img: Image.Image) -> None:
+    """Raise TooLarge when `img` -- opened, not yet loaded, and drafted if it
+    is going to be -- would decode to more than MAX_PIXELS."""
+    w, h = img.size
+    if w * h > MAX_PIXELS:
+        raise TooLarge(
+            f"This photo is {w}×{h} pixels, too large to process — the limit "
+            f"is about {MAX_PIXELS // 1_000_000} megapixels. Export it smaller "
+            "and upload it again.")
+
 
 def below_ebay_minimum(paths) -> list[Path]:
     """The photos in `paths` that eBay would refuse for size: a longest side
@@ -193,11 +223,6 @@ def compose(rgb: Image.Image, alpha: Image.Image,
                  _contact_shadow(alpha))
     canvas.paste(rgb, (0, 0), alpha)
     return canvas
-
-
-def _compose_on_white(rgb: Image.Image, alpha: Image.Image) -> Image.Image:
-    """compose() on white: the listing default, and eBay's."""
-    return compose(rgb, alpha, WHITE)
 
 
 class Cut(NamedTuple):
@@ -314,14 +339,6 @@ ART_NO_BORDER_KEPT_AS_SHOT = (
     "This is a picture, and its outer edge couldn't be told apart from what's "
     "behind it — cutting to a guessed edge would crop the artwork, so it was "
     "kept as shot. A backdrop that contrasts with the frame or edge helps.")
-
-
-def _rectangle_cutout(rgb: Image.Image,
-                      background: tuple[int, int, int] = WHITE
-                      ) -> Optional[Image.Image]:
-    """_rectangle_cut's composite, or None."""
-    cut = _rectangle_cut(rgb, "border", background)
-    return cut.image if cut is not None else None
 
 
 def _rectangle_cut(rgb: Image.Image, engine: str,
@@ -467,6 +484,14 @@ def _flatten(img: Image.Image) -> Image.Image:
         canvas = Image.new("RGB", rgba.size, WHITE)
         canvas.paste(rgba, mask=rgba.getchannel("A"))
         return canvas
+    if img.mode.startswith("I"):
+        # 16-bit greyscale (a scan, a TIFF): convert("RGB") CLIPS at 255
+        # rather than scaling, so a mid grey came out pure white. Brought
+        # into 8 bits first -- unless the values already fit in them.
+        wide = img if img.mode == "I" else img.convert("I")
+        if wide.getextrema()[1] > 255:
+            wide = wide.point(lambda v: v * (1 / 256))
+        return wide.convert("L").convert("RGB")
     return img.convert("RGB") if img.mode != "RGB" else img
 
 
@@ -493,20 +518,58 @@ def _load(src: Path) -> tuple[Image.Image, tuple[int, int]]:
     photo then never exists at full size in memory at all."""
     with Image.open(src) as raw:
         shot = raw.size
-        # Orientation 5-8 mean the sensor was sideways, so the photo the
-        # seller took is the stored one turned — report that size.
-        if raw.getexif().get(274, 1) in (5, 6, 7, 8):
-            shot = (shot[1], shot[0])
         w, h = raw.size
         scale = TARGET_SIZE / max(w, h)
         if scale < 1:
             raw.draft(None, (max(1, round(w * scale)), max(1, round(h * scale))))
+        # From the header, after draft and before anything decodes: a PNG's
+        # getexif() below loads the whole image when its EXIF trails the
+        # pixels. See MAX_PIXELS.
+        check_pixels(raw)
+        # Orientation 5-8 mean the sensor was sideways, so the photo the
+        # seller took is the stored one turned — report that size.
+        if raw.getexif().get(274, 1) in (5, 6, 7, 8):
+            shot = (shot[1], shot[0])
+        # Shrunk BEFORE it is turned: exif_transpose copies the whole image,
+        # even one already upright, and for a format draft cannot reduce that
+        # copy was a second full-size decode in memory.
+        if raw.mode in _SHRINK_EARLY and max(raw.size) > TARGET_SIZE:
+            raw.thumbnail((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
         img = ImageOps.exif_transpose(raw)
         img.load()
+    # Read before _flatten, which composites a transparent photo onto a fresh
+    # canvas that carries no profile.
+    icc = img.info.get("icc_profile")
     img = _flatten(img)
     if max(img.size) > TARGET_SIZE:
         img.thumbnail((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
-    return img, shot
+    return _to_srgb(img, icc), shot
+
+
+def _to_srgb(img: Image.Image, icc: Optional[bytes]) -> Image.Image:
+    """`img` (RGB) moved out of its embedded colour profile into sRGB.
+
+    The saved JPEG carries no metadata, and that includes the profile -- so
+    the pixels have to be in the colour space an untagged JPEG is read in.
+    An iPhone shoots Display P3: its numbers read as sRGB put every listing
+    photo on eBay visibly duller than the item. An sRGB profile, or one
+    lcms cannot read, leaves the pixels as they are."""
+    if not icc:
+        return img
+    try:
+        from io import BytesIO
+
+        from PIL import ImageCms
+
+        profile = ImageCms.ImageCmsProfile(BytesIO(icc))
+        if "srgb" in ImageCms.getProfileDescription(profile).lower():
+            return img
+        return ImageCms.profileToProfile(img, profile,
+                                         ImageCms.createProfile("sRGB"),
+                                         outputMode="RGB")
+    except Exception as exc:  # noqa: BLE001 - colour is never worth a photo
+        log.info("colour profile not applied (%s)", type(exc).__name__)
+        return img
 
 
 # What a photo gets instead of a cutout when it is a close-up of part of an
@@ -1135,6 +1198,10 @@ def _small_upright(path: Path, side: int) -> Image.Image:
     camera's EXIF and opaque — the copy both AI thumbnails below start from."""
     with Image.open(path) as img:
         _draft_to(img, side)
+        check_pixels(img)
+        # Shrunk before it is turned, as in _load: exif_transpose copies.
+        if img.mode in _SHRINK_EARLY:
+            img.thumbnail((side, side), Image.LANCZOS)
         img = _flatten(ImageOps.exif_transpose(img))
         img.thumbnail((side, side), Image.LANCZOS)
         return img

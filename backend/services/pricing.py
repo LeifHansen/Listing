@@ -61,10 +61,10 @@ def _search_params(query: str, category_id: Optional[str],
     return params
 
 
-def _buy_api_headers() -> dict:
-    """Headers for the Buy APIs, on the application token."""
+def _buy_api_headers(token: Optional[str] = None) -> dict:
+    """Headers for the Buy APIs, on the application token (or `token`)."""
     return {
-        "Authorization": f"Bearer {_app_token()}",
+        "Authorization": f"Bearer {token or _app_token()}",
         "Accept": "application/json",
         "X-EBAY-C-MARKETPLACE-ID": config.EBAY_MARKETPLACE_ID,
     }
@@ -166,9 +166,26 @@ def active_comps(query: str, category_id: Optional[str] = None,
 # granted approval would be picked up anyway.
 _INSIGHTS_DENIED = False
 
+# The scope Marketplace Insights answers. It rides a token of its OWN (see
+# taxonomy._app_token): the base application token never carried it, so even
+# an approved application was refused, and asking for it on the base token
+# would fail that token outright for every application that is not approved.
+INSIGHTS_SCOPE = "https://api.ebay.com/oauth/api_scope/buy.marketplace.insights"
+
 
 class InsightsNotApproved(RuntimeError):
     """eBay has not granted this application the marketplace-insights scope."""
+
+
+def _deny_insights(status) -> InsightsNotApproved:
+    """Latch sold comps off for this process, and the error saying why."""
+    global _INSIGHTS_DENIED
+    _INSIGHTS_DENIED = True
+    log.info("pricing: marketplace insights is not approved for this "
+             "application (%s) — sold prices are off until eBay grants "
+             "the buy.marketplace.insights scope", status)
+    return InsightsNotApproved(
+        "eBay has not approved this application for sold-price data")
 
 
 def insights_enabled() -> bool:
@@ -200,22 +217,25 @@ def sold_comps(query: str, category_id: Optional[str] = None,
     """
     if not insights_enabled():
         return None
+    try:
+        token = _app_token(INSIGHTS_SCOPE)
+    except httpx.HTTPStatusError as exc:
+        # eBay refuses the TOKEN for a scope it has not granted (400
+        # invalid_scope) -- the same answer as the 403 below, a day earlier.
+        status = getattr(exc.response, "status_code", None)
+        if status in (400, 401, 403):
+            raise _deny_insights(status) from exc
+        raise
     resp = httpx.get(
         f"{config.EBAY_API_BASE}/buy/marketplace_insights/v1_beta"
         f"/item_sales/search",
         params=_search_params(query, category_id, condition, gtin,
                               "FIXED_PRICE|AUCTION", 50),
-        headers=_buy_api_headers(),
+        headers=_buy_api_headers(token),
         timeout=30,
     )
     if resp.status_code in (401, 403):
-        global _INSIGHTS_DENIED
-        _INSIGHTS_DENIED = True
-        log.info("pricing: marketplace insights is not approved for this "
-                 "application (%s) — sold prices are off until eBay grants "
-                 "the buy.marketplace.insights scope", resp.status_code)
-        raise InsightsNotApproved(
-            "eBay has not approved this application for sold-price data")
+        raise _deny_insights(resp.status_code)
     resp.raise_for_status()
     return parse_sold(resp.json(), query, gtin=gtin)
 

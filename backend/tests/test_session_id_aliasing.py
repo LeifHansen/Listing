@@ -33,7 +33,7 @@ VALID = [
     "3aaeb40637a1",            # a normal uploaded session
     "ebay-168433981627",       # an imported eBay listing
     "THRYFT-abc123",
-    "a" * 128,                 # at the length bound
+    "a" * 64,                  # at the length bound (VARCHAR(64) columns)
 ]
 
 # Ids outside the accepted form. These must be REFUSED \u2014 under the old rule
@@ -49,7 +49,7 @@ REJECTED = [
     "abc\u0301",               # a trailing combining accent
     "",
     "-leading",                # must start alphanumeric
-    "a" * 129,                 # past the length bound
+    "a" * 65,                  # past the length bound
 ]
 
 # Ids that the accepted charset admits and that LOOK like a neighbour's id.

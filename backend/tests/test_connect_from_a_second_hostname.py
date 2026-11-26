@@ -146,3 +146,23 @@ def test_the_native_shell_still_wins(two_origins):
                     main.RETURN_ORIGIN_COOKIE: APP}), "/?ebay=connected")
     assert out.status_code == 200
     assert main.config.NATIVE_APP_ORIGIN in out.body.decode()
+
+
+def test_the_page_back_into_the_app_may_run_its_one_script(two_origins):
+    """The page's whole job is the `location.replace` that returns to the
+    app. Under the app-wide policy -- index.html's scripts only, by hash --
+    it was blocked and the seller had to find the button. The page carries its
+    own policy, allowing exactly that script and nothing else."""
+    import base64
+    import hashlib
+    import re
+
+    out = main._finish_connect(
+        req(FLY, **{main.NATIVE_RETURN_COOKIE: "app"}), "/?ebay=connected")
+    body = out.body.decode()
+    (script,) = re.findall(r"<script>(.*?)</script>", body, re.S)
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    csp = out.headers["content-security-policy"]
+    assert f"script-src 'sha256-{digest}'" in csp
+    assert "unsafe-inline" not in csp.split("script-src", 1)[1].split(";")[0]
+    assert "default-src 'none'" in csp

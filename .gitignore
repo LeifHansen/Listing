@@ -10,11 +10,13 @@ env/
 .env
 *.local
 
-# Runtime data (uploaded images, generated listings, sessions, job status)
-data/sessions/
-data/exports/
-data/jobs/
-data/.secret_key
+# Runtime data (uploaded images, generated listings, sessions, job status,
+# owed refunds, the generated signing key). The whole directory, as
+# .dockerignore already has it: listing its subdirectories one by one left
+# data/owed-refunds/ -- seller money owed, written by services/owed_refunds.py
+# -- one `git add -A` away from a commit. Anchored to the root so a package
+# or fixture directory named "data" elsewhere is still tracked.
+/data/
 *.log
 
 # OS / editor

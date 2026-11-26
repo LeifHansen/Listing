@@ -219,6 +219,26 @@ describe("filtering the listings grid", () => {
   });
 });
 
+describe("typing into the brand box", () => {
+  beforeEach(() => { localStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+
+  it("keeps the space between two words", async () => {
+    // The box is bound to the store's filters, which used to be trimmed on
+    // every keystroke: "Ralph " lost its space before "Lauren" was typed.
+    const { root, app } = await mount(STORE);
+    await act(async () => {
+      app().setListingFilters((cur) => ({ ...cur, brand: "Ralph " }));
+    });
+    expect(app().listingFilters.brand).toBe("Ralph ");
+    await act(async () => {
+      app().setListingFilters((cur) => ({ ...cur, brand: `${cur.brand}L` }));
+    });
+    expect(app().listingFilters.brand).toBe("Ralph L");
+    await act(async () => { root.unmount(); });
+  });
+});
+
 describe("saving a filter as a view", () => {
   beforeEach(() => { localStorage.clear(); });
   afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });

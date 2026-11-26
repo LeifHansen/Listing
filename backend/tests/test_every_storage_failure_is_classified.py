@@ -298,6 +298,9 @@ WHY_A_BLANK_IS_SAFE = {
         "listing that has none, and the publish goes ahead without it",
     "exists":
         "False only ever causes another attempt; nothing reads it as 'deleted'",
+    "head":
+        "None is read as 'the bucket may not hold this version', so the only "
+        "consequence is a re-upload and the local copy staying; never a delete",
     "delete":
         "one object; the prefix delete is the one erasure depends on, and it raises",
     "delete_prefix":

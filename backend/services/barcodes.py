@@ -25,6 +25,8 @@ stop being tested because the image stack is not installed.
 """
 from __future__ import annotations
 
+import re
+
 from ..config import log
 from ..models import ItemSpecific, Listing
 
@@ -212,6 +214,11 @@ _ASPECTS = {"UPC": "UPC", "EAN": "EAN", "ISBN": "ISBN"}
 _UNVERIFIED_ASPECTS = {"mpn": "MPN", "model": "Model"}
 # The aspects a listing might already be carrying a product code under.
 CODE_ASPECTS = ("upc", "ean", "isbn", "gtin")
+# What the scanner calls a code that is NOT a barcode: the ones on a plate, a
+# sewn label or a box end, which carry no check digit. Ten digits of a serial
+# pass ISBN-10's check about one time in eleven, so the digits alone cannot
+# be what promotes one to a product code -- the declared kind has to agree.
+_PLATE_KINDS = {"mpn", "model", "style", "serial", "part", "lot", "sku"}
 
 
 def from_scan(raw) -> list[dict]:
@@ -249,7 +256,8 @@ def from_scan(raw) -> list[dict]:
         # code with a digit missing is not a code, whatever it checksums to.
         if not value or entry.get("legible") is False or "?" in value:
             continue
-        name = kind(value)
+        plate = bool(_PLATE_KINDS & set(re.findall(r"[a-z]+", declared.lower())))
+        name = "" if plate else kind(value)
         if name:
             code = normalize(value)
             if code in seen:
@@ -258,7 +266,7 @@ def from_scan(raw) -> list[dict]:
             out.append({"value": code, "kind": name,
                         "symbology": symbology(code),
                         "source": source, "verified": True})
-        elif looks_like_a_code(value):
+        elif not plate and looks_like_a_code(value):
             # The expensive case, and the reason this module exists: twelve
             # digits that fail their check digit are a misread, not a UPC.
             log.info("scan: %s %r failed its check digit — not written",

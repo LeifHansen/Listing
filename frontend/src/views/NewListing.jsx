@@ -233,6 +233,7 @@ export function Workflow() {
           : "It stays in your Drafts exactly as last saved — any unsaved edits here are discarded.",
         confirmLabel: "Close",
       }))) return;
+      w.discardUnsaved();   // as the dialog just promised
     } else {
       await w.flushSave();
     }
@@ -392,7 +393,9 @@ export function Workflow() {
               stranding the rest of the batch. Clearing the session brings the
               queue straight back — it's still in memory. */}
           {activeBulk && (
-            <Button variant="secondary" onClick={() => setSession(null)}>
+            // `back`, not a bare setSession(null): the same exit as the arrow,
+            // so the last edit is sent (or a live listing asks) on the way.
+            <Button variant="secondary" onClick={back}>
               <ArrowLeft aria-hidden /> Back to batch
             </Button>
           )}
@@ -438,9 +441,13 @@ export function Workflow() {
           <ConflictBanner
             conflicts={session.conflicts}
             sessionId={session.sessionId}
-            onResolved={(r) => setSession((cur) => (cur ? {
-              ...cur, listing: r.listing, conflicts: r.conflicts,
-            } : cur))}
+            onResolved={(r, { field, choice } = {}) => {
+              setSession((cur) => (cur ? {
+                ...cur, listing: r.listing, conflicts: r.conflicts,
+              } : cur));
+              // The session alone left the form showing the value turned down.
+              w.adoptConflictAnswer(field, choice, r.listing);
+            }}
           />
         </motion.div>
       )}

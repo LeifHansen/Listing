@@ -15,6 +15,8 @@ Cloudflare hiccup) can't quietly disable storage until the next deploy.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import time
 import threading
 from pathlib import Path
@@ -272,24 +274,48 @@ def presigned_get(key: str, expires: int = 3600) -> str:
         ExpiresIn=expires)
 
 
+def _temp_beside(path: Path) -> Path:
+    """A temp name next to `path` that no other writer can be using.
+
+    Unique per process and thread, as images._save_atomic's is, and for the
+    same reason: a fixed `<name>.tmp` let two restores of one photo share a
+    file -- the second write truncated the first, and the second rename found
+    nothing and reported the photo gone.
+    """
+    return path.with_name(
+        f".{path.name}.{os.getpid():x}.{threading.get_ident():x}.tmp")
+
+
+def _discard(tmp: Optional[Path]) -> None:
+    """Remove a temp file a failed restore left behind; a no-op after a
+    rename. Unique names that were never cleaned up would be litter on a 1GB
+    volume under names nothing reuses."""
+    if tmp is not None:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+
+
 def restore(key: str, local_path: Path) -> bool:
     """Bring an offloaded object back to disk (atomically). Used at publish
     time so eBay always fetches a locally-served file — never a redirect to a
     short-lived signed URL whose handling by eBay's image fetcher we don't
     control. False on any failure; never raises."""
+    tmp = None
     try:
         client = _get_client()
         if client is None:
             return False
         data = client.get_object(Bucket=config.R2_BUCKET, Key=key)["Body"].read()
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = local_path.with_name(local_path.name + ".tmp")
+        tmp = _temp_beside(local_path)
         tmp.write_bytes(data)
         tmp.replace(local_path)
         return True
     except Exception as exc:  # noqa: BLE001 - caller falls back to its clear error
         log.warning(f"objstore: restore of {key} failed: {exc}")
         return False
+    finally:
+        _discard(tmp)
 
 
 def download(key: str, local_path: Path) -> bool:
@@ -301,18 +327,21 @@ def download(key: str, local_path: Path) -> bool:
     it. Same contract otherwise: atomic via a temp name, False on any
     failure, never raises.
     """
+    tmp = None
     try:
         client = _get_client()
         if client is None:
             return False
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = local_path.with_name(local_path.name + ".tmp")
+        tmp = _temp_beside(local_path)
         client.download_file(config.R2_BUCKET, key, str(tmp))
         tmp.replace(local_path)
         return True
     except Exception as exc:  # noqa: BLE001 - caller falls back to its own error
         log.warning(f"objstore: download of {key} failed: {exc}")
         return False
+    finally:
+        _discard(tmp)
 
 
 def exists(key: str) -> bool:
@@ -328,6 +357,22 @@ def exists(key: str) -> bool:
         return True
     except Exception:  # noqa: BLE001 - missing object or transient error
         return False
+
+
+def head(key: str) -> Optional[dict]:
+    """{"size": bytes, "modified": epoch seconds} for an object in the
+    bucket, or None when it is missing or cannot be asked about -- the same
+    "None on any doubt" as exists()."""
+    try:
+        client = _get_client()
+        if client is None:
+            return None
+        meta = client.head_object(Bucket=config.R2_BUCKET, Key=key)
+        modified = meta.get("LastModified")
+        return {"size": int(meta.get("ContentLength") or 0),
+                "modified": modified.timestamp() if modified else 0.0}
+    except Exception:  # noqa: BLE001 - missing object or transient error
+        return None
 
 
 def delete(key: str) -> None:

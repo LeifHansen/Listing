@@ -13,10 +13,41 @@ partner API) stays inside the provider module that owns it.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
 from ..models import Listing
+
+# How many sellers' access tokens a provider keeps in memory.
+TOKEN_CACHE_MAX = 50
+
+
+def make_room(cache: dict, cap: int = TOKEN_CACHE_MAX) -> None:
+    """Trim a {key: (expires_at, token)} cache below `cap` WITHOUT emptying it.
+
+    Emptying it is what the cap used to do, and on a busy instance that threw
+    away every other seller's live token the moment one more arrived -- all of
+    them then paid a refresh on their next request, together. Expired entries
+    go first; past that, whichever expires soonest. (ebay_provider._make_room
+    is the same rule for eBay's cache.)
+    """
+    now = time.time()
+    for key in [k for k, (expires, _) in cache.items() if expires <= now]:
+        cache.pop(key, None)
+    while len(cache) >= cap:
+        cache.pop(min(cache, key=lambda k: cache[k][0]), None)
+
+
+def connection_changed(current: Optional[dict], refreshed_with: str) -> bool:
+    """Did the stored connection move while a token refresh was out?
+
+    `current` is the account row read AFTER the refresh came back. Gone or
+    cleared is a disconnect; a different refresh token is a reconnect. Either
+    way the rotated token this refresh produced belongs to nobody any more.
+    """
+    return (not current
+            or (current.get("refresh_token") or "") != (refreshed_with or ""))
 
 
 @dataclass

@@ -22,13 +22,27 @@ COOKIE_NAME = "thryft_session"
 TOKEN_TTL_DAYS = 30
 
 
+# bcrypt reads at most 72 bytes of a password. bcrypt 4 dropped the rest
+# silently; bcrypt 5 (in requirements since 2026-09-09) raises ValueError
+# instead. Unhandled, that made signup a 500 for any passphrase over 72 bytes
+# (87 ASCII characters, or 19 emoji) and -- worse -- locked out every account
+# created BEFORE the bump with one: checkpw raised, verify_password said
+# "wrong password", and there is no reset flow. Cutting to 72 bytes here is
+# exactly what bcrypt 4 did, so every existing hash still verifies.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _pw_bytes(password: str) -> bytes:
+    return password.encode()[:_BCRYPT_MAX_BYTES]
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(_pw_bytes(password), bcrypt.gensalt()).decode()
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     try:
-        return bcrypt.checkpw(password.encode(), password_hash.encode())
+        return bcrypt.checkpw(_pw_bytes(password), password_hash.encode())
     except Exception:  # noqa: BLE001
         return False
 
@@ -115,6 +129,15 @@ def current_user(request: Request) -> Optional[dict]:
     try:
         payload = jwt.decode(token, config.SECRET_KEY, algorithms=["HS256"])
     except Exception:  # noqa: BLE001 - expired/invalid token -> anonymous
+        request.state.auth_user = None
+        return None
+    # A connect ticket (make_ticket) is signed with the same key and decodes
+    # just as cleanly, so without this it WAS a session: the 60-second
+    # credential that rides a redirect's query string -- into browser history
+    # and the access log -- signed its holder in as the seller, who could then
+    # mint a fresh ticket every minute and stay signed in indefinitely. Only a
+    # session token lacks `purpose`; verify_ticket refuses the other direction.
+    if not isinstance(payload, dict) or "purpose" in payload:
         request.state.auth_user = None
         return None
     # Deliberately outside a catch-all, and deliberately before the memo is

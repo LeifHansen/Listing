@@ -154,6 +154,39 @@ describe("adding a video", () => {
       [{ file: "video_1.mp4", note: "Saved." }]);
   });
 
+  it("carries the new video into the next full save of a listing the server sent", async () => {
+    /* Every record the server sends has `videos` (models.Listing defaults
+       it to []), so the form opens holding a list of its own. A full save
+       carrying that open-time copy is a save that OMITS the new video, and
+       the server reads an omission as the seller deleting it: Publish
+       straight after adding one went out with no video at all. */
+    vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
+      if (String(url) === "/api/listings/s1/video" && opts.method === "POST") {
+        return ok({ ok: true, videos: [{ file: "video_1.mp4", note: "Saved." }] });
+      }
+      return ok({ videos: [] });
+    }));
+    const get = await mountEditor({ videos: [] });
+
+    await act(async () => { await get().form.addVideo(MP4()); });
+
+    expect(get().form.collect().videos).toEqual(
+      [{ file: "video_1.mp4", note: "Saved." }]);
+  });
+
+  it("does not bring a removed video back on the next full save", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => ok({ ok: true, videos: [] })));
+    const get = await mountEditor({
+      videos: [{ file: "video_1.mp4", note: "On eBay.", url: "/media/s1/video/video_1.mp4" }],
+    });
+
+    await act(async () => {
+      await get().form.removeVideo("video_1.mp4", async () => true);
+    });
+
+    expect(get().form.collect().videos).toEqual([]);
+  });
+
   it("says why when the server refuses the file", async () => {
     vi.stubGlobal("fetch", vi.fn((url, opts = {}) => {
       if (String(url) === "/api/listings/s1/video" && opts.method === "POST") {

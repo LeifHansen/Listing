@@ -93,8 +93,13 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   // request holds the name it started on while the canvas has already moved
   // to another photo. A background removal is a round trip to Photoroom, which
   // is time enough to close the studio and open a different photo.
-  const nameRef = useRef(name);
-  useEffect(() => { nameRef.current = name; }, [name]);
+  //
+  // Held as listing AND name: every listing calls its first photo
+  // img_000.jpg, so a name alone cannot tell one listing's photo from
+  // another's.
+  const photoKey = name ? `${sessionId}/${name}` : null;
+  const nameRef = useRef(photoKey);
+  useEffect(() => { nameRef.current = photoKey; }, [photoKey]);
   const canvasRef = useRef(null);
   const overlayRef = useRef(null);
   const painting = useRef(false);
@@ -297,7 +302,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   const load = useCallback(async () => {
     const canvas = canvasRef.current;
     if (!canvas || !name) return false;
-    const startedOn = name;
+    const startedOn = photoKey;
     try {
       // Through the bytes route, not /media: a redirect to the bucket (an
       // offloaded photo) or the native shell's cross-origin <img> taints the
@@ -323,7 +328,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       if (nameRef.current === startedOn) toast(e.message, { kind: "error" });
       return false;
     }
-  }, [sessionId, name, clearOverlay, redraw, syncHistory, toast]);
+  }, [sessionId, name, photoKey, clearOverlay, redraw, syncHistory, toast]);
 
   // Land an AI-processed image as the new cutout layer.
   const applyPreview = useCallback(async (dataUrl) => {
@@ -362,7 +367,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
         + "removing it usually cuts into the item. Remove it anyway?",
       confirmLabel: "Remove it anyway",
     }))) return;
-    const startedOn = name;
+    const startedOn = photoKey;
     setAiBusy(local.usable ? "Removing the background on this device…"
                            : "Removing the background…");
     try {
@@ -418,7 +423,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     } finally {
       setAiBusy(null);
     }
-  }, [aiBusy, canCut, canCloud, local.usable, sessionId, name, applyPreview,
+  }, [aiBusy, canCut, canCloud, local.usable, sessionId, name, photoKey, applyPreview,
       toast, confirm, onClose, openSettings, loadBgRemovalStatus,
       bgRemoval?.available]);
 
@@ -431,7 +436,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
       openSettings("bg-removal");
       return;
     }
-    const startedOn = name;
+    const startedOn = photoKey;
     setAiBusy("Removing the background in the cloud…");
     try {
       const fromStored = cutRef.current?.fromSource;
@@ -448,7 +453,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     } finally {
       setAiBusy(null);
     }
-  }, [aiBusy, canCloud, sessionId, name, applyPreview, toast, onClose,
+  }, [aiBusy, canCloud, sessionId, name, photoKey, applyPreview, toast, onClose,
       openSettings, loadBgRemovalStatus]);
 
   // The same device cut on another colour: the matte is reused, nothing is
@@ -456,7 +461,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   const recolour = useCallback(async (background) => {
     const c = cutRef.current;
     if (!c || aiBusy) return;
-    const startedOn = name;
+    const startedOn = photoKey;
     setAiBusy("Changing the background…");
     try {
       const out = await composeMask({ sessionId, name, blob: c.blob, mask: c.mask,
@@ -471,7 +476,7 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
     } finally {
       setAiBusy(null);
     }
-  }, [aiBusy, sessionId, name, applyPreview, toast]);
+  }, [aiBusy, sessionId, name, photoKey, applyPreview, toast]);
 
   // The item on nothing, as a PNG, for the seller to use anywhere.
   const downloadPng = useCallback(async () => {
@@ -799,7 +804,9 @@ export function ImageEditor({ sessionId, name, onClose, onSaved }) {
   };
 
   return (
-    <Dialog open={!!name} onClose={onClose} title="Photo studio" wide>
+    // Locked shut while AI work is out, X, Escape and backdrop included --
+    // the same reason Cancel is disabled below.
+    <Dialog open={!!name} onClose={aiBusy ? () => {} : onClose} title="Photo studio" wide>
       <div className="flex items-center gap-1 p-1.5 mb-2 rounded-[14px] bg-bg-sunken border border-line overflow-x-auto">
         {offerCut && (
           <Tool icon={Eraser} label="Remove BG" onClick={removeBg} disabled={!!aiBusy} />

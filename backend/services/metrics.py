@@ -96,11 +96,19 @@ def _make_room(cache: dict, ttl: float, cap: int = _CACHE_MAX) -> None:
     Both caches key on `(fetched_at, ...)`, which is what lets one helper
     serve them.
     """
+    # Over a SNAPSHOT of the entries: both caches are written by other
+    # requests' threads with no lock, and iterating the live dict while one
+    # of them inserts raises "dictionary changed size during iteration" --
+    # a 500 on the dashboard from a cache trim. list() copies it in one step.
     now = time.time()
-    for key in [k for k, entry in cache.items() if now - entry[0] >= ttl]:
-        cache.pop(key, None)
+    for key, entry in list(cache.items()):
+        if now - entry[0] >= ttl:
+            cache.pop(key, None)
     while len(cache) >= cap:
-        cache.pop(min(cache, key=lambda k: cache[k][0]), None)
+        entries = list(cache.items())
+        if not entries:
+            break
+        cache.pop(min(entries, key=lambda kv: kv[1][0])[0], None)
 
 
 # When eBay answers the report with 429 the app's daily allowance for the

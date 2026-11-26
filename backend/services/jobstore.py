@@ -20,6 +20,7 @@ nothing reads back.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import threading
@@ -38,6 +39,16 @@ _SNAPSHOTS: dict[str, tuple[int, str]] = {}
 # Same cache for the items-free body the app shell polls (see brief_json).
 _BRIEFS: dict[str, tuple[int, str]] = {}
 _LOCK = threading.Lock()
+
+# Mirror writes happen outside _LOCK, so two of one job can land out of order
+# -- a progress tick snapshotted before the seller pressed Stop, renamed into
+# place after the stop, put back a mirror the next boot would resume. Each
+# snapshot takes a number under _LOCK, and a write older than the newest one
+# already in place is dropped. Only the rename is under this lock; the slow
+# part, writing the temp file, is not.
+_SEQ = itertools.count(1)
+_WRITTEN: dict[str, int] = {}
+_MIRROR_LOCK = threading.Lock()
 
 # Bound the in-memory store. An identify runs as a job on EVERY upload, so
 # without eviction this dict would grow monotonically until restart.
@@ -66,7 +77,9 @@ MIRROR_FIELDS = (
     # given and whether they were going to Etsy as drafts or live. The one it
     # was sending when the process died is in `_inflight`, and is reported as
     # unknown rather than sent again — see main._resume_interrupted_crossposts.
-    "_ids", "_mode",
+    # `_queue` is each listing's reviewed Etsy fields and title: without them
+    # a resumed run sent the rest with no category and no attestations.
+    "_ids", "_mode", "_queue",
     # The guidance step (phase "awaiting_notes"): the session a paused SINGLE
     # upload belongs to, and the per-item text a paused batch has already been
     # handed. A batch waiting on the seller has no worker holding either, so
@@ -112,17 +125,25 @@ def _mirror_path(job_id: str) -> Path:
     return _mirror_dir() / f"{storage.safe_session_name(job_id)}.json"
 
 
-def _write_mirror(job_id: str, record: dict) -> None:
+def _write_mirror(job_id: str, record: dict, seq: int = 0) -> None:
     """Write one job's mirror. Best-effort and never raises — a batch must not
     fail because the volume is full or read-only. The write is atomic: progress
     ticks arrive from several worker threads at once, and a half-written file
-    would come back from a restart as an unreadable record."""
+    would come back from a restart as an unreadable record. `seq` is the
+    snapshot's number (see _SEQ): an older one than is already on disk is
+    dropped rather than written over it."""
     try:
         _mirror_dir().mkdir(parents=True, exist_ok=True)
         path = _mirror_path(job_id)
         tmp = path.with_suffix(f".{threading.get_ident():x}.tmp")
         tmp.write_text(json.dumps(record))
-        os.replace(tmp, path)
+        with _MIRROR_LOCK:
+            if seq and seq < _WRITTEN.get(job_id, 0):
+                tmp.unlink(missing_ok=True)
+                return
+            os.replace(tmp, path)
+            if seq:
+                _WRITTEN[job_id] = seq
     except Exception as exc:  # noqa: BLE001 - bookkeeping, never the work itself
         log.debug("jobstore: couldn't mirror job %s: %s", job_id, exc)
 
@@ -148,8 +169,9 @@ def register(job_id: str, data: dict, uid: Optional[str] = None) -> None:
             _JOBS.pop(dropped)
             _SNAPSHOTS.pop(dropped, None)
             _BRIEFS.pop(dropped, None)
-        record = _record(job)
-    _write_mirror(job_id, record)
+            _WRITTEN.pop(dropped, None)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
 
 
 def update(job_id: str, **fields) -> None:
@@ -172,8 +194,8 @@ def update(job_id: str, **fields) -> None:
         job["_rev"] = job.get("_rev", 0) + 1
         # Snapshot under the lock, write outside it: the mirror is disk I/O and
         # every progress tick in the batch would otherwise queue behind it.
-        record = _record(job)
-    _write_mirror(job_id, record)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
 
 
 def request_cancel(job_id: str, uid: Optional[str] = None) -> Optional[str]:
@@ -208,8 +230,8 @@ def request_cancel(job_id: str, uid: Optional[str] = None) -> Optional[str]:
         job["_cancel"] = True
         job.update(done=True, cancelled=True, phase="stopped")
         job["_rev"] = job.get("_rev", 0) + 1
-        record = _record(job)
-    _write_mirror(job_id, record)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
     return "stopping"
 
 
@@ -295,8 +317,8 @@ def claim(job_id: str, expect_phase: str, uid: Optional[str] = None,
         was = json.loads(json.dumps(job))  # deep copy, safe to hand out
         job.update(fields)
         job["_rev"] = job.get("_rev", 0) + 1
-        record = _record(job)
-    _write_mirror(job_id, record)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
     return was
 
 
@@ -340,8 +362,8 @@ def revise(job_id: str, expect_phase: str, uid: Optional[str] = None,
         job.update(fields)
         job["_rev"] = job.get("_rev", 0) + 1
         now = json.loads(json.dumps(job))  # deep copy, safe to hand out
-        record = _record(job)
-    _write_mirror(job_id, record)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
     return now
 
 
@@ -378,8 +400,8 @@ def annotate(job_id: str, field: str, key: str, value,
         job[field] = current
         _SNAPSHOTS.pop(job_id, None)
         _BRIEFS.pop(job_id, None)
-        record = _record(job)
-    _write_mirror(job_id, record)
+        record, seq = _record(job), next(_SEQ)
+    _write_mirror(job_id, record, seq)
     return True
 
 
@@ -563,6 +585,8 @@ def adopt_mirrors() -> list[dict]:
     try to RESUME some of them — the verdict here is "this job's process went
     away", which is a description of what happened, not a decision that the
     work is lost. Only the caller knows which jobs can be picked up safely.
+    A job the seller stopped that still holds an unearned charge comes back
+    too, already done, so the caller can pay it back (it never resumes one).
 
     Two rules keep this from ever destroying a live job: a job already in
     memory is left alone (memory is always fresher than its own mirror), and
@@ -599,8 +623,22 @@ def adopt_mirrors() -> list[dict]:
             if record["id"] in _JOBS:
                 continue  # live in this process — the mirror is the stale copy
             if not record.get("done"):
+                error = record.get("error") or interrupted_message(record)
+                # Handed over AS MIRRORED -- still running -- with the reason
+                # beside it. The resume passes read `done` as "finished, leave
+                # it", and a copy taken after the verdict below said done for
+                # every one of them: no crosspost was ever picked back up.
+                interrupted.append({**record, "error": error})
                 record["done"] = True
-                record["error"] = record.get("error") or interrupted_message(record)
+                record["error"] = error
+            elif record.get("_cancel") and record.get("_refunds"):
+                # Stopped by the seller, which marks a job done at once, and
+                # then the process went before its worker settled the
+                # up-front charge -- or there never was a worker: a pipeline
+                # paused for notes. A worker that settles pops `_refunds`
+                # (see `update`), so one still here was never earned. Handed
+                # over to be paid back; `_cancel` keeps every resume pass off
+                # it, and the refund is keyed so a second boot cannot repeat it.
                 interrupted.append(dict(record))
             _JOBS[record["id"]] = record
     if _JOBS:
@@ -615,3 +653,5 @@ def reset() -> None:
         _JOBS.clear()
         _SNAPSHOTS.clear()
         _BRIEFS.clear()
+    with _MIRROR_LOCK:
+        _WRITTEN.clear()

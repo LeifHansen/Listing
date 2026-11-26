@@ -115,3 +115,60 @@ describe("what a dropped connection may tell the seller", () => {
     expect(err.message.toLowerCase()).toMatch(/try again/);
   });
 });
+
+/**
+ * The deadline covers the answer, not just its first line.
+ *
+ * fetch resolves as soon as the HEADERS arrive, and the timer was cleared
+ * right there -- so a body that stalled half way (a phone between networks,
+ * a few MB of /api/listings on a weak signal) was read with no deadline at
+ * all, and the spinner or the skeletons stayed up for good: the thing the
+ * deadline exists to prevent. A body that never finishes now ends the same
+ * way a request that never answers does, and a connection that drops part
+ * way through the body says what a dropped connection says.
+ */
+function stallBody() {
+  vi.stubGlobal("fetch", (_url, opts) => Promise.resolve({
+    ok: true, status: 200, headers: { get: () => null },
+    json: () => new Promise((_resolve, reject) => {
+      opts?.signal?.addEventListener("abort", () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    }),
+  }));
+}
+
+describe("an answer whose body stalls", () => {
+  it("is given up on at the same deadline", async () => {
+    stallBody();
+    await expect(api("/api/listings", { timeoutMs: 10 }))
+      .rejects.toThrow(/Nothing was lost/);
+  });
+
+  it("is a lost answer for a write, not a refusal", async () => {
+    stallBody();
+    const err = await api("/api/publish", { method: "POST", timeoutMs: 10 })
+      .catch((e) => e);
+    expect(err.message).toMatch(/may still have gone through/);
+    expect(err.unknownOutcome).toBe(true);
+  });
+
+  it("says a connection dropped part way through, in words", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({
+      ok: true, status: 200, headers: { get: () => null },
+      json: () => Promise.reject(new TypeError("network error")),
+    }));
+    const err = await api("/api/listings").catch((e) => e);
+    expect(err.message).toMatch(/try again/i);
+  });
+
+  it("still lets a body that is simply not JSON say so", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({
+      ok: true, status: 200, headers: { get: () => null },
+      json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+    }));
+    await expect(api("/api/listings")).rejects.toThrow(SyntaxError);
+  });
+});

@@ -36,3 +36,26 @@ def test_ticket_is_not_a_session_token():
     interchangeable in either direction."""
     session = auth.make_token("user-1")
     assert auth.verify_ticket(session, "connect") is None
+
+
+def _request_with(authz: str):
+    """A bare Starlette request carrying one Authorization header -- what a
+    native client sends, and what someone holding a leaked ticket would."""
+    from starlette.requests import Request
+    return Request({"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                    "headers": [(b"authorization", authz.encode())]})
+
+
+def test_a_ticket_is_not_accepted_as_a_session(monkeypatch):
+    """The other direction. The ticket rides a redirect's query string, so it
+    lands in browser history and the access log; current_user used to decode
+    it like any session token, which made it a 60-second login that could
+    mint its own successor every minute."""
+    from backend import db
+    monkeypatch.setattr(db, "get_user_by_id",
+                        lambda uid: {"id": uid, "email": "a@b.c"})
+    ticket = auth.make_ticket("user-1", "connect")
+    assert auth.current_user(_request_with(f"Bearer {ticket}")) is None
+    # and the real session token still works through the same door
+    session = auth.make_token("user-1")
+    assert auth.current_user(_request_with(f"Bearer {session}"))["id"] == "user-1"

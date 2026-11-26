@@ -90,6 +90,38 @@ describe("normalizing what arrives", () => {
   });
 });
 
+describe("a word typed a character at a time", () => {
+  // The same finding as the price box, for the text boxes: the store
+  // normalizes on every keystroke, and trimming there ate the space at the
+  // end of "Ralph " before the "L" arrived -- "Ralph Lauren" came out
+  // "RalphLauren", and no multi-word brand or category could be typed.
+  it("keeps the space a seller just typed, while they are typing", () => {
+    expect(normalizeFilters({ brand: "Ralph " }, { asTyped: true }).brand).toBe("Ralph ");
+    expect(normalizeFilters({ category: "Men's " }, { asTyped: true }).category)
+      .toBe("Men's ");
+  });
+
+  it("still caps what is typed", () => {
+    expect(normalizeFilters({ brand: "x".repeat(500) }, { asTyped: true }).brand.length)
+      .toBeLessThanOrEqual(60);
+  });
+
+  it("matches, counts, names and compares the words, not the spaces", () => {
+    const typed = normalizeFilters({ brand: "  Ralph Lauren " }, { asTyped: true });
+    expect(matchesFilters(item({ brand: "Ralph Lauren" }), typed, NOW)).toBe(true);
+    expect(filterChips(typed)[0].label).toBe("Brand: Ralph Lauren");
+    expect(sameFilters(typed, { brand: "Ralph Lauren" })).toBe(true);
+    // Only spaces is no filter at all.
+    expect(isEmptyFilters(normalizeFilters({ brand: "   " }, { asTyped: true }))).toBe(true);
+  });
+
+  it("saves the words, not the spaces", () => {
+    const typed = normalizeFilters({ brand: "Ralph " }, { asTyped: true });
+    const res = addSavedView([], { name: "Ralph", tab: "active", filters: typed, now: NOW });
+    expect(res.view.filters.brand).toBe("Ralph");
+  });
+});
+
 describe("counting what is on", () => {
   it("counts a price RANGE as one filter, not two", () => {
     expect(activeFilterCount(on({ priceMin: "5", priceMax: "50" }))).toBe(1);

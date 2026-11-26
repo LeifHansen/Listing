@@ -58,3 +58,18 @@ def test_a_push_the_bucket_took_is_done(client, monkeypatch):
     res = _rotate(client)
     assert res.status_code == 200, res.text
     assert pushed and pushed[0].endswith("img_1.jpg")
+
+
+def test_a_refused_turn_leaves_the_photo_as_it_was(client, monkeypatch, tmp_path):
+    """A turn is relative. The 502 says "try again", and the card takes its
+    own turn back -- so the file must be back where it started too, or the
+    retry turns an already-turned photo and 180 degrees reaches eBay."""
+    photo = tmp_path / "optimized" / "img_1.jpg"
+    before = photo.read_bytes()
+    monkeypatch.setattr(main.objstore, "upload", lambda *a, **k: None)
+
+    assert _rotate(client).status_code == 502
+
+    assert photo.read_bytes() == before
+    with Image.open(photo) as img:
+        assert img.size == (8, 4)

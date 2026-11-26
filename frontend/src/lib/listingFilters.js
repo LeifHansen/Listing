@@ -124,6 +124,13 @@ export const EMPTY_FILTERS = Object.freeze({
 /* ---------- reading a filter set ---------- */
 
 const text = (v) => String(v ?? "").trim().slice(0, TEXT_MAX);
+// What a text box holds while the seller is still typing in it: capped, but
+// NOT trimmed. The boxes are controlled by the store's filters, which go
+// through normalizeFilters on every keystroke, and a trim there ate the space
+// at the end of "Ralph " before the "L" arrived. Everything that reads the
+// filters (matching, counting, chips, comparing, saving) normalizes again
+// without `asTyped`, so the spaces never reach any of them.
+const typedText = (v) => String(v ?? "").slice(0, TEXT_MAX);
 
 /* A price box's contents, as the box should hold them.
  *
@@ -172,9 +179,13 @@ const idList = (raw) => [...new Set(
 
 /* A filter object with only the keys this module knows, each a value it can
    act on. Everything that arrives from outside goes through here: the store's
-   setter, a saved view read back from the server, and the tests. */
-export function normalizeFilters(raw) {
+   setter, a saved view read back from the server, and the tests.
+
+   `asTyped` is the store's setter only: it keeps the text boxes as typed (see
+   typedText). */
+export function normalizeFilters(raw, { asTyped = false } = {}) {
   const f = raw && typeof raw === "object" ? raw : {};
+  const words = asTyped ? typedText : text;
   const photos = String(f.photos ?? "any");
   const within = String(f.within ?? "");
   const interest = String(f.interest ?? "");
@@ -182,8 +193,8 @@ export function normalizeFilters(raw) {
   return {
     format: pick(f.format, FORMAT_CHOICES),
     condition: pick(f.condition, CONDITIONS),
-    brand: text(f.brand),
-    category: text(f.category),
+    brand: words(f.brand),
+    category: words(f.category),
     priceMin: priceText(f.priceMin),
     priceMax: priceText(f.priceMax),
     photos: choiceIds(PHOTO_CHOICES).includes(photos) ? photos : "any",

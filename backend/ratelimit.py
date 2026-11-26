@@ -21,6 +21,13 @@ import time
 
 WINDOW_SECONDS = 900        # 15 minutes
 MAX_ATTEMPTS = 10           # per client, per window, per bucket
+# FAILED logins per email address per window, from any number of addresses.
+# The per-client limit above is no ceiling for an attacker with an address
+# pool, so one account also gets its own. Failures only, so a seller who signs
+# in often never meets it; twice the per-client number, so one person
+# mistyping on two devices doesn't either; and a window rather than a lock,
+# so it lifts on its own once the guessing stops.
+ACCOUNT_MAX_FAILURES = 20
 # The photo studio's background removal is a paid Photoroom call on the
 # app's own account, and each one holds a threadpool slot for the length of
 # the round trip — so an unthrottled client could both run up the bill and,
@@ -99,6 +106,21 @@ def check(key: str, now: float | None = None,
         if len(_hits) > _MAX_KEYS:
             _evict(now, key)
         return len(hits) <= limit
+
+
+def allowed(key: str, now: float | None = None,
+            max_attempts: int | None = None) -> bool:
+    """Is `key` still under its allowance? Records NOTHING.
+
+    For a limit that counts only some outcomes (ACCOUNT_MAX_FAILURES counts
+    failed logins): ask here first, then `check` the key once the attempt
+    turns out to be one that counts.
+    """
+    now = time.time() if now is None else now
+    limit = MAX_ATTEMPTS if max_attempts is None else max_attempts
+    with _lock:
+        recent = sum(1 for t in _hits.get(key, ()) if now - t < WINDOW_SECONDS)
+    return recent < limit
 
 
 def _evict(now: float, keep: str) -> None:

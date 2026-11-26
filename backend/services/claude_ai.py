@@ -55,8 +55,15 @@ _CLIENT_LOCK = threading.Lock()
 # a wedged request, far longer than any caller waits (the client gives up on a
 # job at 240s) and long enough to pin a worker thread the whole time. These
 # bound it to something a seller might actually still be waiting for.
-_AI_TIMEOUT_SECONDS = float(os.getenv("AI_TIMEOUT_SECONDS", "120") or 120)
-_AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2") or 2)
+#
+# Read through config.env_float, as google_ai reads the same two: a value
+# spelled "120s" must cost its default, not stop the app booting.
+#
+# NOTE the worst case is still TIMEOUT x (1 + RETRIES): the SDK retries a
+# timed-out request too, and a request that timed out on our side may have
+# completed (and been billed) on Anthropic's.
+_AI_TIMEOUT_SECONDS = config.env_float("AI_TIMEOUT_SECONDS", 120.0)
+_AI_MAX_RETRIES = int(config.env_float("AI_MAX_RETRIES", 2))
 
 
 def _client() -> Anthropic:
@@ -209,11 +216,23 @@ def _extract_json(text: str) -> dict:
             text = text[4:]
     # Be forgiving: grab the outermost { ... }.
     start, end = text.find("{"), text.rfind("}")
+    whole = text
     if start != -1 and end != -1:
         text = text[start : end + 1]
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
+        # A remark AFTER the object with a brace in it ("Note: the {first
+        # state} is rarer") put the last "}" past the answer. The object
+        # that starts at the first "{" may still be whole on its own.
+        data = None
+        if start != -1:
+            try:
+                data, _ = json.JSONDecoder().raw_decode(whole, start)
+            except ValueError:
+                data = None
+        if isinstance(data, dict):
+            return data
         # The model's answer, not ours, and it reads a listing: a description
         # that says the jeans are 34" x 28" has put two unescaped quotes in
         # the middle of a JSON string, and a batch item died on 'Expecting
@@ -1260,6 +1279,7 @@ def _verify_groups(client, images: list[bytes], groups: list[dict],
         max_tokens=min(2000, 600 + 32 * len(groups)),
         messages=[{"role": "user", "content": content}],
     )
+    _refused(resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError(
             f"the merge answer for {len(groups)} groups was cut off")
@@ -1379,6 +1399,7 @@ def group_photos(images: list[bytes], notes: str = "") -> dict:
             max_tokens=4000,
             messages=[{"role": "user", "content": content}],
         )
+        _refused(resp)
         if resp.stop_reason == "max_tokens":
             raise RuntimeError("grouping response was cut off; try fewer photos")
         text = "".join(b.text for b in resp.content if b.type == "text")
@@ -1475,6 +1496,7 @@ def scan_shelf(images: list[bytes]) -> dict:
         max_tokens=1500,
         messages=[{"role": "user", "content": content}],
     )
+    _refused(resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("the scan returned too much; try a shorter video")
     text = "".join(b.text for b in resp.content if b.type == "text")
@@ -1548,9 +1570,12 @@ def refine(listing: Listing, prompt: str) -> Listing:
     """Apply a free-form user instruction to an existing listing draft."""
     client = _client()
     prompt = (prompt or "").strip()[:REFINE_PROMPT_MAX_CHARS]
-    current = listing.model_dump()
-    # Don't let the model rewrite the image list.
-    current.pop("images", None)
+    # Only the copy a refine may rewrite (REFINED_FIELDS) -- which is all that
+    # is read back. The whole record carried eBay's last copy of the listing,
+    # any held conflicts and the marketplace bookkeeping: the description two
+    # or three times over, in and back out, against the token cap below. The
+    # image list is not in it either, so the model cannot rewrite it.
+    current = listing.model_dump(include=set(REFINED_FIELDS))
 
     msg = (
         "You are editing an eBay listing draft. Here is the current draft as "
@@ -1877,6 +1902,9 @@ def read_tag_text(image_paths: list[Path]) -> str:
         + _TAG_SCAN_SCHEMA)})
     resp = client.messages.create(model=config.VISION_MODEL, max_tokens=600,
                                   messages=[{"role": "user", "content": content}])
+    # A refusal is not "no tags": it is said as itself, and the callers that
+    # treat tag reading as best-effort catch it like any other failure.
+    _refused(resp)
     text = "".join(b.text for b in resp.content if b.type == "text")
     try:
         tags = [t for t in (_extract_json(text).get("tags") or [])
@@ -1893,6 +1921,7 @@ def read_tag_text(image_paths: list[Path]) -> str:
     crops.append({"type": "text", "text": _TAG_TRANSCRIBE_ASK})
     resp = client.messages.create(model=config.VISION_MODEL, max_tokens=900,
                                   messages=[{"role": "user", "content": crops}])
+    _refused(resp)
     out = "".join(b.text for b in resp.content if b.type == "text").strip()
     return out[:2000]
 
@@ -2242,6 +2271,7 @@ def fill_aspects(image_paths: list[Path], listing: Listing,
         messages=[{"role": "user", "content": content}],
     )
     _log_usage("fill_aspects", resp)
+    _refused(resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("the item-specifics response was cut off; try again")
     text = "".join(b.text for b in resp.content if b.type == "text")
@@ -2322,6 +2352,7 @@ def fill_aspects_combined(
         messages=[{"role": "user", "content": content}],
     )
     _log_usage("fill_aspects_combined", resp)
+    _refused(resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("the item-specifics response was cut off; try again")
     data = _extract_json("".join(b.text for b in resp.content if b.type == "text"))
@@ -2485,6 +2516,7 @@ def fill_missing_aspects(image_paths: list[Path], listing: Listing,
         messages=[{"role": "user", "content": content}],
     )
     _log_usage("fill_missing_aspects", resp)
+    _refused(resp)
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("the item-specifics response was cut off; try again")
     text = "".join(b.text for b in resp.content if b.type == "text")
@@ -2738,10 +2770,11 @@ def _lead_text(value, limit: int = 200) -> str:
 
     The lead is a third-party page title: a raw newline in it would start a
     new line of the prompt, and an unbounded one is an unbounded prompt. It
-    is also stripped of the fence it is placed inside, so it cannot end that
-    fence early and put the rest of itself outside it."""
-    text = " ".join(str(value or "").split())
-    return text.replace("</leads>", "").replace("<leads>", "")[:limit]
+    also loses every angle bracket, so it cannot end the fence it is placed
+    inside and put the rest of itself outside it -- deleting just the tag was
+    one pass, and "</lea</leads>ds>" rebuilt it (see experts/knowledge)."""
+    text = str(value or "").replace("<", " ").replace(">", " ")
+    return " ".join(text.split())[:limit]
 
 
 def identify_artwork(image_paths: list[Path], listing: Listing,
@@ -2886,6 +2919,7 @@ def verify_maker(image_paths: list[Path], listing: Listing,
             "against the photos." + _MAKER_VERIFY_SCHEMA)}]}],
     )
     _log_usage("verify_maker", verify)
+    _refused(verify)
     vdata = _extract_json("".join(b.text for b in verify.content if b.type == "text"))
     verdict = str(vdata.get("verdict", "")).strip().lower()
     vconf = str(vdata.get("confidence", "low")).strip().lower()

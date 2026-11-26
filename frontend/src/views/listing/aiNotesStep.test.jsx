@@ -339,5 +339,12 @@ describe("a question the server has already answered", () => {
 
     expect(host.textContent).not.toContain("Anything the photos don't show?");
     expect(host.textContent).toContain("Drag photos here");
+    // Not the pile that was uploaded: its previews were let go of once the
+    // photos were on the server, so they would be broken tiles -- over a
+    // button that would upload the same photos into a second draft.
+    const revoked = new Set(URL.revokeObjectURL.mock.calls.map(([u]) => u));
+    const shown = [...host.querySelectorAll("img")].map((i) => i.getAttribute("src"));
+    expect(shown.filter((src) => revoked.has(src))).toEqual([]);
+    expect(button("Identify with AI")).toBeUndefined();
   });
 });

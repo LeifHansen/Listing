@@ -614,6 +614,27 @@ class Listing(BaseModel):
             return sorted({str(v) for v in value if v})
         return value
 
+    @field_validator("images", mode="before")
+    @classmethod
+    def _plain_photo_names(cls, value):
+        """Keep only bare file names: one path segment, never "." or "..".
+
+        Every name this app writes is one (img_000.jpg and its kin), and
+        every reader joins it onto the session's photo folder. `images` is
+        NOT server-owned -- /api/save stores whatever the client sends -- so
+        a name like "../../../../proc/self/environ" used to reach those joins
+        as-is: a merge copied the file it pointed at into another listing and
+        /media served it to anyone, and an AI fill read it and sent the bytes
+        to the model provider. _photo_path guards the routes that take a name
+        in the URL; this guards the list, once, wherever a Listing is built.
+        Dropped rather than refused, like the caps below: a stored record
+        carrying one must still load, and no seller ever typed one."""
+        if not isinstance(value, (list, tuple)):
+            return value
+        return [n for n in value
+                if isinstance(n, str) and n not in ("", ".", "..")
+                and "/" not in n and "\\" not in n and "\x00" not in n]
+
     @field_validator("ai_confidence", mode="before")
     @classmethod
     def _known_confidence(cls, value):
@@ -755,7 +776,7 @@ class IdentifyResult(BaseModel):
 # arrive on routes that need no login, and an unbounded one became a permanent
 # dict key in services/publish_guard — a request body could size the process's
 # memory. 128 is far above anything the app itself mints.
-SessionId = Annotated[str, Field(max_length=128)]
+SessionId = Annotated[str, Field(max_length=64)]  # storage._SESSION_ID_RE
 
 
 class RefineRequest(BaseModel):

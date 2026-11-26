@@ -14,7 +14,7 @@ import { AIStatusCard } from "@/components/ui/AIStatus";
 import { BrandProgress } from "@/components/ui/Progress";
 import { useToast } from "@/components/ui/Toaster";
 import { usePublishTargets } from "./publishShared";
-import { ebayBlockers } from "./blockers";
+import { blockersFor, marketNames } from "./blockers";
 import { duplicateSuspects } from "./duplicateSuspects";
 import { DraftsStrip } from "./DraftsStrip";
 import { AiNotesStep } from "./AiNotesStep";
@@ -125,11 +125,11 @@ function LostItemCard({ item, onDismiss, dismissing }) {
 const RESTART_GRACE_MS = 4 * 60 * 1000;
 
 export function BulkQueue({ jobId, onExit, onSettled }) {
-  const { openListing, loadListings, listingsState } = useApp();
+  const { openListing, loadListings, listingsState, etsyOptions } = useApp();
   const { toast } = useToast();
 
   // Which marketplaces a publish from this screen would go to — read only to
-  // judge what eBay would refuse in the "can't reach eBay yet" count below.
+  // judge what they would refuse in the "can't reach … yet" count below.
   // The chips that CHANGE it live in the drafts grid's header, where the
   // publish buttons are (see publishShared, DraftsStrip).
   const { effectiveTargets } = usePublishTargets();
@@ -196,7 +196,12 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setUnwatched(false);
     let timer;
+    // A poll is out. Coming back to the tab fires visibilitychange AND focus,
+    // and a second poll started while the first was out scheduled a next
+    // poll of its own -- one more loop, for good, on every return.
+    let polling = false;
     const poll = async () => {
+      polling = true;
       try {
         const j = await api(`/api/bulk/status/${jobId}`);
         if (stopped.current) return;
@@ -278,6 +283,8 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
           toast("Lost the connection while watching this batch — it may still be finishing. Reopen the Sell tab to check, and see Drafts for completed items.",
             { kind: "warning" });
         }
+      } finally {
+        polling = false;
       }
     };
     poll();
@@ -286,7 +293,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
     // background tab looks stuck until a manual refresh. Poll immediately
     // whenever the tab comes back to the foreground.
     const onVisible = () => {
-      if (document.visibilityState !== "visible" || stopped.current) return;
+      if (document.visibilityState !== "visible" || stopped.current || polling) return;
       clearTimeout(timer);
       fails.current = 0;
       failingSince.current = 0;
@@ -482,8 +489,13 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
   // listing at all (a draft that did not survive a restart), and this one
   // runs in the SCREEN's render, not a card's — so a throw here takes the
   // whole batch down rather than one card.
+  //
+  // The same question each card below asks (DraftsStrip's blockersFor, with
+  // Etsy's rules when Etsy is a target), so the count cannot disagree with
+  // the cards it is counting.
+  const etsySettings = etsyOptions && !etsyOptions.error ? etsyOptions : null;
   const blocked = drafts.filter(
-    (it) => ebayBlockers(it.listing || {}, { targets: effectiveTargets }).length > 0);
+    (it) => blockersFor(it.listing || {}, effectiveTargets, { etsySettings }).length > 0);
   // Memoized: this screen re-renders on every status poll and on every
   // listings refresh, and the pairwise scan is quadratic in the size of the
   // batch. Keyed on everything the scan reads — ids, titles, and the brand
@@ -663,7 +675,7 @@ export function BulkQueue({ jobId, onExit, onSettled }) {
                 says how many are affected, so it can't contradict them. */}
             <span title="Each blocked card lists the fields eBay is refusing it over. Category, format and shipping are on the card itself; the rest are one tap away in Review & List.">
               <strong>{blocked.length}</strong> of {drafts.length} draft{drafts.length === 1 ? "" : "s"}{" "}
-              can&apos;t reach eBay yet — each one is marked{" "}
+              can&apos;t reach {marketNames(effectiveTargets)} yet — each one is marked{" "}
               <strong className="text-warning">Blocked</strong> below, with the fields that are holding it.
             </span>
           </p>

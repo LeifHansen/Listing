@@ -103,3 +103,27 @@ def test_the_settle_pass_picks_it_up_with_the_photo_batches(resume, monkeypatch)
     main._settle_interrupted_jobs([dict(MIRROR)])
     _finish(main)
     assert sent == ["c", "d"]
+
+
+def test_the_rest_are_sent_with_what_the_seller_reviewed(resume, monkeypatch):
+    """The wizard's per-listing Etsy fields -- category, who made it, when --
+    ride the queue. The mirror used to keep only the ids, so a resumed run
+    sent "c" and "d" with none of them: refused, or filed in the wrong
+    category."""
+    main, _sent = resume
+    written: dict = {}
+
+    def mutate(rid, fn, **kw):
+        written[rid] = fn({})
+        return written[rid]
+    monkeypatch.setattr(main.db, "mutate_listing_data", mutate)
+    reviewed = {"taxonomy_id": 1234, "who_made": "someone_else",
+                "when_made": "1990_1999"}
+    mirror = {**MIRROR, "_queue": [{"id": i, "etsy": reviewed, "title_override": ""}
+                                   for i in ("a", "b", "c", "d")]}
+
+    assert main._resume_interrupted_crossposts([mirror]) == {"job-1"}
+    _finish(main)
+
+    assert set(written) == {"c", "d"}
+    assert all(written[r]["etsy"]["taxonomy_id"] == 1234 for r in written)

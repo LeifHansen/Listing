@@ -197,3 +197,26 @@ def test_release_unowned_is_opt_in_and_needs_an_ebay_identity(dbmod):
     # ...and never relabels a record stamped as the CONNECTED account's own.
     assert not _releasable({"ebay_account": "alice", "ebay_listing_id": "1"},
                            "alice", include_unowned=True)
+
+
+def test_a_renamed_seller_is_not_their_own_foreigner(dbmod):
+    """eBay handles can be renamed; the account id cannot. A sold record still
+    carries the OLD name (eBay no longer lists it, so no import renames it),
+    and counting it as another account's put it under "release" -- which
+    unlinks the seller's own sold archive."""
+    for rid, name, acct_id in (("old-name", "alice_old", "EBAY-1"),
+                               ("other", "bob", "EBAY-2"),
+                               ("legacy", "carol", "")):
+        assert dbmod.upsert_listing(rid, {"ebay_account": name,
+                                          "ebay_account_id": acct_id,
+                                          "ebay_listing_id": f"9{rid}"},
+                                    status="sold", user_id="u1")
+
+    # Connected as the renamed alice: only bob's and the unidentified legacy
+    # record are another account's.
+    assert dbmod.count_foreign_listings("u1", "alice_new", "EBAY-1") == 2
+    got = {r["id"] for r in dbmod.list_releasable_listings(
+        "u1", "alice_new", account_id="EBAY-1")}
+    assert got == {"other", "legacy"}
+    # Without an id the old name-only rule still applies.
+    assert dbmod.count_foreign_listings("u1", "alice_new") == 3

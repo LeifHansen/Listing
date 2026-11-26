@@ -38,7 +38,12 @@ def new_session_id() -> str:
 # can never start with "-" or "_" and be mistaken for a flag or a hidden file;
 # the rest also allows "-" and "_" because imported listings are minted as
 # "ebay-<item id>" (services/listing_sync.py) and job mirrors use "_".
-_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+# At most 64 characters: the id is the key of listings, media_purges and
+# cutout_photos, all VARCHAR(64). The bound was 128, so a 65-128 character id
+# passed here and then failed every insert on Postgres (SQLite ignores the
+# length, which is why no test saw it). Every id this app mints is far under
+# it: a 32-character uuid hex, or "ebay-" plus an item id of at most 19 digits.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def safe_session_name(session_id: str) -> str:
