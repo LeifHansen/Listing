@@ -11,6 +11,7 @@ import base64
 import errno
 import functools
 import hashlib
+import html as html_lib
 import json
 import logging
 import math
@@ -537,8 +538,6 @@ async def _cache_headers(request: Request, call_next):
         # Revalidation costs a 304 with no body (see the media route, which
         # answers them); not revalidating cost the seller their edit.
         response.headers.setdefault("Cache-Control", "no-cache")
-    elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
-        response.headers["Cache-Control"] = "no-cache"
     elif path.startswith("/api/"):
         # API responses had NO cache directive at all, leaving heuristic
         # caching to browsers and any intermediary. These answers are
@@ -546,7 +545,14 @@ async def _cache_headers(request: Request, call_next):
         # listings are -- and a stale copy of one is how a seller ends up
         # debugging an account switch against yesterday's answer. no-store,
         # not no-cache: there is nothing here worth revalidating.
+        #
+        # Ahead of the HTML rule below, which is index.html's: the few pages
+        # an /api/ route serves (the connect confirmation, the native return
+        # page) carry a credential in their URL and are one-shot, so they
+        # must not be kept either.
         response.headers.setdefault("Cache-Control", "no-store")
+    elif ctype.startswith(("text/html", "text/css")) or "javascript" in ctype:
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -2371,10 +2377,117 @@ def connect_ticket(request: Request) -> dict:
     return {"ticket": auth.make_ticket(uid, "connect")}
 
 
-def _connect_uid(request: Request, ticket: str) -> Optional[str]:
-    """Who is starting this connect flow: the session (web) or a ticket
-    (native shell's full-page navigation)."""
-    return deps.uid(request) or (auth.verify_ticket(ticket, "connect") if ticket else None)
+# --- the confirmation a ticket-started connect stops at ----------------------
+#
+# A ticket names the account that MINTED it, and anyone signed in can mint
+# one. So a link carrying an attacker's ticket, opened in a browser that is
+# not signed in here, used to go straight to eBay's consent screen -- and if
+# the person holding it approved, their eBay store was attached to the
+# ATTACKER's Thryft account, who could then list, revise and end items on it.
+# The nonce cookie the callback checks does not help: it is set in the
+# victim's browser, so it matches. A session never reaches this page (it can
+# only name its own account), and the native shell, the second-hostname hop
+# and that attack all arrive with a ticket alone, so it is the ticket path
+# that stops here and says WHICH account the store is about to join.
+#
+# The page's "Continue" link carries a 10-minute confirm token whose purpose
+# embeds a random nonce, and the page sets that nonce in a SameSite=Strict
+# cookie. Anyone can mint a confirm token for their own account, but the
+# link only works from a browser holding the matching cookie, and a Strict
+# cookie is never sent on a navigation another site starts -- so the page
+# cannot be skipped by linking past it.
+CONNECT_CONFIRM_COOKIE = "thryft_connect_confirm"
+CONNECT_CONFIRM_TTL = 600
+
+
+def _connect_identity(request: Request, ticket: str,
+                      confirm: str) -> tuple[Optional[str], str]:
+    """(uid, how) for a connect request; `how` is "session", "ticket",
+    "confirmed", or "" when nobody could be identified."""
+    uid = deps.uid(request)
+    if uid:
+        return uid, "session"
+    if confirm:
+        nonce = request.cookies.get(CONNECT_CONFIRM_COOKIE, "")
+        if not nonce:
+            return None, "confirmed"
+        return auth.verify_ticket(confirm, f"connect-confirm:{nonce}"), "confirmed"
+    if ticket:
+        return auth.verify_ticket(ticket, "connect"), "ticket"
+    return None, ""
+
+
+def _masked_email(email: str) -> str:
+    """Enough of an address for its owner to recognise, and for someone else
+    to see it is not theirs, without handing the whole thing to whoever holds
+    the link."""
+    local, _, domain = (email or "").strip().partition("@")
+    if not local or not domain:
+        return ""
+    shown = local[:2] if len(local) > 3 else local[:1]
+    return f"{shown}•••@{domain}"
+
+
+def _connect_page(title: str, body: str, actions: str,
+                  status: int = 200) -> HTMLResponse:
+    """A bare page in the flow's own browser tab. No script: the app-wide CSP
+    and frame headers apply as they are, so it cannot be framed and clicked
+    through from another site."""
+    resp = HTMLResponse(f"""<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_lib.escape(title)} · Thryft Shop</title></head>
+<body style="font-family:-apple-system,system-ui,sans-serif;margin:0;padding:24px;display:grid;place-items:center;min-height:85vh;background:#f8fafc;color:#0f172a">
+<main style="max-width:420px;background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:24px">
+<h1 style="font-size:20px;margin:0 0 12px">{html_lib.escape(title)}</h1>
+{body}
+<p style="margin:20px 0 0;display:flex;gap:12px;flex-wrap:wrap">{actions}</p>
+</main></body></html>""", status_code=status)
+    # The URL carries a credential; never let a cache or a back button keep it.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _confirm_connect_page(request: Request, uid: str, label: str, path: str,
+                          native: str, return_to: str) -> HTMLResponse:
+    """Ask before a ticket-started flow goes on to the marketplace, naming the
+    Thryft account the marketplace account is about to be attached to."""
+    who = _masked_email((db.get_user_by_id(uid) or {}).get("email") or "")
+    nonce = secrets.token_urlsafe(24)
+    params = {"confirm": auth.make_ticket(uid, f"connect-confirm:{nonce}",
+                                          ttl_seconds=CONNECT_CONFIRM_TTL)}
+    if _truthy(native):
+        params["native"] = "1"
+    origin = (return_to or "").strip().rstrip("/")
+    if origin and config.oauth_return_ok(origin):
+        params["return_to"] = origin
+    go = html_lib.escape(f"{path}?{urlencode(params)}")
+    back = html_lib.escape(f"{config.NATIVE_APP_ORIGIN}/" if _truthy(native) else "/")
+    name = html_lib.escape(label)
+    account = (f"<strong>{html_lib.escape(who)}</strong>" if who
+               else "<strong>the Thryft Shop account that sent you here</strong>")
+    button = ("display:inline-block;padding:12px 20px;border-radius:10px;"
+              "text-decoration:none;font-weight:600")
+    resp = _connect_page(
+        f"Connect {label} to this account?",
+        f"""<p style="margin:0 0 12px;line-height:1.5">You're about to connect your {name} account to the Thryft Shop account {account}. Whoever uses that Thryft Shop account will be able to list, change and end items on the {name} account you approve.</p>
+<p style="margin:0;line-height:1.5">If that isn't your account, stop here and close this page. Someone may have sent you this link to take over your {name} listings.</p>""",
+        f'<a href="{go}" style="{button};background:#2563eb;color:#fff">Continue to {name}</a>'
+        f'<a href="{back}" style="{button};color:#334155;border:1px solid #cbd5e1">Cancel</a>')
+    resp.set_cookie(CONNECT_CONFIRM_COOKIE, nonce, max_age=CONNECT_CONFIRM_TTL,
+                    httponly=True, samesite="strict",
+                    secure=request.url.scheme == "https")
+    return resp
+
+
+def _connect_confirm_refused(label: str, native: str) -> HTMLResponse:
+    """A confirm link that did not come from this browser's own confirmation
+    page, or came from it too long ago. Never a reason to go on to eBay."""
+    back = html_lib.escape(f"{config.NATIVE_APP_ORIGIN}/" if _truthy(native) else "/")
+    return _connect_page(
+        "This link can't be used",
+        f'<p style="margin:0;line-height:1.5">It has expired, or it was opened from somewhere other than the page that asked you to confirm. Go back to Thryft Shop and press Connect {html_lib.escape(label)} again.</p>',
+        f'<a href="{back}" style="display:inline-block;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:600;background:#2563eb;color:#fff">Back to Thryft Shop</a>',
+        status=403)
 
 
 def _set_flow_cookie(resp, request: Request, name: str, value: str) -> None:
@@ -2485,10 +2598,12 @@ def _finish_connect(request: Request, path: str):
 
 @app.get("/api/ebay/connect")
 def ebay_connect(request: Request, ticket: str = "", native: str = "",
-                 return_to: str = ""):
+                 return_to: str = "", confirm: str = ""):
     if not config.ebay_oauth_ready():
         raise HTTPException(400, "eBay OAuth not configured (EBAY_CLIENT_ID/SECRET/RUNAME).")
-    uid = _connect_uid(request, ticket)
+    uid, how = _connect_identity(request, ticket, confirm)
+    if how == "confirmed" and not uid:
+        return _connect_confirm_refused("eBay", native)
     if not uid:
         raise HTTPException(401, "Log in before connecting eBay.")
     # eBay resolves EBAY_RUNAME to ONE accepted URL, so the callback lands on
@@ -2496,6 +2611,12 @@ def ebay_connect(request: Request, ticket: str = "", native: str = "",
     offsite = _offsite_connect(request, uid, "/api/ebay/connect", native)
     if offsite is not None:
         return offsite
+    # A ticket alone names whoever minted it, so ask before eBay is shown
+    # (see CONNECT_CONFIRM_COOKIE). After the hop above, so the page and its
+    # cookie are on the origin the rest of the flow runs on.
+    if how == "ticket":
+        return _confirm_connect_page(request, uid, "eBay", "/api/ebay/connect",
+                                     native, return_to)
     nonce = secrets.token_urlsafe(24)
     resp = RedirectResponse(ebay_auth.authorize_url(state=auth.make_state(uid, nonce)))
     # Bind the flow to this browser: the callback requires this cookie to match
@@ -15296,12 +15417,14 @@ def _marketplace_or_404(marketplace: str):
 @app.get("/api/{marketplace}/connect")
 def marketplace_connect(marketplace: str, request: Request,
                         ticket: str = "", native: str = "",
-                        return_to: str = ""):
+                        return_to: str = "", confirm: str = ""):
     provider = _marketplace_or_404(marketplace)
     if not provider.oauth_ready():
         raise HTTPException(400, f"{provider.label} OAuth not configured "
                                  f"(set {', '.join(provider.oauth_missing())}).")
-    uid = _connect_uid(request, ticket)
+    uid, how = _connect_identity(request, ticket, confirm)
+    if how == "confirmed" and not uid:
+        return _connect_confirm_refused(provider.label, native)
     if not uid:
         raise HTTPException(401, f"Log in before connecting {provider.label}.")
     # Refuse before the redirect, not after: a marketplace that only lets
@@ -15321,6 +15444,11 @@ def marketplace_connect(marketplace: str, request: Request,
     offsite = _offsite_connect(request, uid, f"/api/{marketplace}/connect", native)
     if offsite is not None:
         return offsite
+    # The same stop as eBay's: a ticket alone asks first.
+    if how == "ticket":
+        return _confirm_connect_page(request, uid, provider.label,
+                                     f"/api/{marketplace}/connect", native,
+                                     return_to)
     nonce = secrets.token_urlsafe(24)
     url, flow = provider.authorize_url(auth.make_state(uid, nonce))
     resp = RedirectResponse(url)
